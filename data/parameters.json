@@ -1,0 +1,45 @@
+{
+    "general":{
+        "timestep": 5,
+        "simulation_duration": 24,
+        "state_normalization": {
+            "Pmax": 10
+
+        }
+    },
+    "Grid":{
+        "Pmax_import": 10,
+        "Pmax_export": 10,
+        "net_penalty": 15,
+        "cost_type": "time_of_use",
+        "tou": {
+            "00:00-06:00": 0.10,
+            "06:00-12:00": 0.20,
+            "12:00-18:00": 0.30,
+            "18:00-24:00": 0.25
+        },
+        "flat_rate": 0.5
+
+    },
+    "BESS":{
+        "Pmax": 5,
+        "Emax": 5,
+        "DoD": 0.8,
+        "η": 0.950,
+        "β": 0.999
+    },
+    "PV":{
+        "Pmax": 5
+    },
+    "Load":{
+        "Pmax": 10
+    },
+    "EV":{
+        "Pmax_c": 3,
+        "Pmax_d": 3,
+        "Emax": 15,
+        "DoD": 0.9,
+        "η": 0.920,
+        "β": 0.998
+    }
+}
