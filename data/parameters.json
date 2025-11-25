@@ -2,8 +2,17 @@
     "general":{
         "timestep": 5,
         "simulation_duration": 24,
+        "simulation_days": 1,
+        "Pnorm": 10,
         "state_normalization": {
-            "Pmax": 10
+            "Pmax": 10,
+            "drybulb_C": {"min": -14.0, "max": 42.2},
+            "relhum_percent": {"min": 38.0, "max": 101.0},
+            "Global Horizontal Radiation": {"min": 0.0, "max": 911.2},
+            "dni_Wm2": {"min": 0.0, "max": 869.5},
+            "dhi_Wm2": {"min": 0.0, "max": 461.6},
+            "Wind Speed (m/s)": {"min": 0.0, "max": 20.0},
+            "tariff_base": 1.0
 
         }
     },
@@ -11,22 +20,17 @@
         "Pmax_import": 10,
         "Pmax_export": 10,
         "net_penalty": 15,
-        "cost_type": "time_of_use",
-        "tou": {
-            "00:00-06:00": 0.10,
-            "06:00-12:00": 0.20,
-            "12:00-18:00": 0.30,
-            "18:00-24:00": 0.25
-        },
-        "flat_rate": 0.5
-
-    },
+        "tariff_column": "tar_tou"
+ },
     "BESS":{
         "Pmax": 5,
         "Emax": 5,
         "DoD": 0.8,
         "η": 0.950,
-        "β": 0.999
+        "β": 0.999,
+        "soc_min": 0.1,
+        "soc_max": 0.9,
+        "capex": 120
     },
     "PV":{
         "Pmax": 5
@@ -40,6 +44,14 @@
         "Emax": 15,
         "DoD": 0.9,
         "η": 0.920,
-        "β": 0.998
+        "β": 0.998,
+        "soc_min": 0.1,
+        "soc_max": 1.0,
+        "soc_init": 0.5,
+        "soh_init": 1.0,
+        "column": "ev_status",
+        "capex": 80,
+        "penalty_coef": 0.0,
+        "penalty_departure": 200
     }
 }
