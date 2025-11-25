@@ -1,4 +1,14 @@
 {
+    "_units": {
+        "description": "All costs and penalties are based on energy (kWh)",
+        "timestep": "minutes",
+        "simulation_duration": "hours",
+        "Pmax": "kW (power)",
+        "Emax": "kWh (energy capacity)",
+        "net_penalty": "€/kWh (energy-based penalty)",
+        "tou": "€/kWh (time-of-use energy tariff)",
+        "flat_rate": "€/kWh (flat energy tariff)"
+    },
     "general":{
         "timestep": 5,
         "simulation_duration": 24,

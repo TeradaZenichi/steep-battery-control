@@ -14,11 +14,11 @@ Input:
 Output:
     - CSV with ';' separator, containing:
         * timestamp
-        * tar_s   : solar-based dynamic tariff
-        * tar_w   : wind-based dynamic tariff
-        * tar_sw  : combined solar+wind dynamic tariff
-        * tar_flat: flat tariff
-        * tar_tou : time-of-use tariff
+        * tar_s   : solar-based dynamic tariff [€/kWh]
+        * tar_w   : wind-based dynamic tariff [€/kWh]
+        * tar_sw  : combined solar+wind dynamic tariff [€/kWh]
+        * tar_flat: flat tariff [€/kWh]
+        * tar_tou : time-of-use tariff [€/kWh]
 
 File paths (input / output) are read from parameters.json:
     {
@@ -28,6 +28,9 @@ File paths (input / output) are read from parameters.json:
     }
 
 All tariff parameters (base_price, dependencies, ndays) are hardcoded below.
+
+Note: All costs and tariffs in this module are expressed in €/kWh (energy basis).
+      When computing total costs, multiply tariff by energy consumed in kWh.
 """
 
 import pandas as pd
@@ -45,12 +48,12 @@ filepath  =   "data/Simulation_CY_Cur_HP__PV5000-HB5000_EV.csv"
 fileoutput   =  "data/Simulation_CY_Cur_HP__PV5000-HB5000_tariffs.csv"
 
 # ============================================================
-# Fixed tariff parameters
+# Fixed tariff parameters (all prices in €/kWh - energy basis)
 # ============================================================
 
-base_price = 1.0
-min_price  = -1e6
-max_price  = 1e6
+base_price = 1.0   # Base tariff [€/kWh]
+min_price  = -1e6  # Minimum tariff [€/kWh]
+max_price  = 1e6   # Maximum tariff [€/kWh]
 
 # Sensitivities to normalized variations
 αs  = 0.074   # solar energy dependency
@@ -158,16 +161,19 @@ def add_tariff_columns(data: pd.DataFrame) -> pd.DataFrame:
     Tariffs are clipped between min_price and max_price.
     Also add flat and TOU tariffs.
 
+    All tariffs are expressed in €/kWh (energy basis).
+    To compute total cost, multiply tariff by energy consumed in kWh.
+
     Columns created:
-        - tar_s    : solar-based dynamic tariff
-        - tar_w    : wind-based dynamic tariff
-        - tar_sw   : combined solar+wind dynamic tariff
-        - tar_flat : flat tariff
-        - tar_tou  : time-of-use tariff
+        - tar_s    : solar-based dynamic tariff [€/kWh]
+        - tar_w    : wind-based dynamic tariff [€/kWh]
+        - tar_sw   : combined solar+wind dynamic tariff [€/kWh]
+        - tar_flat : flat tariff [€/kWh]
+        - tar_tou  : time-of-use tariff [€/kWh]
     """
     df = data.copy()
 
-    # Dynamic tariffs (solar, wind, combined)
+    # Dynamic tariffs (solar, wind, combined) [€/kWh]
     df['tar_s'] = (
         base_price - αs * df['Normalized Variation % Radiation']
     ).clip(min_price, max_price)
@@ -182,10 +188,10 @@ def add_tariff_columns(data: pd.DataFrame) -> pd.DataFrame:
         - αwd * df['Normalized Variation % Wind']
     ).clip(min_price, max_price)
 
-    # Flat tariff (constant)
+    # Flat tariff (constant) [€/kWh]
     df['tar_flat'] = base_price
 
-    # Time-of-use tariff (simple example based on hour of day)
+    # Time-of-use tariff (simple example based on hour of day) [€/kWh]
     hours = df['timestamp'].dt.hour
 
     # Start with off-peak
