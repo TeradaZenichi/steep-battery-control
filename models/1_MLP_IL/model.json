@@ -1,0 +1,15 @@
+{
+	"input_dim": 26,
+	"output_dim": 3,
+	"hidden_sizes": [128, 256, 128, 64],
+	"dropout": 0.1,
+	"activation": "gelu",
+	"learning_rate": 0.001,
+	"weight_decay": 0.0001,
+	"batch_size": 256,
+	"epochs": 1000,
+	"seed": 42,
+	"val_split": 0.2,
+	"patience": 100,
+	"improvement_tol": 1e-5
+}

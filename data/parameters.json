@@ -17,11 +17,11 @@
         }
     },
     "Grid":{
-        "Pmax_import": 10,
-        "Pmax_export": 10,
+        "Pmax_import": 5,
+        "Pmax_export": 0,
         "net_penalty": 15,
         "tariff_column": "tar_tou"
- },
+    },
     "BESS":{
         "Pmax": 5,
         "Emax": 5,
@@ -39,9 +39,9 @@
         "Pmax": 10
     },
     "EV":{
-        "Pmax_c": 3,
-        "Pmax_d": 3,
-        "Emax": 15,
+        "Pmax_c": 20,
+        "Pmax_d": 10,
+        "Emax": 30,
         "DoD": 0.9,
         "η": 0.920,
         "β": 0.998,
