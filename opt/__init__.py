@@ -49,6 +49,10 @@ class BESS:
         self.soc_min = config.get('soc_min', 0.1)
         self.soc_max = config.get('soc_max', 0.9)
         self.capex = config.get('capex', 100.0)
+        self.ncycles = max(1.0, float(config.get('ncycles', 1.0)))
+        self.ramp_penalty = float(config.get('ramp_penalty', 0.0))
+        usable_energy = max(self.Emax * self.DoD, 1e-6)
+        self.cost_per_kwh = self.capex / (self.ncycles * usable_energy)
         pass
 
 
@@ -59,9 +63,14 @@ class EV:
         self.Emax    = config.get('Emax', 50.0)
         self.η       = config.get('η', 0.9)
         self.β       = config.get('β', 0.999)
+        self.DoD     = config.get('DoD', 0.8)
         self.soc_min = config.get('soc_min', 0.0)
         self.soc_max = config.get('soc_max', 1.0)
         self.capex   = config.get('capex', 0.0)
+        self.ncycles = max(1.0, float(config.get('ncycles', 1.0)))
+        self.ramp_penalty = float(config.get('ramp_penalty', 0.0))
+        usable_energy = max(self.Emax * self.DoD, 1e-6)
+        self.cost_per_kwh = self.capex / (self.ncycles * usable_energy)
         profile = dataframe.get('ev_status', pd.Series(dtype=float))
         index = pd.to_datetime(dataframe['timestamp'], format="%d/%m/%Y %H:%M", dayfirst=True)
         self.profile = profile.set_axis(index, copy=False)
@@ -174,6 +183,7 @@ class Teacher:
         self.model = pyo.ConcreteModel()
         self._bess_retention = max(min(self.bess.β, 1.0), 0.0)
         start_energy = start_soc * self.bess.Emax
+        self._prev_time = {ts: (self.Ωt[idx - 1] if idx > 0 else None) for idx, ts in enumerate(self.Ωt)}
         
         self.model.Pgrid    = pyo.Var(self.Ωt, bounds=(-self.grid.Pmax_export, self.grid.Pmax_import))
         self.model.PBESS    = pyo.Var(self.Ωt, bounds=(-self.bess.Pmax, self.bess.Pmax))
@@ -194,14 +204,35 @@ class Teacher:
         self.model.γev_d = pyo.Var(self.Ωt, pyo.Binary)
 
         self.model.Eev = pyo.Var(self.Ωt, bounds=(0, self.ev.Emax))
+        self.model.RampBESS = pyo.Var(self.Ωt, domain=pyo.NonNegativeReals)
+        self.model.RampEV = pyo.Var(self.Ωt, domain=pyo.NonNegativeReals)
 
         # objective function
         def objective_rule(m):
             energy_cost         = sum(m.Pgrid[t] * self.grid.tariff[t] * self.Δt for t in self.Ωt)
             curtailment_cost    = sum(self.pv.profile[t] * m.χPV[t] * self.curtailment_penalty * self.Δt for t in self.Ωt)
-            # bess_degradation    = sum((1 - self.bess.β) * m.EBESS[t] * self.bess.capex for t in self.Ωt)
-            # ev_degradation      = sum((1 - self.ev.β) * m.Eev[t] * self.ev.capex for t in self.Ωt)
-            return energy_cost + curtailment_cost #+ bess_degradation + ev_degradation
+            eta_bess = max(self.bess.η, 1e-6)
+            eta_ev = max(self.ev.η, 1e-6)
+            bess_throughput = sum(
+                (m.PBESS_c[t] * eta_bess + m.PBESS_d[t] / eta_bess) * self.Δt
+                for t in self.Ωt
+            )
+            ev_throughput = sum(
+                (m.Pev_c[t] * eta_ev + m.Pev_d[t] / eta_ev) * self.Δt
+                for t in self.Ωt
+            )
+            bess_degradation = self.bess.cost_per_kwh * bess_throughput
+            ev_degradation = self.ev.cost_per_kwh * ev_throughput
+            bess_ramp_cost = self.bess.ramp_penalty * sum(m.RampBESS[t] for t in self.Ωt)
+            ev_ramp_cost = self.ev.ramp_penalty * sum(m.RampEV[t] for t in self.Ωt)
+            return (
+                energy_cost
+                + curtailment_cost
+                + bess_degradation
+                + ev_degradation
+                + bess_ramp_cost
+                + ev_ramp_cost
+            )
         self.model.objective = pyo.Objective(rule=objective_rule, sense=pyo.minimize)
 
 
@@ -240,6 +271,18 @@ class Teacher:
         def bess_binary_rule(m, t):
             return m.γBESS_c[t] + m.γBESS_d[t] <= 1
         self.model.bess_binary_constr = pyo.Constraint(self.Ωt, rule=bess_binary_rule)
+
+        def bess_ramp_pos_rule(m, t):
+            prev = self._prev_time[t]
+            prev_power = 0.0 if prev is None else m.PBESS[prev]
+            return m.PBESS[t] - prev_power <= m.RampBESS[t]
+        self.model.bess_ramp_pos_constr = pyo.Constraint(self.Ωt, rule=bess_ramp_pos_rule)
+
+        def bess_ramp_neg_rule(m, t):
+            prev = self._prev_time[t]
+            prev_power = 0.0 if prev is None else m.PBESS[prev]
+            return -(m.PBESS[t] - prev_power) <= m.RampBESS[t]
+        self.model.bess_ramp_neg_constr = pyo.Constraint(self.Ωt, rule=bess_ramp_neg_rule)
 
 
         #### EV constraints
@@ -283,6 +326,18 @@ class Teacher:
                     return pyo.Constraint.Skip
                 return m.Eev[t] == m.Eev[t_prev] + self.Δt * (m.Pev_c[t] * self.ev.η - m.Pev_d[t] / self.ev.η)
         self.model.ev_energy_constr = pyo.Constraint(self.Ωt, rule=ev_energy_rule)
+
+        def ev_ramp_pos_rule(m, t):
+            prev = self._prev_time[t]
+            prev_power = 0.0 if prev is None else m.Pev[prev]
+            return m.Pev[t] - prev_power <= m.RampEV[t]
+        self.model.ev_ramp_pos_constr = pyo.Constraint(self.Ωt, rule=ev_ramp_pos_rule)
+
+        def ev_ramp_neg_rule(m, t):
+            prev = self._prev_time[t]
+            prev_power = 0.0 if prev is None else m.Pev[prev]
+            return -(m.Pev[t] - prev_power) <= m.RampEV[t]
+        self.model.ev_ramp_neg_constr = pyo.Constraint(self.Ωt, rule=ev_ramp_neg_rule)
 
         
         return
@@ -483,3 +538,17 @@ class Teacher:
                 'Load': float(results.loc[ts, 'Load']),
             })
         return self._get_history_with_padding(records, last_n)
+
+    def get_full_states(self) -> tuple[np.ndarray, list[str]]:
+        snapshots = self._compute_state_snapshots()
+        states = [snap["raw_state"] for snap in snapshots]
+        return np.vstack(states), list(self._feature_names)
+
+    def apply_state_mask(self, mask_spec=None) -> tuple[np.ndarray, list[str]]:
+        states, labels = self.get_full_states()
+        mask = self._resolve_mask(mask_spec)
+        if mask is None:
+            return states, labels
+        masked = states[:, mask]
+        masked_labels = [name for name, keep in zip(labels, mask) if keep]
+        return masked, masked_labels

@@ -18,7 +18,7 @@
     },
     "Grid":{
         "Pmax_import": 5,
-        "Pmax_export": 0,
+        "Pmax_export": 1,
         "net_penalty": 15,
         "tariff_column": "tar_tou"
     },
@@ -30,7 +30,9 @@
         "β": 0.999,
         "soc_min": 0.1,
         "soc_max": 0.9,
-        "capex": 120
+        "capex": 9000,
+        "ncycles": 8000,
+        "ramp_penalty": 0.05
     },
     "PV":{
         "Pmax": 5
@@ -50,8 +52,10 @@
         "soc_init": 0.5,
         "soh_init": 1.0,
         "column": "ev_status",
-        "capex": 80,
+        "capex": 5000,
+        "ncycles": 10000,
+        "ramp_penalty": 0.05,
         "penalty_coef": 0.0,
-        "penalty_departure": 200
+        "penalty_departure": 5.0
     }
 }

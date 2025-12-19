@@ -1,7 +1,11 @@
 from typing import Callable, Tuple
 from pathlib import Path
 import json
+import re
+import shutil
 import sys
+from datetime import datetime, timedelta
+import calendar
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -9,11 +13,8 @@ import pandas as pd
 import torch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-if str(PROJECT_ROOT) not in sys.path:
-	sys.path.insert(0, str(PROJECT_ROOT))
-
-if str(Path(__file__).resolve().parent) not in sys.path:
-	sys.path.append(str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(PROJECT_ROOT))
+sys.path.append(str(Path(__file__).resolve().parent))
 
 from env.environment import SmartHomeEnv
 from hp import HyperParameters  
@@ -23,53 +24,175 @@ from opt import Teacher
 
 
 # Evaluation configuration
+
+# 
+
+
+DATASETS = ["WY", "CY"]
+START_DATES = [
+	"01/03/2000 00:00",
+	"01/06/2000 00:00",
+	"01/09/2000 00:00",
+	"01/12/2000 00:00",
+]
 CONFIG_PATH = Path("data/parameters.json")
-DATA_PATH = Path("data/Simulation_CY_Fut_HP__PV5000-HB5000.csv")
-START_DATE = "08/01/2000 00:00"
-DAYS = 5
+DAYS = 10
 SOLVER_NAME = "gurobi"
 MODEL_JSON = Path(__file__).with_name("model.json")
-CHECKPOINT_PATH = Path("Results/1_MLP_IL/best.pt")
-EXPORT_DIR = CHECKPOINT_PATH.parent
+RESULTS_BASE = Path("Results")
+MODEL_SUBDIR = "1_MLP_IL"
+TARIFF_OVERRIDE: str | None = None
+SUMMARY_NAME = "evaluation_summary.json"
+SUMMARY_TEXT_NAME = "evaluation_summary_lines.json"
 
 
-def load_config_and_data() -> Tuple[dict, pd.DataFrame]:
+def _load_tariff_label(config_path: Path, override: str | None) -> str:
+	label = override
+	if label is None:
+		with open(config_path, "r", encoding="utf-8") as fp:
+			config = json.load(fp)
+		label = config["Grid"]["tariff_column"]
+	text = str(label).strip()
+	cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", text)
+	return cleaned or "default_tariff"
+
+
+def _snapshot_config(target_dir: Path) -> None:
+	shutil.copy2(CONFIG_PATH, target_dir / "parameters.json")
+
+
+TARIFF_LABEL = _load_tariff_label(CONFIG_PATH, TARIFF_OVERRIDE)
+RESULTS_DIR = (RESULTS_BASE / TARIFF_LABEL / MODEL_SUBDIR)
+RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+CHECKPOINT_PATH = RESULTS_DIR / "best.pt"
+EXPORT_DIR = RESULTS_DIR
+
+
+def _export_dir_for(run_label: str) -> Path:
+	# place all outputs under a single dataset-month folder, e.g. "WY-jan-mar"
+	return RESULTS_DIR / run_label
+
+
+def _month_range_label(start_date_str: str, days: int) -> str:
+	try:
+		start = datetime.strptime(start_date_str, "%d/%m/%Y %H:%M")
+	except Exception:
+		start = datetime.strptime(start_date_str, "%d/%m/%Y")
+	end = start + timedelta(days=max(0, days - 1))
+	s = calendar.month_abbr[start.month].lower()
+	e = calendar.month_abbr[end.month].lower()
+	return f"{s}-{e}"
+
+
+
+REWARD_COMPONENT_KEYS = [
+	"bess_degradation",
+	"bess_penalty",
+	"ev_degradation",
+	"ev_penalty",
+	"grid_cost",
+	"grid_revenue",
+	"grid_penalty",
+]
+DELTA_ATTR_NAME = "\u0394t"
+
+
+def zero_reward_components() -> dict:
+	return {key: 0.0 for key in REWARD_COMPONENT_KEYS}
+
+
+def get_sim_delta_t(sim) -> float:
+	unicode_dt = getattr(sim, DELTA_ATTR_NAME, None)
+	if unicode_dt is not None:
+		return float(unicode_dt)
+	timestep_minutes = float(getattr(sim, "timestep", 60.0))
+	return timestep_minutes / 60.0
+
+
+def extract_reward_components(env: SmartHomeEnv) -> dict:
+	delta_t = get_sim_delta_t(env.sim)
+	return {
+		"bess_degradation": -float(env.bess._costdeg) * delta_t,
+		"bess_penalty": -float(env.bess._penalty) * delta_t,
+		"ev_degradation": -float(env.ev._costdeg) * delta_t,
+		"ev_penalty": -float(env.ev._penalty) * delta_t,
+		"grid_cost": -float(env.grid._cost) * delta_t,
+		"grid_revenue": float(env.grid._revenue) * delta_t,
+		"grid_penalty": -float(env.grid._penalty) * delta_t,
+	}
+
+
+def accumulate_reward_components(total: dict, step_values: dict) -> None:
+	for key, value in step_values.items():
+		total[key] = total.get(key, 0.0) + float(value)
+
+
+def format_component_summary(label: str, components: dict) -> str:
+	parts = [f"{key}={components.get(key, 0.0):.3f}" for key in REWARD_COMPONENT_KEYS]
+	return f"{label} components -> " + ", ".join(parts)
+
+
+def resolve_state_mask(payload: dict | None) -> np.ndarray | None:
+	if not payload:
+		return None
+	vector = payload.get("vector")
+	if vector is None:
+		return None
+	mask_array = np.asarray(vector, dtype=bool)
+	return mask_array if mask_array.size else None
+
+
+def load_config_and_data(data_path: Path) -> Tuple[dict, pd.DataFrame]:
 	with open(CONFIG_PATH, "r", encoding="utf-8") as fp:
 		config = json.load(fp)
-	dataframe = pd.read_csv(DATA_PATH, sep=";")
+	dataframe = pd.read_csv(data_path, sep=";")
 	return config, dataframe
 
 
-def solve_teacher(config: dict, dataframe: pd.DataFrame) -> pd.DataFrame:
-	teacher = Teacher(config, dataframe=dataframe, start_date=START_DATE, days=DAYS)
+def solve_teacher(config: dict, dataframe: pd.DataFrame, start_date: str) -> pd.DataFrame:
+	teacher = Teacher(config, dataframe=dataframe, start_date=start_date, days=DAYS)
 	teacher.build(start_soc=0.5)
 	teacher.solve(solver_name=SOLVER_NAME)
 	return teacher.results_df()
 
 
-def load_model(device: torch.device) -> ImitationMLP:
-	hparams = HyperParameters.from_json(MODEL_JSON)
+def load_model(device: torch.device) -> Tuple[ImitationMLP, HyperParameters, dict | None]:
 	checkpoint = torch.load(CHECKPOINT_PATH, map_location=device)
+	hparams_payload = checkpoint.get("hparams")
+	if hparams_payload is not None:
+		hparams = HyperParameters.from_dict(hparams_payload)
+	else:
+		hparams = HyperParameters.from_json(MODEL_JSON)
 	model = ImitationMLP(hparams).to(device)
 	model.load_state_dict(checkpoint["state_dict"])
 	model.eval()
-	return model
+	return model, hparams, checkpoint.get("state_mask")
 
 
-def rollout_env(config: dict, dataframe: pd.DataFrame, policy_fn: Callable, label: str) -> Tuple[float, pd.DataFrame, Path]:
-	env = SmartHomeEnv(config, dataframe=dataframe, days=DAYS, state_mask=None, start_date=START_DATE)
+def rollout_env(
+	config: dict,
+	dataframe: pd.DataFrame,
+	policy_fn: Callable,
+	label: str,
+	state_mask: np.ndarray | None,
+	start_date: str,
+	) -> Tuple[float, dict, pd.DataFrame, Path]:
+	env = SmartHomeEnv(config, dataframe=dataframe, days=DAYS, state_mask=state_mask, start_date=start_date)
 	obs, _ = env.reset()
 	env.bess.reset(soc_init=0.5)
 	total_reward = 0.0
+	components = zero_reward_components()
 	while not env.done:
 		action = policy_fn(env, obs)
 		obs, reward, done, _ = env.step(action)
 		total_reward += reward
-	export_path = EXPORT_DIR / f"{label}_env_replay.csv"
+		accumulate_reward_components(components, extract_reward_components(env))
+	local_export = _export_dir_for(label)
+	export_path = local_export / f"{label}_env_replay.csv"
 	export_path.parent.mkdir(parents=True, exist_ok=True)
 	df = env.build_operation_dataframe()
 	df.to_csv(export_path)
-	return total_reward, df, export_path
+	return total_reward, components, df, export_path
 
 
 def teacher_policy(results_df: pd.DataFrame) -> Callable:
@@ -185,30 +308,118 @@ def plot_power_and_soc(df: pd.DataFrame, label: str, ylim: Tuple[float, float], 
 	return fname
 
 
+def export_summary(
+	output_dir: Path,
+	hparams: HyperParameters,
+	mask_payload: dict | None,
+	metrics: dict,
+) -> Path:
+	output_dir.mkdir(parents=True, exist_ok=True)
+	summary = {
+		"hyperparameters": hparams.to_dict(),
+		"metrics": metrics,
+		"state_mask": None,
+	}
+	if mask_payload:
+		vector = np.asarray(mask_payload.get("vector", []), dtype=bool)
+		labels = [str(label) for label in mask_payload.get("labels", [])]
+		enabled = [label for label, flag in zip(labels, vector) if flag]
+		disabled = [label for label, flag in zip(labels, vector) if not flag]
+		summary["state_mask"] = {
+			"spec": mask_payload.get("spec", "unknown"),
+			"vector": vector.astype(int).tolist(),
+			"labels": labels,
+			"enabled_features": enabled,
+			"disabled_features": disabled,
+		}
+	summary_path = output_dir / SUMMARY_NAME
+	with open(summary_path, "w", encoding="utf-8") as fp:
+		json.dump(summary, fp, indent=2)
+	print(f"Evaluation summary saved to {summary_path}")
+	return summary_path
+
+
+def save_json_summary(output_dir: Path, lines: list[str]) -> Path:
+	output_dir.mkdir(parents=True, exist_ok=True)
+	text_path = output_dir / SUMMARY_TEXT_NAME
+	with open(text_path, "w", encoding="utf-8") as fp:
+		json.dump({"lines": lines}, fp, indent=2)
+	return text_path
+
+
 def main() -> None:
-	config, dataframe = load_config_and_data()
-	teacher_df = solve_teacher(config, dataframe)
-
-	teacher_reward, teacher_env_df, teacher_csv = rollout_env(config, dataframe, teacher_policy(teacher_df), "teacher")
-
 	device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-	model = load_model(device)
-	mlp_reward, mlp_env_df, mlp_csv = rollout_env(config, dataframe, mlp_policy(model, device), "mlp")
+	model, hparams, mask_payload = load_model(device)
+	teacher_mask = resolve_state_mask(mask_payload)
 
-	delta_reward = mlp_reward - teacher_reward
-	print("Teacher results -> reward: {:.3f}, csv: {}".format(teacher_reward, teacher_csv))
-	print("MLP results     -> reward: {:.3f}, csv: {}".format(mlp_reward, mlp_csv))
-	print("Reward delta (MLP - Teacher): {:.3f}".format(delta_reward))
+	for dataset in DATASETS:
+		data_path = Path(f"data/Simulation_{dataset}_Fut_HP__PV5000-HB5000.csv")
+		config, dataframe = load_config_and_data(data_path)
+		for start_date in START_DATES:
+			run_label = f"{dataset}-{_month_range_label(start_date, DAYS)}"
+			run_dir = _export_dir_for(run_label)
+			run_dir.mkdir(parents=True, exist_ok=True)
+			_snapshot_config(run_dir)
+			teacher_df = solve_teacher(config, dataframe, start_date)
 
-	teacher_env_df = enrich_operation_df(teacher_env_df, config)
-	mlp_env_df = enrich_operation_df(mlp_env_df, config)
-	power_ylim = compute_power_limits(teacher_env_df, mlp_env_df)
+			teacher_reward, teacher_components, teacher_env_df, teacher_csv = rollout_env(
+				config,
+				dataframe,
+				teacher_policy(teacher_df),
+				"teacher",
+				teacher_mask,
+				start_date,
+			)
 
-	EXPORT_DIR.mkdir(parents=True, exist_ok=True)
-	teacher_plot = plot_power_and_soc(teacher_env_df, "teacher", power_ylim, EXPORT_DIR)
-	mlp_plot = plot_power_and_soc(mlp_env_df, "mlp", power_ylim, EXPORT_DIR)
+			mlp_reward, mlp_components, mlp_env_df, mlp_csv = rollout_env(
+				config,
+				dataframe,
+				mlp_policy(model, device),
+				"mlp",
+				teacher_mask,
+				start_date,
+			)
 
-	print("Power/SOC plots saved:", teacher_plot, mlp_plot)
+			delta_reward = mlp_reward - teacher_reward
+			teacher_comp_line = format_component_summary("Teacher", teacher_components)
+			mlp_comp_line = format_component_summary("MLP", mlp_components)
+			summary_lines = [
+				"Teacher results -> reward: {:.3f}, csv: {}".format(teacher_reward, teacher_csv),
+				"MLP results     -> reward: {:.3f}, csv: {}".format(mlp_reward, mlp_csv),
+				"Reward delta (MLP - Teacher): {:.3f}".format(delta_reward),
+				teacher_comp_line,
+				mlp_comp_line,
+			]
+			for line in summary_lines:
+				print(line)
+
+			teacher_env_df = enrich_operation_df(teacher_env_df, config)
+			mlp_env_df = enrich_operation_df(mlp_env_df, config)
+			power_ylim = compute_power_limits(teacher_env_df, mlp_env_df)
+
+			teacher_out = run_dir
+			mlp_out = run_dir
+			teacher_plot = plot_power_and_soc(teacher_env_df, "teacher", power_ylim, teacher_out)
+			mlp_plot = plot_power_and_soc(mlp_env_df, "mlp", power_ylim, mlp_out)
+
+			plot_line = f"Power/SOC plots saved: {teacher_plot} {mlp_plot}"
+			print(plot_line)
+			summary_lines.append(plot_line)
+			summary_json_path = export_summary(
+				mlp_out,
+				hparams,
+				mask_payload,
+				{
+					"teacher_reward": teacher_reward,
+					"mlp_reward": mlp_reward,
+					"delta_reward": delta_reward,
+					"teacher_components": teacher_components,
+					"mlp_components": mlp_components,
+				},
+			)
+			summary_lines.append(f"Evaluation summary JSON: {summary_json_path}")
+			text_summary_path = save_json_summary(mlp_out, summary_lines)
+			print(f"JSON summary saved to {text_summary_path}")
 
 
 if __name__ == "__main__":

@@ -1,0 +1,12 @@
+Segue uma proposta baseada em dados reais de um módulo LFP típico (células EVE LF105-L, 105 Ah) montado em 16S — arranjo usado em packs residenciais de ~5 kWh. O datasheet dessas células (EVE Energy, 2023) traz a curva de OCV vs SoC abaixo; basta multiplicar a tensão da célula por 16 para obter o pack. Usei também o limite de corrente contínua indicado (1 C nominal, com derating para 0.6 C fora da faixa 20–80 %):
+
+SoC	Vcell (V)	Vpack≈16 × Vcell (V)	Imax_c (A)	Imax_d (A)	Pmax_c (kW)	Pmax_d (kW)
+0.10	3.20	51.2	60	80	3.1	4.1
+0.20	3.27	52.3	90	100	4.7	5.2
+0.30	3.29	52.6	100	100	5.3	5.3
+0.40	3.31	52.9	100	100	5.3	5.3
+0.50	3.32	53.1	100	100	5.3	5.3
+0.60	3.32	53.1	100	100	5.3	5.3
+0.70	3.33	53.3	100	95	5.3	5.1
+0.80	3.34	53.4	85	85	4.5	4.5
+0.90	3.36	53.8	60	70	3.2	3.8

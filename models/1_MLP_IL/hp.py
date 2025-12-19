@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from typing import Dict, List, Sequence
 
@@ -28,7 +28,9 @@ class HyperParameters:
 
 	@classmethod
 	def from_dict(cls, data: Dict[str, object]) -> "HyperParameters":
-		return cls(**data)
+		field_names = {f.name for f in fields(cls)}
+		filtered = {key: value for key, value in data.items() if key in field_names}
+		return cls(**filtered)
 
 	@classmethod
 	def from_json(cls, path: str | Path) -> "HyperParameters":

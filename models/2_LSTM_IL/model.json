@@ -1,0 +1,42 @@
+{
+    "input_dim": 26,
+    "output_dim": 3,
+    "hidden_size": 256,
+    "num_layers": 2,
+    "seq_len": 12,
+    "dropout": 0.1,
+    "learning_rate": 0.001,
+    "weight_decay": 0.0001,
+    "batch_size": 128,
+    "epochs": 400,
+    "seed": 42,
+    "val_split": 0.2,
+    "patience": 50,
+    "improvement_tol": 1e-5,
+    "hpo": {
+        "enabled": true,
+        "n_trials": 40,
+        "timeout": null,
+        "study_name": "lstm_mask_search",
+        "storage": null,
+        "direction": "minimize",
+        "seed": 42,
+        "mask_presets": [
+            "full",
+            "no_climate",
+            "power_core",
+            "bess_ev_focus"
+        ],
+        "allow_custom_mask": true,
+        "dropout_range": [0.0, 0.3],
+        "lr_log_range": [-4.5, -2.5],
+        "weight_decay_log_range": [-6.0, -3.0],
+        "batch_size_options": [128, 256],
+        "seq_len_options": [6, 12, 18, 24],
+        "hidden_size_options": [128, 256, 384, 512],
+        "num_layers_options": [1, 2, 3],
+        "epochs_limit": 400,
+        "final_epochs": null,
+        "report_pruning": true
+    }
+}

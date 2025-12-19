@@ -11,5 +11,41 @@
 	"seed": 42,
 	"val_split": 0.2,
 	"patience": 100,
-	"improvement_tol": 1e-5
+	"improvement_tol": 1e-5,
+	"hpo": {
+		"enabled": true,
+		"n_trials": 30,
+		"timeout": null,
+		"study_name": "mlp_mask_search",
+		"storage": null,
+		"direction": "minimize",
+		"seed": 42,
+		"mask_presets": [
+			"full",
+			"no_climate",
+			"power_core",
+			"bess_ev_focus"
+		],
+		"allow_custom_mask": true,
+		"dropout_range": [0.0, 0.3],
+		"lr_log_range": [-4.5, -2.5],
+		"weight_decay_log_range": [-6.0, -3.0],
+		"batch_size_options": [128, 256, 512],
+		"hidden_size_options": [
+            "32x64",
+            "64x128",
+            "128x256",
+			"256x128",
+			"256x256",
+			"512x256",
+			"512x256x128"
+		],
+		"activation_options": [
+			"relu",
+			"gelu"
+		],
+		"epochs_limit": 1000,
+		"final_epochs": null,
+		"report_pruning": true
+	}
 }
