@@ -596,9 +596,9 @@ def main() -> None:
 
         checkpoint = Path(cfg.get("checkpoint")) if cfg.get("checkpoint") else Path("Results") / tariff_label / "3_TDT_IL" / "best.pt"
         state_dict, hparams, state_mask_payload = load_imitation_checkpoint(checkpoint, device)
-    mask_vector = None
-    if isinstance(state_mask_payload, dict) and "vector" in state_mask_payload:
-        mask_vector = [bool(x) for x in state_mask_payload.get("vector", [])]
+        mask_vector = None
+        if isinstance(state_mask_payload, dict) and "vector" in state_mask_payload:
+            mask_vector = [bool(x) for x in state_mask_payload.get("vector", [])]
 
         actor: Actor | None = None
         critic: Critic | None = None
@@ -618,123 +618,123 @@ def main() -> None:
                 tariff_override=tariff,
             )
 
-        obs_dim = env.observation_space.shape[0]
-        action_dim = env.action_space.shape[0]
-        if actor is None:
-            if obs_dim != hparams.input_dim:
-                hparams.input_dim = obs_dim
-            if action_dim != hparams.output_dim:
-                hparams.output_dim = action_dim
-            actor = Actor(hparams, env.action_space.low, env.action_space.high).to(device)
-            missing, unexpected = actor.core.load_state_dict(state_dict, strict=False)
-            if missing:
-                print(f"Warning: missing keys when loading actor: {missing}")
-            if unexpected:
-                print(f"Warning: unexpected keys when loading actor: {unexpected}")
-            behavior_actor = Actor(hparams, env.action_space.low, env.action_space.high).to(device)
-            behavior_actor.load_state_dict(actor.state_dict())
-            behavior_actor.eval()
-            for p in behavior_actor.parameters():
-                p.requires_grad = False
-            critic = Critic(hparams, action_dim, [256, 256]).to(device)
-        else:
-            if obs_dim != actor.core.hparams.input_dim:
-                actor.core.hparams.input_dim = obs_dim
-            if action_dim != actor.core.hparams.output_dim:
-                actor.core.hparams.output_dim = action_dim
+            obs_dim = env.observation_space.shape[0]
+            action_dim = env.action_space.shape[0]
+            if actor is None:
+                if obs_dim != hparams.input_dim:
+                    hparams.input_dim = obs_dim
+                if action_dim != hparams.output_dim:
+                    hparams.output_dim = action_dim
+                actor = Actor(hparams, env.action_space.low, env.action_space.high).to(device)
+                missing, unexpected = actor.core.load_state_dict(state_dict, strict=False)
+                if missing:
+                    print(f"Warning: missing keys when loading actor: {missing}")
+                if unexpected:
+                    print(f"Warning: unexpected keys when loading actor: {unexpected}")
+                behavior_actor = Actor(hparams, env.action_space.low, env.action_space.high).to(device)
+                behavior_actor.load_state_dict(actor.state_dict())
+                behavior_actor.eval()
+                for p in behavior_actor.parameters():
+                    p.requires_grad = False
+                critic = Critic(hparams, action_dim, [256, 256]).to(device)
+            else:
+                if obs_dim != actor.core.hparams.input_dim:
+                    actor.core.hparams.input_dim = obs_dim
+                if action_dim != actor.core.hparams.output_dim:
+                    actor.core.hparams.output_dim = action_dim
 
-        if critic is None:
-            critic = Critic(hparams, action_dim, [256, 256]).to(device)
+            if critic is None:
+                critic = Critic(hparams, action_dim, [256, 256]).to(device)
 
-        if idx == 1:
-            critic_ckpt = cfg.get("critic_checkpoint")
-            if critic_ckpt:
-                payload = torch.load(Path(critic_ckpt), map_location=device)
-                critic_state = payload.get("critic_state_dict", payload)
-                critic.load_state_dict(critic_state)
-                print(f"Loaded critic checkpoint from {critic_ckpt}")
-            elif bool(cfg.get("pretrain_critics", False)) and int(cfg.get("critic_pretrain_steps", 0)) > 0:
-                pretrain_datasets = cfg.get("pretrain_datasets") or [cfg.get("data")]
-                pretrain_mode = cfg.get("pretrain_mode", "offline")
-                pretrain_ckpt = results_base / "pretrain" / "critic_pretrain.pt"
-                pretrain_critics(
-                    cfg_config=cfg_config,
-                    datasets=pretrain_datasets,
-                    actor=actor,
-                    critic=critic,
-                    critic_lr=float(cfg["critic_lr"]),
-                    steps=int(cfg.get("critic_pretrain_steps", 0)),
-                    batch_size=int(cfg.get("critic_pretrain_batch_size", cfg["batch_size"])),
-                    gamma=float(cfg["gamma"]),
-                    tau=float(cfg["tau"]),
-                    policy_noise=float(cfg["policy_noise"]),
-                    noise_clip=float(cfg["noise_clip"]),
-                    buffer_size=int(cfg["buffer_size"]),
-                    mode=pretrain_mode,
-                    amp_enabled=bool(cfg.get("amp_enabled", True)),
-                    checkpoint_path=pretrain_ckpt,
-                    tariff_override=tariff,
-                )
+            if idx == 1:
+                critic_ckpt = cfg.get("critic_checkpoint")
+                if critic_ckpt:
+                    payload = torch.load(Path(critic_ckpt), map_location=device)
+                    critic_state = payload.get("critic_state_dict", payload)
+                    critic.load_state_dict(critic_state)
+                    print(f"Loaded critic checkpoint from {critic_ckpt}")
+                elif bool(cfg.get("pretrain_critics", False)) and int(cfg.get("critic_pretrain_steps", 0)) > 0:
+                    pretrain_datasets = cfg.get("pretrain_datasets") or [cfg.get("data")]
+                    pretrain_mode = cfg.get("pretrain_mode", "offline")
+                    pretrain_ckpt = results_base / "pretrain" / "critic_pretrain.pt"
+                    pretrain_critics(
+                        cfg_config=cfg_config,
+                        datasets=pretrain_datasets,
+                        actor=actor,
+                        critic=critic,
+                        critic_lr=float(cfg["critic_lr"]),
+                        steps=int(cfg.get("critic_pretrain_steps", 0)),
+                        batch_size=int(cfg.get("critic_pretrain_batch_size", cfg["batch_size"])),
+                        gamma=float(cfg["gamma"]),
+                        tau=float(cfg["tau"]),
+                        policy_noise=float(cfg["policy_noise"]),
+                        noise_clip=float(cfg["noise_clip"]),
+                        buffer_size=int(cfg["buffer_size"]),
+                        mode=pretrain_mode,
+                        amp_enabled=bool(cfg.get("amp_enabled", True)),
+                        checkpoint_path=pretrain_ckpt,
+                        tariff_override=tariff,
+                    )
 
-        subdir = run_dir / run_cfg["run_label"]
-        subdir.mkdir(parents=True, exist_ok=True)
-        checkpoint_dir = subdir / "checkpoints"
-        resume_checkpoint = Path(run_cfg["resume_checkpoint"]) if run_cfg.get("resume_checkpoint") else None
-        latest_ckpt = checkpoint_dir / "latest.pt"
-        if resume_checkpoint is None and latest_ckpt.exists():
-            resume_checkpoint = latest_ckpt
-            print(f"Auto-resume from {resume_checkpoint}")
-        with open(subdir / "finetune_config.json", "w", encoding="utf-8") as fp:
-            json.dump({
-                **run_cfg,
-                "config": str(cfg_config),
-                "data": str(cfg_data),
-                "tariff": tariff,
-                "checkpoint": str(checkpoint),
-                "state_mask": mask_vector,
-            }, fp, indent=2)
+            subdir = run_dir / run_cfg["run_label"]
+            subdir.mkdir(parents=True, exist_ok=True)
+            checkpoint_dir = subdir / "checkpoints"
+            resume_checkpoint = Path(run_cfg["resume_checkpoint"]) if run_cfg.get("resume_checkpoint") else None
+            latest_ckpt = checkpoint_dir / "latest.pt"
+            if resume_checkpoint is None and latest_ckpt.exists():
+                resume_checkpoint = latest_ckpt
+                print(f"Auto-resume from {resume_checkpoint}")
+            with open(subdir / "finetune_config.json", "w", encoding="utf-8") as fp:
+                json.dump({
+                    **run_cfg,
+                    "config": str(cfg_config),
+                    "data": str(cfg_data),
+                    "tariff": tariff,
+                    "checkpoint": str(checkpoint),
+                    "state_mask": mask_vector,
+                }, fp, indent=2)
 
-        rewards_log = train_td3(
-            env=env,
-            actor=actor,
-            critic=critic,
-            actor_lr=float(run_cfg["actor_lr"]),
-            critic_lr=float(run_cfg["critic_lr"]),
-            total_steps=int(run_cfg["total_steps"]),
-            warmup_steps=int(run_cfg["warmup_steps"]),
-            batch_size=int(run_cfg["batch_size"]),
-            gamma=float(run_cfg["gamma"]),
-            tau=float(run_cfg["tau"]),
-            policy_noise=float(run_cfg["policy_noise"]),
-            noise_clip=float(run_cfg["noise_clip"]),
-            policy_delay=int(run_cfg["policy_delay"]),
-            buffer_size=int(run_cfg["buffer_size"]),
-            seed=int(run_cfg["seed"]),
-            state_mask=mask_vector,
-            bc_coef=float(run_cfg.get("bc_coef", cfg.get("bc_coef", 0.0))),
-            bc_start_step=int(run_cfg.get("bc_start_step", cfg.get("bc_start_step", 0))),
-            bc_decay_steps=int(run_cfg.get("bc_decay_steps", cfg.get("bc_decay_steps", 0))),
-            behavior_actor=behavior_actor,
-            early_stop_window=int(run_cfg.get("early_stop_window", cfg.get("early_stop_window", 6))),
-            early_stop_patience=int(run_cfg.get("early_stop_patience", cfg.get("early_stop_patience", 3))),
-            early_stop_min_delta=float(run_cfg.get("early_stop_min_delta", cfg.get("early_stop_min_delta", 0.0))),
-            amp_enabled=bool(run_cfg.get("amp_enabled", cfg.get("amp_enabled", True))),
-            checkpoint_dir=checkpoint_dir,
-            checkpoint_interval=int(run_cfg.get("checkpoint_interval", cfg.get("checkpoint_interval", 0))),
-            resume_checkpoint=resume_checkpoint,
-        )
+            rewards_log = train_td3(
+                env=env,
+                actor=actor,
+                critic=critic,
+                actor_lr=float(run_cfg["actor_lr"]),
+                critic_lr=float(run_cfg["critic_lr"]),
+                total_steps=int(run_cfg["total_steps"]),
+                warmup_steps=int(run_cfg["warmup_steps"]),
+                batch_size=int(run_cfg["batch_size"]),
+                gamma=float(run_cfg["gamma"]),
+                tau=float(run_cfg["tau"]),
+                policy_noise=float(run_cfg["policy_noise"]),
+                noise_clip=float(run_cfg["noise_clip"]),
+                policy_delay=int(run_cfg["policy_delay"]),
+                buffer_size=int(run_cfg["buffer_size"]),
+                seed=int(run_cfg["seed"]),
+                state_mask=mask_vector,
+                bc_coef=float(run_cfg.get("bc_coef", cfg.get("bc_coef", 0.0))),
+                bc_start_step=int(run_cfg.get("bc_start_step", cfg.get("bc_start_step", 0))),
+                bc_decay_steps=int(run_cfg.get("bc_decay_steps", cfg.get("bc_decay_steps", 0))),
+                behavior_actor=behavior_actor,
+                early_stop_window=int(run_cfg.get("early_stop_window", cfg.get("early_stop_window", 6))),
+                early_stop_patience=int(run_cfg.get("early_stop_patience", cfg.get("early_stop_patience", 3))),
+                early_stop_min_delta=float(run_cfg.get("early_stop_min_delta", cfg.get("early_stop_min_delta", 0.0))),
+                amp_enabled=bool(run_cfg.get("amp_enabled", cfg.get("amp_enabled", True))),
+                checkpoint_dir=checkpoint_dir,
+                checkpoint_interval=int(run_cfg.get("checkpoint_interval", cfg.get("checkpoint_interval", 0))),
+                resume_checkpoint=resume_checkpoint,
+            )
 
-        np.savetxt(subdir / "episode_rewards.csv", np.array(rewards_log), delimiter=",", header="step,reward", comments="")
+            np.savetxt(subdir / "episode_rewards.csv", np.array(rewards_log), delimiter=",", header="step,reward", comments="")
 
-        run_dir.mkdir(parents=True, exist_ok=True)
-        torch.save(
-            {
-                "actor_state_dict": actor.state_dict(),
-                "hparams": actor.core.hparams.to_dict(),
-                "state_mask": mask_vector,
-            },
-            run_dir / "actor_finetuned.pt",
-        )
+            run_dir.mkdir(parents=True, exist_ok=True)
+            torch.save(
+                {
+                    "actor_state_dict": actor.state_dict(),
+                    "hparams": actor.core.hparams.to_dict(),
+                    "state_mask": mask_vector,
+                },
+                run_dir / "actor_finetuned.pt",
+            )
 
 
 if __name__ == "__main__":
