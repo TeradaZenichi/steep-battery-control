@@ -29,12 +29,22 @@ MODEL_SUBDIR = "4_MLP_FT_TD3"
 SUMMARY_NAME = "evaluation_summary.json"
 SUMMARY_TEXT_NAME = "evaluation_summary_lines.json"
 TARIFF_OVERRIDE: str | None = None
+TARIFFS: list[str] | None = ["tar_s", "tar_w", "tar_sw", "tar_flat", "tar_tou"]
 BASE_RUN_LABEL = "rl-finetune-mlp-td3"
 DATASETS = ["WY", "CY"]
-START_DATES = ["01/01/2000 00:00"]
-DAYS = 365
+RUN_SCHEDULE: list[tuple[str, int]] = [("01/01/2000 00:00", 365)]
 SOLVER_NAME = "gurobi"
 MODEL_JSON = Path(__file__).with_name("model.json")
+
+TARIFF_LABEL = _load_tariff_label(CONFIG_PATH, TARIFF_OVERRIDE)
+RESULTS_ROOT = RESULTS_BASE / TARIFF_LABEL / MODEL_SUBDIR / "train"
+
+
+def set_tariff_dirs(tariff_label: str) -> None:
+    global TARIFF_LABEL, RESULTS_ROOT
+    TARIFF_LABEL = tariff_label
+    RESULTS_ROOT = RESULTS_BASE / TARIFF_LABEL / MODEL_SUBDIR / "train"
+    RESULTS_ROOT.mkdir(parents=True, exist_ok=True)
 
 
 def _load_tariff_label(config_path: Path, override: str | None) -> str:
@@ -314,60 +324,63 @@ def save_json_summary(output_dir: Path, lines: list[str]) -> Path:
 def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     cfg_config = CONFIG_PATH
-    tariff = _load_tariff_label(cfg_config, TARIFF_OVERRIDE)
-    results_root = RESULTS_BASE / tariff / MODEL_SUBDIR / "train"
-    actor_path = results_root / "actor_finetuned.pt"
+    base_tariff = _load_tariff_label(cfg_config, TARIFF_OVERRIDE)
+    tariffs = [str(t) for t in (TARIFFS if TARIFFS else [base_tariff])]
 
-    if not actor_path.exists():
-        raise FileNotFoundError(f"Actor checkpoint not found: {actor_path}")
+    for tariff in tariffs:
+        set_tariff_dirs(tariff)
+        actor_path = RESULTS_ROOT / "actor_finetuned.pt"
 
-    payload = torch.load(actor_path, map_location=device)
-    hparams = HyperParameters.from_dict(payload["hparams"])
-    mask_payload = payload.get("state_mask")
-    state_mask = resolve_state_mask(mask_payload)
-    state_dict = payload["actor_state_dict"]
+        if not actor_path.exists():
+            raise FileNotFoundError(f"Actor checkpoint not found: {actor_path}")
 
-    for dataset in DATASETS:
-        for start_date in START_DATES:
-            run_label = f"{dataset}-{_month_range_label(start_date, DAYS)}"
-            print(f"=== Evaluating {run_label} ===")
-            data_path = Path(f"data/Simulation_{dataset}_Fut_HP__PV5000-HB5000.csv")
-            config, dataframe = load_config_and_data(cfg_config, data_path)
+        payload = torch.load(actor_path, map_location=device)
+        hparams = HyperParameters.from_dict(payload["hparams"])
+        mask_payload = payload.get("state_mask")
+        state_mask = resolve_state_mask(mask_payload)
+        state_dict = payload["actor_state_dict"]
 
-            run_dir = _export_dir_for(results_root, run_label)
-            run_dir.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(cfg_config, run_dir / "parameters.json")
+        for dataset in DATASETS:
+            for start_date, days in RUN_SCHEDULE:
+                run_label = f"{dataset}-{_month_range_label(start_date, days)}"
+                print(f"=== Evaluating {tariff} | {run_label} ===")
+                data_path = Path(f"data/Simulation_{dataset}_Fut_HP__PV5000-HB5000.csv")
+                config, dataframe = load_config_and_data(cfg_config, data_path)
 
-            teacher_df = solve_teacher(config, dataframe, start_date, DAYS)
+                run_dir = _export_dir_for(RESULTS_ROOT, run_label)
+                run_dir.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(cfg_config, run_dir / "parameters.json")
 
-            env = SmartHomeEnv(config, dataframe=dataframe, days=DAYS, state_mask=state_mask, start_date=start_date)
-            actor = Actor(hparams, env.action_space.low, env.action_space.high).to(device)
-            missing, unexpected = actor.load_state_dict(state_dict, strict=False)
-            if missing:
-                print(f"Warning: missing keys when loading actor: {missing}")
-            if unexpected:
-                print(f"Warning: unexpected keys when loading actor: {unexpected}")
-            actor.eval()
+                teacher_df = solve_teacher(config, dataframe, start_date, days)
 
-            teacher_reward, teacher_components, teacher_env_df, _ = rollout_env(
-                config,
-                dataframe,
-                teacher_policy(teacher_df),
-                "teacher",
-                state_mask,
-                start_date,
-                DAYS,
-            )
+                env = SmartHomeEnv(config, dataframe=dataframe, days=days, state_mask=state_mask, start_date=start_date)
+                actor = Actor(hparams, env.action_space.low, env.action_space.high).to(device)
+                missing, unexpected = actor.load_state_dict(state_dict, strict=False)
+                if missing:
+                    print(f"Warning: missing keys when loading actor: {missing}")
+                if unexpected:
+                    print(f"Warning: unexpected keys when loading actor: {unexpected}")
+                actor.eval()
 
-            actor_reward, actor_components, actor_env_df, _ = rollout_env(
-                config,
-                dataframe,
-                actor_policy(actor, device),
-                "actor",
-                state_mask,
-                start_date,
-                DAYS,
-            )
+                teacher_reward, teacher_components, teacher_env_df, _ = rollout_env(
+                    config,
+                    dataframe,
+                    teacher_policy(teacher_df),
+                    "teacher",
+                    state_mask,
+                    start_date,
+                    days,
+                )
+
+                actor_reward, actor_components, actor_env_df, _ = rollout_env(
+                    config,
+                    dataframe,
+                    actor_policy(actor, device),
+                    "actor",
+                    state_mask,
+                    start_date,
+                    days,
+                )
 
             teacher_env_df = enrich_operation_df(teacher_env_df, config)
             actor_env_df = enrich_operation_df(actor_env_df, config)

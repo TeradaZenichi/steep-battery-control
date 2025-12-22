@@ -29,11 +29,20 @@ from opt import Teacher
 
 
 DATASETS = ["WY", "CY"]
-START_DATES = [
-	"01/03/2000 00:00",
-	"01/06/2000 00:00",
-	"01/09/2000 00:00",
-	"01/12/2000 00:00",
+RUN_SCHEDULE: list[tuple[str, int]] = [
+	("01/01/2000 00:00", 365),
+	("01/01/2000 00:00", 10),
+	("01/02/2000 00:00", 10),
+	("01/03/2000 00:00", 10),
+	("01/04/2000 00:00", 10),
+	("01/05/2000 00:00", 10),
+	("01/06/2000 00:00", 10),
+	("01/07/2000 00:00", 10),
+	("01/08/2000 00:00", 10),
+	("01/09/2000 00:00", 10),
+	("01/10/2000 00:00", 10),
+	("01/11/2000 00:00", 10),
+	("01/12/2000 00:00", 10),
 ]
 CONFIG_PATH = Path("data/parameters.json")
 DAYS = 10
@@ -42,6 +51,7 @@ MODEL_JSON = Path(__file__).with_name("model.json")
 RESULTS_BASE = Path("Results")
 MODEL_SUBDIR = "1_MLP_IL"
 TARIFF_OVERRIDE: str | None = None
+TARIFFS: list[str] | None = ["tar_s", "tar_w", "tar_sw", "tar_flat", "tar_tou"]
 SUMMARY_NAME = "evaluation_summary.json"
 SUMMARY_TEXT_NAME = "evaluation_summary_lines.json"
 
@@ -66,6 +76,19 @@ RESULTS_DIR = (RESULTS_BASE / TARIFF_LABEL / MODEL_SUBDIR)
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 CHECKPOINT_PATH = RESULTS_DIR / "best.pt"
 EXPORT_DIR = RESULTS_DIR
+
+
+def set_tariff_dirs(tariff_label: str) -> None:
+	global TARIFF_LABEL, RESULTS_DIR, CHECKPOINT_PATH, EXPORT_DIR
+	TARIFF_LABEL = tariff_label
+	RESULTS_DIR = RESULTS_BASE / TARIFF_LABEL / MODEL_SUBDIR
+	RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+	CHECKPOINT_PATH = RESULTS_DIR / "best.pt"
+	EXPORT_DIR = RESULTS_DIR
+
+
+# initialize default directories
+set_tariff_dirs(TARIFF_LABEL)
 
 
 def _export_dir_for(run_label: str) -> Path:
@@ -149,8 +172,8 @@ def load_config_and_data(data_path: Path) -> Tuple[dict, pd.DataFrame]:
 	return config, dataframe
 
 
-def solve_teacher(config: dict, dataframe: pd.DataFrame, start_date: str) -> pd.DataFrame:
-	teacher = Teacher(config, dataframe=dataframe, start_date=start_date, days=DAYS)
+def solve_teacher(config: dict, dataframe: pd.DataFrame, start_date: str, days: int) -> pd.DataFrame:
+	teacher = Teacher(config, dataframe=dataframe, start_date=start_date, days=days)
 	teacher.build(start_soc=0.5)
 	teacher.solve(solver_name=SOLVER_NAME)
 	return teacher.results_df()
@@ -176,8 +199,9 @@ def rollout_env(
 	label: str,
 	state_mask: np.ndarray | None,
 	start_date: str,
+	days: int,
 	) -> Tuple[float, dict, pd.DataFrame, Path]:
-	env = SmartHomeEnv(config, dataframe=dataframe, days=DAYS, state_mask=state_mask, start_date=start_date)
+	env = SmartHomeEnv(config, dataframe=dataframe, days=days, state_mask=state_mask, start_date=start_date)
 	obs, _ = env.reset()
 	env.bess.reset(soc_init=0.5)
 	total_reward = 0.0
@@ -349,77 +373,84 @@ def save_json_summary(output_dir: Path, lines: list[str]) -> Path:
 
 def main() -> None:
 	device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-	model, hparams, mask_payload = load_model(device)
-	teacher_mask = resolve_state_mask(mask_payload)
+	base_tariff = _load_tariff_label(CONFIG_PATH, TARIFF_OVERRIDE)
+	tariffs = [str(t) for t in (TARIFFS if TARIFFS else [base_tariff])]
 
-	for dataset in DATASETS:
-		data_path = Path(f"data/Simulation_{dataset}_Fut_HP__PV5000-HB5000.csv")
-		config, dataframe = load_config_and_data(data_path)
-		for start_date in START_DATES:
-			run_label = f"{dataset}-{_month_range_label(start_date, DAYS)}"
-			run_dir = _export_dir_for(run_label)
-			run_dir.mkdir(parents=True, exist_ok=True)
-			_snapshot_config(run_dir)
-			teacher_df = solve_teacher(config, dataframe, start_date)
+	for tariff in tariffs:
+		set_tariff_dirs(tariff)
+		model, hparams, mask_payload = load_model(device)
+		teacher_mask = resolve_state_mask(mask_payload)
 
-			teacher_reward, teacher_components, teacher_env_df, teacher_csv = rollout_env(
-				config,
-				dataframe,
-				teacher_policy(teacher_df),
-				"teacher",
-				teacher_mask,
-				start_date,
-			)
+		for dataset in DATASETS:
+			data_path = Path(f"data/Simulation_{dataset}_Fut_HP__PV5000-HB5000.csv")
+			config, dataframe = load_config_and_data(data_path)
+			for start_date, days in RUN_SCHEDULE:
+				run_label = f"{dataset}-{_month_range_label(start_date, days)}"
+				run_dir = _export_dir_for(run_label)
+				run_dir.mkdir(parents=True, exist_ok=True)
+				_snapshot_config(run_dir)
+				teacher_df = solve_teacher(config, dataframe, start_date, days)
 
-			mlp_reward, mlp_components, mlp_env_df, mlp_csv = rollout_env(
-				config,
-				dataframe,
-				mlp_policy(model, device),
-				"mlp",
-				teacher_mask,
-				start_date,
-			)
+				teacher_reward, teacher_components, teacher_env_df, teacher_csv = rollout_env(
+					config,
+					dataframe,
+					teacher_policy(teacher_df),
+					"teacher",
+					teacher_mask,
+					start_date,
+					days,
+				)
 
-			delta_reward = mlp_reward - teacher_reward
-			teacher_comp_line = format_component_summary("Teacher", teacher_components)
-			mlp_comp_line = format_component_summary("MLP", mlp_components)
-			summary_lines = [
-				"Teacher results -> reward: {:.3f}, csv: {}".format(teacher_reward, teacher_csv),
-				"MLP results     -> reward: {:.3f}, csv: {}".format(mlp_reward, mlp_csv),
-				"Reward delta (MLP - Teacher): {:.3f}".format(delta_reward),
-				teacher_comp_line,
-				mlp_comp_line,
-			]
-			for line in summary_lines:
-				print(line)
+				mlp_reward, mlp_components, mlp_env_df, mlp_csv = rollout_env(
+					config,
+					dataframe,
+					mlp_policy(model, device),
+					"mlp",
+					teacher_mask,
+					start_date,
+					days,
+				)
 
-			teacher_env_df = enrich_operation_df(teacher_env_df, config)
-			mlp_env_df = enrich_operation_df(mlp_env_df, config)
-			power_ylim = compute_power_limits(teacher_env_df, mlp_env_df)
+				delta_reward = mlp_reward - teacher_reward
+				teacher_comp_line = format_component_summary("Teacher", teacher_components)
+				mlp_comp_line = format_component_summary("MLP", mlp_components)
+				summary_lines = [
+					"Teacher results -> reward: {:.3f}, csv: {}".format(teacher_reward, teacher_csv),
+					"MLP results     -> reward: {:.3f}, csv: {}".format(mlp_reward, mlp_csv),
+					"Reward delta (MLP - Teacher): {:.3f}".format(delta_reward),
+					teacher_comp_line,
+					mlp_comp_line,
+				]
+				for line in summary_lines:
+					print(line)
 
-			teacher_out = run_dir
-			mlp_out = run_dir
-			teacher_plot = plot_power_and_soc(teacher_env_df, "teacher", power_ylim, teacher_out)
-			mlp_plot = plot_power_and_soc(mlp_env_df, "mlp", power_ylim, mlp_out)
+				teacher_env_df = enrich_operation_df(teacher_env_df, config)
+				mlp_env_df = enrich_operation_df(mlp_env_df, config)
+				power_ylim = compute_power_limits(teacher_env_df, mlp_env_df)
 
-			plot_line = f"Power/SOC plots saved: {teacher_plot} {mlp_plot}"
-			print(plot_line)
-			summary_lines.append(plot_line)
-			summary_json_path = export_summary(
-				mlp_out,
-				hparams,
-				mask_payload,
-				{
-					"teacher_reward": teacher_reward,
-					"mlp_reward": mlp_reward,
-					"delta_reward": delta_reward,
-					"teacher_components": teacher_components,
-					"mlp_components": mlp_components,
-				},
-			)
-			summary_lines.append(f"Evaluation summary JSON: {summary_json_path}")
-			text_summary_path = save_json_summary(mlp_out, summary_lines)
-			print(f"JSON summary saved to {text_summary_path}")
+				teacher_out = run_dir
+				mlp_out = run_dir
+				teacher_plot = plot_power_and_soc(teacher_env_df, "teacher", power_ylim, teacher_out)
+				mlp_plot = plot_power_and_soc(mlp_env_df, "mlp", power_ylim, mlp_out)
+
+				plot_line = f"Power/SOC plots saved: {teacher_plot} {mlp_plot}"
+				print(plot_line)
+				summary_lines.append(plot_line)
+				summary_json_path = export_summary(
+					mlp_out,
+					hparams,
+					mask_payload,
+					{
+						"teacher_reward": teacher_reward,
+						"mlp_reward": mlp_reward,
+						"delta_reward": delta_reward,
+						"teacher_components": teacher_components,
+						"mlp_components": mlp_components,
+					},
+				)
+				summary_lines.append(f"Evaluation summary JSON: {summary_json_path}")
+				text_summary_path = save_json_summary(mlp_out, summary_lines)
+				print(f"JSON summary saved to {text_summary_path}")
 
 
 if __name__ == "__main__":
