@@ -388,46 +388,46 @@ def main() -> None:
                     seq_len,
                 )
 
-            teacher_env_df = enrich_operation_df(teacher_env_df, config)
-            actor_env_df = enrich_operation_df(actor_env_df, config)
-            teacher_csv = run_dir / f"{run_label}_teacher_env.csv"
-            actor_csv = run_dir / f"{run_label}_actor_env.csv"
-            teacher_env_df.to_csv(teacher_csv)
-            actor_env_df.to_csv(actor_csv)
+                teacher_env_df = enrich_operation_df(teacher_env_df, config)
+                actor_env_df = enrich_operation_df(actor_env_df, config)
+                teacher_csv = run_dir / f"{run_label}_teacher_env.csv"
+                actor_csv = run_dir / f"{run_label}_actor_env.csv"
+                teacher_env_df.to_csv(teacher_csv)
+                actor_env_df.to_csv(actor_csv)
 
-            power_ylim = compute_power_limits(teacher_env_df, actor_env_df)
-            teacher_plot = plot_power_and_soc(teacher_env_df, "teacher", power_ylim, run_dir)
-            actor_plot = plot_power_and_soc(actor_env_df, "actor", power_ylim, run_dir)
+                power_ylim = compute_power_limits(teacher_env_df, actor_env_df)
+                teacher_plot = plot_power_and_soc(teacher_env_df, "teacher", power_ylim, run_dir)
+                actor_plot = plot_power_and_soc(actor_env_df, "actor", power_ylim, run_dir)
 
-            delta_reward = actor_reward - teacher_reward
-            teacher_comp_line = format_component_summary("Teacher", teacher_components)
-            actor_comp_line = format_component_summary("Actor", actor_components)
-            summary_lines = [
-                f"Teacher results -> reward: {teacher_reward:.3f}, csv: {teacher_csv}",
-                f"Actor results   -> reward: {actor_reward:.3f}, csv: {actor_csv}",
-                f"Reward delta (Actor - Teacher): {delta_reward:.3f}",
-                teacher_comp_line,
-                actor_comp_line,
-                f"Power/SOC plots saved: {teacher_plot} {actor_plot}",
-            ]
-            for line in summary_lines:
-                print(line)
+                delta_reward = actor_reward - teacher_reward
+                teacher_comp_line = format_component_summary("Teacher", teacher_components)
+                actor_comp_line = format_component_summary("Actor", actor_components)
+                summary_lines = [
+                    f"Teacher results -> reward: {teacher_reward:.3f}, csv: {teacher_csv}",
+                    f"Actor results   -> reward: {actor_reward:.3f}, csv: {actor_csv}",
+                    f"Reward delta (Actor - Teacher): {delta_reward:.3f}",
+                    teacher_comp_line,
+                    actor_comp_line,
+                    f"Power/SOC plots saved: {teacher_plot} {actor_plot}",
+                ]
+                for line in summary_lines:
+                    print(line)
 
-            summary_json_path = export_summary(
-                run_dir,
-                hparams,
-                mask_payload,
-                {
-                    "teacher_reward": teacher_reward,
-                    "actor_reward": actor_reward,
-                    "delta_reward": delta_reward,
-                    "teacher_components": teacher_components,
-                    "actor_components": actor_components,
-                },
-            )
-            summary_lines.append(f"Evaluation summary JSON: {summary_json_path}")
-            text_summary_path = save_json_summary(run_dir, summary_lines)
-            print(f"JSON summary saved to {text_summary_path}")
+                summary_json_path = export_summary(
+                    run_dir,
+                    hparams,
+                    mask_payload,
+                    {
+                        "teacher_reward": teacher_reward,
+                        "actor_reward": actor_reward,
+                        "delta_reward": delta_reward,
+                        "teacher_components": teacher_components,
+                        "actor_components": actor_components,
+                    },
+                )
+                summary_lines.append(f"Evaluation summary JSON: {summary_json_path}")
+                text_summary_path = save_json_summary(run_dir, summary_lines)
+                print(f"JSON summary saved to {text_summary_path}")
 
 
 def solve_teacher(config: dict, dataframe: pd.DataFrame, start_date: str, days: int) -> pd.DataFrame:

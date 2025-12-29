@@ -32,9 +32,35 @@ TARIFF_OVERRIDE: str | None = None
 TARIFFS: list[str] | None = ["tar_s", "tar_w", "tar_sw", "tar_flat", "tar_tou"]
 BASE_RUN_LABEL = "rl-finetune-mlp-td3"
 DATASETS = ["WY", "CY"]
-RUN_SCHEDULE: list[tuple[str, int]] = [("01/01/2000 00:00", 365)]
+RUN_SCHEDULE: list[tuple[str, int]] = [
+	("01/01/2000 00:00", 365),
+	("01/01/2000 00:00", 10),
+	("01/02/2000 00:00", 10),
+	("01/03/2000 00:00", 10),
+	("01/04/2000 00:00", 10),
+	("01/05/2000 00:00", 10),
+	("01/06/2000 00:00", 10),
+	("01/07/2000 00:00", 10),
+	("01/08/2000 00:00", 10),
+	("01/09/2000 00:00", 10),
+	("01/10/2000 00:00", 10),
+	("01/11/2000 00:00", 10),
+	("01/12/2000 00:00", 10),
+]
 SOLVER_NAME = "gurobi"
 MODEL_JSON = Path(__file__).with_name("model.json")
+
+
+def _load_tariff_label(config_path: Path, override: str | None) -> str:
+    label = override
+    if label is None:
+        with open(config_path, "r", encoding="utf-8") as fp:
+            config = json.load(fp)
+        label = config["Grid"].get("tariff_column")
+    text = str(label).strip()
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", text)
+    return cleaned or "default_tariff"
+
 
 TARIFF_LABEL = _load_tariff_label(CONFIG_PATH, TARIFF_OVERRIDE)
 RESULTS_ROOT = RESULTS_BASE / TARIFF_LABEL / MODEL_SUBDIR / "train"
@@ -382,46 +408,46 @@ def main() -> None:
                     days,
                 )
 
-            teacher_env_df = enrich_operation_df(teacher_env_df, config)
-            actor_env_df = enrich_operation_df(actor_env_df, config)
-            teacher_csv = run_dir / f"{run_label}_teacher_env.csv"
-            actor_csv = run_dir / f"{run_label}_actor_env.csv"
-            teacher_env_df.to_csv(teacher_csv)
-            actor_env_df.to_csv(actor_csv)
+                teacher_env_df = enrich_operation_df(teacher_env_df, config)
+                actor_env_df = enrich_operation_df(actor_env_df, config)
+                teacher_csv = run_dir / f"{run_label}_teacher_env.csv"
+                actor_csv = run_dir / f"{run_label}_actor_env.csv"
+                teacher_env_df.to_csv(teacher_csv)
+                actor_env_df.to_csv(actor_csv)
 
-            power_ylim = compute_power_limits(teacher_env_df, actor_env_df)
-            teacher_plot = plot_power_and_soc(teacher_env_df, "teacher", power_ylim, run_dir)
-            actor_plot = plot_power_and_soc(actor_env_df, "actor", power_ylim, run_dir)
+                power_ylim = compute_power_limits(teacher_env_df, actor_env_df)
+                teacher_plot = plot_power_and_soc(teacher_env_df, "teacher", power_ylim, run_dir)
+                actor_plot = plot_power_and_soc(actor_env_df, "actor", power_ylim, run_dir)
 
-            delta_reward = actor_reward - teacher_reward
-            teacher_comp_line = format_component_summary("Teacher", teacher_components)
-            actor_comp_line = format_component_summary("Actor", actor_components)
-            summary_lines = [
-                f"Teacher results -> reward: {teacher_reward:.3f}, csv: {teacher_csv}",
-                f"Actor results   -> reward: {actor_reward:.3f}, csv: {actor_csv}",
-                f"Reward delta (Actor - Teacher): {delta_reward:.3f}",
-                teacher_comp_line,
-                actor_comp_line,
-                f"Power/SOC plots saved: {teacher_plot} {actor_plot}",
-            ]
-            for line in summary_lines:
-                print(line)
+                delta_reward = actor_reward - teacher_reward
+                teacher_comp_line = format_component_summary("Teacher", teacher_components)
+                actor_comp_line = format_component_summary("Actor", actor_components)
+                summary_lines = [
+                    f"Teacher results -> reward: {teacher_reward:.3f}, csv: {teacher_csv}",
+                    f"Actor results   -> reward: {actor_reward:.3f}, csv: {actor_csv}",
+                    f"Reward delta (Actor - Teacher): {delta_reward:.3f}",
+                    teacher_comp_line,
+                    actor_comp_line,
+                    f"Power/SOC plots saved: {teacher_plot} {actor_plot}",
+                ]
+                for line in summary_lines:
+                    print(line)
 
-            summary_json_path = export_summary(
-                run_dir,
-                hparams,
-                mask_payload,
-                {
-                    "teacher_reward": teacher_reward,
-                    "actor_reward": actor_reward,
-                    "delta_reward": delta_reward,
-                    "teacher_components": teacher_components,
-                    "actor_components": actor_components,
-                },
-            )
-            summary_lines.append(f"Evaluation summary JSON: {summary_json_path}")
-            text_summary_path = save_json_summary(run_dir, summary_lines)
-            print(f"JSON summary saved to {text_summary_path}")
+                summary_json_path = export_summary(
+                    run_dir,
+                    hparams,
+                    mask_payload,
+                    {
+                        "teacher_reward": teacher_reward,
+                        "actor_reward": actor_reward,
+                        "delta_reward": delta_reward,
+                        "teacher_components": teacher_components,
+                        "actor_components": actor_components,
+                    },
+                )
+                summary_lines.append(f"Evaluation summary JSON: {summary_json_path}")
+                text_summary_path = save_json_summary(run_dir, summary_lines)
+                print(f"JSON summary saved to {text_summary_path}")
 
 
 def solve_teacher(config: dict, dataframe: pd.DataFrame, start_date: str, days: int) -> pd.DataFrame:
