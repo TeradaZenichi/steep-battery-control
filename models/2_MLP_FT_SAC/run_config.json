@@ -1,0 +1,287 @@
+{
+  "experiment": {
+    "name": "sac_finetune_per_tariff",
+    "seed": 123,
+    "device": "cuda",
+    "results_root": "Results",
+
+    "model_id": "2_MLP_FT_SAC",
+    "model_dir": "models/2_MLP_FT_SAC",
+
+    "tariffs": ["tar_s", "tar_w", "tar_sw", "tar_flat", "tar_tou"]
+  },
+
+  "sac": {
+    "algorithm": "SAC",
+
+    "actor": {
+      "actor_source": "models/1_MLP_IL/model.py",
+      "actor_class": "Actor",
+      "init_from_il": true,
+      "deterministic_action_eval": true,
+      "notes": "Actor architecture is copied from 1_MLP_IL for checkpoint compatibility."
+    },
+
+    "critics": {
+      "twin_q": true,
+
+      "architecture": {
+        "type": "mlp",
+        "input": "concat_state_action",
+        "hidden_layers": [256, 256],
+        "activation": "relu",
+        "layer_norm": false,
+        "dropout": 0.0,
+        "output_dim": 1
+      },
+
+      "optimizer": {
+        "lr": 0.0003,
+        "weight_decay": 0.0,
+        "betas": [0.9, 0.999],
+        "eps": 1e-8
+      },
+
+      "training": {
+        "loss": "mse",
+        "target_update": {
+          "tau": 0.005,
+          "update_every_steps": 1
+        },
+        "grad_clip_norm": 5.0
+      },
+
+      "initialization": {
+        "init_type": "xavier_uniform",
+        "bias_init": "zeros"
+      }
+    },
+
+    "common": {
+      "gamma": 0.99,
+      "batch_size": 256,
+      "replay_buffer_size": 2000000,
+      "learning_starts": 5000,
+      "updates_per_env_step": 1
+    },
+
+    "actor_optimizer": {
+      "lr": 0.0003,
+      "weight_decay": 0.0,
+      "betas": [0.9, 0.999],
+      "eps": 1e-8
+    },
+
+    "entropy": {
+      "target_entropy": "auto",
+      "alpha": {
+        "mode": "auto",
+        "alpha_init": 0.05,
+        "alpha_min": 0.001,
+        "alpha_max": 0.5,
+        "alpha_lr": 0.0003
+      }
+    },
+
+    "reward_scale": 1.0
+  },
+
+  "exploration_schedule": {
+    "type": "4_stage",
+    "stages": [
+      {
+        "stage_id": 1,
+        "name": "stabilization",
+        "steps": 40000,
+        "alpha_bounds": { "alpha_max": 0.02 },
+        "episode_days_sampler": { "values": [1, 2], "weights": [0.7, 0.3] }
+      },
+      {
+        "stage_id": 2,
+        "name": "controlled_discovery",
+        "steps": 40000,
+        "alpha_bounds": { "alpha_max": 0.08 },
+        "episode_days_sampler": { "values": [1, 2, 3, 5], "weights": [0.35, 0.30, 0.20, 0.15] }
+      },
+      {
+        "stage_id": 3,
+        "name": "high_exploration_bursts",
+        "steps": 60000,
+        "alpha_bounds": { "alpha_max": 0.20 },
+        "bursting": { "enabled": true, "burst_steps": 2000, "cooldown_steps": 4000 },
+        "episode_days_sampler": { "values": [2, 5, 7, 14], "weights": [0.15, 0.35, 0.35, 0.15] }
+      },
+      {
+        "stage_id": 4,
+        "name": "refinement",
+        "steps": 40000,
+        "alpha_bounds": { "alpha_max": 0.05 },
+        "episode_days_sampler": { "values": [5, 7, 14], "weights": [0.25, 0.50, 0.25] }
+      }
+    ]
+  },
+
+  "evaluation": {
+    "eval_every_steps": 5000,
+    "deterministic_eval": true,
+
+    "best_model_selection": {
+      "enabled": true,
+      "criterion": "lexicographic",
+      "primary_constraint": {
+        "metric": "grid_import_peak_kw",
+        "direction": "minimize",
+        "tolerance_rel": 0.0
+      },
+      "secondary_objective": {
+        "metric": "reward_per_day",
+        "direction": "maximize"
+      },
+      "min_improvement_rel": 0.001
+    },
+
+    "report_metrics": [
+      "reward_total",
+      "reward_per_day",
+      "grid_import_total_kwh",
+      "grid_import_peak_kw",
+      "soc_min",
+      "soc_max",
+      "soc_end"
+    ]
+  },
+
+  "paths_by_tariff": {
+    "tar_s": {
+      "resume_from_il": "Results/tar_s/1_MLP_IL/best.pt",
+      "output_dir": "Results/tar_s/2_MLP_FT_SAC"
+    },
+    "tar_w": {
+      "resume_from_il": "Results/tar_w/1_MLP_IL/best.pt",
+      "output_dir": "Results/tar_w/2_MLP_FT_SAC"
+    },
+    "tar_sw": {
+      "resume_from_il": "Results/tar_sw/1_MLP_IL/best.pt",
+      "output_dir": "Results/tar_sw/2_MLP_FT_SAC"
+    },
+    "tar_flat": {
+      "resume_from_il": "Results/tar_flat/1_MLP_IL/best.pt",
+      "output_dir": "Results/tar_flat/2_MLP_FT_SAC"
+    },
+    "tar_tou": {
+      "resume_from_il": "Results/tar_tou/1_MLP_IL/best.pt",
+      "output_dir": "Results/tar_tou/2_MLP_FT_SAC"
+    }
+  },
+
+  "val_runs": [
+    {
+      "data": "data/Simulation_CY_Cur_HP__PV5000-HB5000.csv",
+      "start_date": "15/03/2000 00:00",
+      "days": 2,
+      "run_label": "VAL_CY_Mar"
+    },
+    {
+      "data": "data/Simulation_CY_Cur_HP__PV5000-HB5000.csv",
+      "start_date": "10/06/2000 00:00",
+      "days": 2,
+      "run_label": "VAL_CY_Jun"
+    },
+    {
+      "data": "data/Simulation_WY_Cur_HP__PV5000-HB5000.csv",
+      "start_date": "21/07/2000 00:00",
+      "days": 2,
+      "run_label": "VAL_WY_Jul"
+    },
+    {
+      "data": "data/Simulation_WY_Cur_HP__PV5000-HB5000.csv",
+      "start_date": "15/11/2000 00:00",
+      "days": 2,
+      "run_label": "VAL_WY_Nov"
+    }
+  ],
+
+  "train_runs": [
+    {
+      "data": "data/Simulation_CY_Cur_HP__PV5000-HB5000.csv",
+      "start_date": "01/01/2000 00:00",
+      "days": 10,
+      "steps_to_run": 20000,
+      "run_label": "CY_Jan",
+      "stage_id": 1
+    },
+    {
+      "data": "data/Simulation_WY_Cur_HP__PV5000-HB5000.csv",
+      "start_date": "01/01/2000 00:00",
+      "days": 10,
+      "steps_to_run": 20000,
+      "run_label": "WY_Jan",
+      "stage_id": 1
+    },
+    {
+      "data": "data/Simulation_CY_Cur_HP__PV5000-HB5000.csv",
+      "start_date": "01/02/2000 00:00",
+      "days": 10,
+      "steps_to_run": 20000,
+      "run_label": "CY_Feb",
+      "stage_id": 2
+    },
+    {
+      "data": "data/Simulation_WY_Cur_HP__PV5000-HB5000.csv",
+      "start_date": "01/02/2000 00:00",
+      "days": 10,
+      "steps_to_run": 20000,
+      "run_label": "WY_Feb",
+      "stage_id": 2
+    },
+        {
+      "data": "data/Simulation_CY_Cur_HP__PV5000-HB5000.csv",
+      "start_date": "01/03/2000 00:00",
+      "days": 10,
+      "steps_to_run": 20000,
+      "run_label": "CY_Jan",
+      "stage_id": 3
+    },
+    {
+      "data": "data/Simulation_WY_Cur_HP__PV5000-HB5000.csv",
+      "start_date": "01/03/2000 00:00",
+      "days": 10,
+      "steps_to_run": 20000,
+      "run_label": "WY_Mar",
+      "stage_id": 3
+    },
+    {
+      "data": "data/Simulation_WY_Cur_HP__PV5000-HB5000.csv",
+      "start_date": "01/04/2000 00:00",
+      "days": 10,
+      "steps_to_run": 20000,
+      "run_label": "WY_Apr",
+      "stage_id": 4
+    },
+    {
+      "data": "data/Simulation_CY_Cur_HP__PV5000-HB5000.csv",
+      "start_date": "01/04/2000 00:00",
+      "days": 10,
+      "steps_to_run": 20000,
+      "run_label": "CY_Apr",
+      "stage_id": 4
+    }
+
+
+  ],
+
+  "test_runs": [
+    {
+      "data": "data/Simulation_CY_Fut_HP__PV5000-HB5000.csv",
+      "start_date": "01/01/2000 00:00",
+      "days": 365,
+      "run_label": "EVAL_CY_year"
+    },
+    {
+      "data": "data/Simulation_WY_Fut_HP__PV5000-HB5000.csv",
+      "start_date": "01/01/2000 00:00",
+      "days": 365,
+      "run_label": "EVAL_WY_year"
+    }
+  ]
+}

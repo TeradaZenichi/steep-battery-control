@@ -223,15 +223,15 @@ class Teacher:
             )
             bess_degradation = self.bess.cost_per_kwh * bess_throughput
             ev_degradation = self.ev.cost_per_kwh * ev_throughput
-            bess_ramp_cost = self.bess.ramp_penalty * sum(m.RampBESS[t] for t in self.Ωt)
-            ev_ramp_cost = self.ev.ramp_penalty * sum(m.RampEV[t] for t in self.Ωt)
+            # bess_ramp_cost = self.bess.ramp_penalty * sum(m.RampBESS[t] for t in self.Ωt) 
+            # ev_ramp_cost = self.ev.ramp_penalty * sum(m.RampEV[t] for t in self.Ωt) 
             return (
                 energy_cost
                 + curtailment_cost
                 + bess_degradation
                 + ev_degradation
-                + bess_ramp_cost
-                + ev_ramp_cost
+                # + bess_ramp_cost
+                # + ev_ramp_cost
             )
         self.model.objective = pyo.Objective(rule=objective_rule, sense=pyo.minimize)
 

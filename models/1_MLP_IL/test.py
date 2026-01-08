@@ -1,13 +1,10 @@
-from typing import Callable, Tuple
-from pathlib import Path
-import json
-import re
-import shutil
-import sys
-from datetime import datetime, timedelta
-import calendar
+from __future__ import annotations
 
-import matplotlib.pyplot as plt
+import json
+import sys
+from pathlib import Path
+from typing import Any
+
 import numpy as np
 import pandas as pd
 import torch
@@ -16,442 +13,337 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.append(str(Path(__file__).resolve().parent))
 
-from env.environment import SmartHomeEnv
-from hp import HyperParameters  
-from model import ImitationMLP    
-from opt import Teacher  
+from env.environment import SmartHomeEnv  # type: ignore
+from model import Actor  # type: ignore
+from opt import Teacher  # type: ignore
 
-
-
-# Evaluation configuration
-
-# 
-
-
-DATASETS = ["WY", "CY"]
-RUN_SCHEDULE: list[tuple[str, int]] = [
-	("01/01/2000 00:00", 365),
-	("01/01/2000 00:00", 10),
-	("01/02/2000 00:00", 10),
-	("01/03/2000 00:00", 10),
-	("01/04/2000 00:00", 10),
-	("01/05/2000 00:00", 10),
-	("01/06/2000 00:00", 10),
-	("01/07/2000 00:00", 10),
-	("01/08/2000 00:00", 10),
-	("01/09/2000 00:00", 10),
-	("01/10/2000 00:00", 10),
-	("01/11/2000 00:00", 10),
-	("01/12/2000 00:00", 10),
-]
 CONFIG_PATH = Path("data/parameters.json")
-DAYS = 10
-SOLVER_NAME = "gurobi"
-MODEL_JSON = Path(__file__).with_name("model.json")
-RESULTS_BASE = Path("Results")
+RESULTS_ROOT = Path("Results")
 MODEL_SUBDIR = "1_MLP_IL"
-TARIFF_OVERRIDE: str | None = None
-TARIFFS: list[str] | None = ["tar_s", "tar_w", "tar_sw", "tar_flat", "tar_tou"]
+
 SUMMARY_NAME = "evaluation_summary.json"
 SUMMARY_TEXT_NAME = "evaluation_summary_lines.json"
 
 
-def _load_tariff_label(config_path: Path, override: str | None) -> str:
-	label = override
-	if label is None:
-		with open(config_path, "r", encoding="utf-8") as fp:
-			config = json.load(fp)
-		label = config["Grid"]["tariff_column"]
-	text = str(label).strip()
-	cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", text)
-	return cleaned or "default_tariff"
-
-
-def _snapshot_config(target_dir: Path) -> None:
-	shutil.copy2(CONFIG_PATH, target_dir / "parameters.json")
-
-
-TARIFF_LABEL = _load_tariff_label(CONFIG_PATH, TARIFF_OVERRIDE)
-RESULTS_DIR = (RESULTS_BASE / TARIFF_LABEL / MODEL_SUBDIR)
-RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-CHECKPOINT_PATH = RESULTS_DIR / "best.pt"
-EXPORT_DIR = RESULTS_DIR
-
-
-def set_tariff_dirs(tariff_label: str) -> None:
-	global TARIFF_LABEL, RESULTS_DIR, CHECKPOINT_PATH, EXPORT_DIR
-	TARIFF_LABEL = tariff_label
-	RESULTS_DIR = RESULTS_BASE / TARIFF_LABEL / MODEL_SUBDIR
-	RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-	CHECKPOINT_PATH = RESULTS_DIR / "best.pt"
-	EXPORT_DIR = RESULTS_DIR
-
-
-# initialize default directories
-set_tariff_dirs(TARIFF_LABEL)
-
-
-def _export_dir_for(run_label: str) -> Path:
-	# place all outputs under a single dataset-month folder, e.g. "WY-jan-mar"
-	return RESULTS_DIR / run_label
-
-
-def _month_range_label(start_date_str: str, days: int) -> str:
-	try:
-		start = datetime.strptime(start_date_str, "%d/%m/%Y %H:%M")
-	except Exception:
-		start = datetime.strptime(start_date_str, "%d/%m/%Y")
-	end = start + timedelta(days=max(0, days - 1))
-	s = calendar.month_abbr[start.month].lower()
-	e = calendar.month_abbr[end.month].lower()
-	return f"{s}-{e}"
-
-
-
-REWARD_COMPONENT_KEYS = [
-	"bess_degradation",
-	"bess_penalty",
-	"ev_degradation",
-	"ev_penalty",
-	"grid_cost",
-	"grid_revenue",
-	"grid_penalty",
-]
-DELTA_ATTR_NAME = "\u0394t"
-
-
-def zero_reward_components() -> dict:
-	return {key: 0.0 for key in REWARD_COMPONENT_KEYS}
-
-
-def get_sim_delta_t(sim) -> float:
-	unicode_dt = getattr(sim, DELTA_ATTR_NAME, None)
-	if unicode_dt is not None:
-		return float(unicode_dt)
-	timestep_minutes = float(getattr(sim, "timestep", 60.0))
-	return timestep_minutes / 60.0
-
-
-def extract_reward_components(env: SmartHomeEnv) -> dict:
-	delta_t = get_sim_delta_t(env.sim)
-	return {
-		"bess_degradation": -float(env.bess._costdeg) * delta_t,
-		"bess_penalty": -float(env.bess._penalty) * delta_t,
-		"ev_degradation": -float(env.ev._costdeg) * delta_t,
-		"ev_penalty": -float(env.ev._penalty) * delta_t,
-		"grid_cost": -float(env.grid._cost) * delta_t,
-		"grid_revenue": float(env.grid._revenue) * delta_t,
-		"grid_penalty": -float(env.grid._penalty) * delta_t,
-	}
-
-
-def accumulate_reward_components(total: dict, step_values: dict) -> None:
-	for key, value in step_values.items():
-		total[key] = total.get(key, 0.0) + float(value)
-
-
-def format_component_summary(label: str, components: dict) -> str:
-	parts = [f"{key}={components.get(key, 0.0):.3f}" for key in REWARD_COMPONENT_KEYS]
-	return f"{label} components -> " + ", ".join(parts)
-
-
-def resolve_state_mask(payload: dict | None) -> np.ndarray | None:
-	if not payload:
-		return None
-	vector = payload.get("vector")
-	if vector is None:
-		return None
-	mask_array = np.asarray(vector, dtype=bool)
-	return mask_array if mask_array.size else None
-
-
-def load_config_and_data(data_path: Path) -> Tuple[dict, pd.DataFrame]:
-	with open(CONFIG_PATH, "r", encoding="utf-8") as fp:
-		config = json.load(fp)
-	dataframe = pd.read_csv(data_path, sep=";")
-	return config, dataframe
-
-
-def solve_teacher(config: dict, dataframe: pd.DataFrame, start_date: str, days: int) -> pd.DataFrame:
-	teacher = Teacher(config, dataframe=dataframe, start_date=start_date, days=days)
-	teacher.build(start_soc=0.5)
-	teacher.solve(solver_name=SOLVER_NAME)
-	return teacher.results_df()
-
-
-def load_model(device: torch.device) -> Tuple[ImitationMLP, HyperParameters, dict | None]:
-	checkpoint = torch.load(CHECKPOINT_PATH, map_location=device)
-	hparams_payload = checkpoint.get("hparams")
-	if hparams_payload is not None:
-		hparams = HyperParameters.from_dict(hparams_payload)
-	else:
-		hparams = HyperParameters.from_json(MODEL_JSON)
-	model = ImitationMLP(hparams).to(device)
-	model.load_state_dict(checkpoint["state_dict"])
-	model.eval()
-	return model, hparams, checkpoint.get("state_mask")
-
-
-def rollout_env(
-	config: dict,
-	dataframe: pd.DataFrame,
-	policy_fn: Callable,
-	label: str,
-	state_mask: np.ndarray | None,
-	start_date: str,
-	days: int,
-	) -> Tuple[float, dict, pd.DataFrame, Path]:
-	env = SmartHomeEnv(config, dataframe=dataframe, days=days, state_mask=state_mask, start_date=start_date)
-	obs, _ = env.reset()
-	env.bess.reset(soc_init=0.5)
-	total_reward = 0.0
-	components = zero_reward_components()
-	while not env.done:
-		action = policy_fn(env, obs)
-		obs, reward, done, _ = env.step(action)
-		total_reward += reward
-		accumulate_reward_components(components, extract_reward_components(env))
-	local_export = _export_dir_for(label)
-	export_path = local_export / f"{label}_env_replay.csv"
-	export_path.parent.mkdir(parents=True, exist_ok=True)
-	df = env.build_operation_dataframe()
-	df.to_csv(export_path)
-	return total_reward, components, df, export_path
-
-
-def teacher_policy(results_df: pd.DataFrame) -> Callable:
-	def _policy(env: SmartHomeEnv, _obs: np.ndarray) -> np.ndarray:
-		ts = env.sim.current_datetime
-		row = results_df.loc[ts, ["PBESS", "Pev", "chi_pv"]]
-		return row.to_numpy(dtype=np.float32)
-
-	return _policy
-
-
-def mlp_policy(model: ImitationMLP, device: torch.device) -> Callable:
-	first_call = {"checked": False}
-
-	def _policy(env: SmartHomeEnv, obs: np.ndarray) -> np.ndarray:
-		if not first_call["checked"]:
-			if obs.shape[0] != model.hparams.input_dim:
-				raise ValueError(
-					f"Observation dimension {obs.shape[0]} does not match model input {model.hparams.input_dim}."
-				)
-			first_call["checked"] = True
-		tensor = torch.as_tensor(obs, dtype=torch.float32, device=device).unsqueeze(0)
-		with torch.no_grad():
-			action = model(tensor).squeeze(0).cpu().numpy()
-		low = env.action_space.low
-		high = env.action_space.high
-		return np.clip(action, low, high)
-
-	return _policy
-
-
-def enrich_operation_df(df: pd.DataFrame, config: dict) -> pd.DataFrame:
-	enriched = df.copy()
-	if "ppv_curtailed" in enriched:
-		enriched["Ppv_available"] = enriched["Ppv"].fillna(0.0) + enriched["ppv_curtailed"].fillna(0.0)
-	elif "produced_electricity_rate_W" in enriched:
-		enriched["Ppv_available"] = enriched["produced_electricity_rate_W"].astype(float) / 1000.0
-	else:
-		enriched["Ppv_available"] = enriched["Ppv"].fillna(0.0)
-
-	bess_emax = float(config.get("BESS", {}).get("Emax", 1.0))
-	ev_emax = float(config.get("EV", {}).get("Emax", 1.0))
-	enriched["soc_bess"] = enriched.get("EBESS", 0.0) / max(bess_emax, 1e-6)
-	enriched["soc_ev"] = enriched.get("Eev", 0.0) / max(ev_emax, 1e-6)
-	return enriched
-
-
-def compute_power_limits(df_teacher: pd.DataFrame, df_mlp: pd.DataFrame) -> Tuple[float, float]:
-	power_cols = ["Pgrid", "PBESS", "Load", "Ppv", "Ppv_available"]
-	combined = []
-	for df in (df_teacher, df_mlp):
-		combined.append(df[power_cols].to_numpy(dtype=float).flatten())
-	series = np.concatenate(combined)
-	finite = series[np.isfinite(series)]
-	if finite.size == 0:
-		return -1.0, 1.0
-	ymin = float(finite.min())
-	ymax = float(finite.max())
-	if np.isclose(ymin, ymax):
-		margin = max(1.0, abs(ymin) * 0.1)
-		return ymin - margin, ymax + margin
-	span = ymax - ymin
-	padding = 0.05 * span
-	return ymin - padding, ymax + padding
-
-
-def plot_power_and_soc(df: pd.DataFrame, label: str, ylim: Tuple[float, float], output_dir: Path) -> Path:
-	fname = output_dir / f"{label}_power_soc.pdf"
-	fig, (ax_power, ax_soc) = plt.subplots(
-		2,
-		1,
-		figsize=(10, 6),
-		sharex=True,
-		gridspec_kw={"height_ratios": [2.5, 1.0]},
-	)
-	idx = df.index
-
-	ax_power.plot(idx, df["Load"], color="black", marker="o", markersize=2, linewidth=1.0, label="Load")
-	ax_power.plot(idx, df["Ppv"], color="#f2c94c", linewidth=1.5, label="PV")
-	if "Ppv_available" in df:
-		ax_power.fill_between(
-			idx,
-			df["Ppv"],
-			df["Ppv_available"],
-			color="#f2c94c",
-			alpha=0.3,
-			label="PV curtailment",
-		)
-	ax_power.plot(idx, df["Pgrid"], color="#2f80ed", linewidth=1.5, label="Grid")
-	ax_power.bar(idx, df["PBESS"], width=0.01, color="#eb5757", label="BESS")
-	ev_col = "Pev" if "Pev" in df.columns else "PEV"
-	if ev_col in df:
-		ev_series = df[ev_col]
-		ax_power.bar(idx, ev_series, width=0.01, color="#27ae60", label="EV")
-		ax_power.plot(idx, ev_series, color="#219653", linewidth=1.0, linestyle="--", label="EV power")
-	ax_power.set_ylabel("Power (kW)")
-	ax_power.set_ylim(ylim)
-	ax_power.legend(loc="lower right")
-	ax_power.grid(True, alpha=0.3)
-
-	ax_soc.plot(idx, df["soc_bess"], label="SOC_BESS")
-	ax_soc.plot(idx, df["soc_ev"], label="SOC_EV")
-	ax_soc.set_ylabel("SOC")
-	ax_soc.set_xlabel("Time")
-	ax_soc.set_ylim(0.0, 1.05)
-	ax_soc.legend(loc="upper right")
-	ax_soc.grid(True, alpha=0.3)
-
-	fig.autofmt_xdate()
-	fig.tight_layout()
-	fig.savefig(fname)
-	plt.close(fig)
-	return fname
-
-
-def export_summary(
-	output_dir: Path,
-	hparams: HyperParameters,
-	mask_payload: dict | None,
-	metrics: dict,
-) -> Path:
-	output_dir.mkdir(parents=True, exist_ok=True)
-	summary = {
-		"hyperparameters": hparams.to_dict(),
-		"metrics": metrics,
-		"state_mask": None,
-	}
-	if mask_payload:
-		vector = np.asarray(mask_payload.get("vector", []), dtype=bool)
-		labels = [str(label) for label in mask_payload.get("labels", [])]
-		enabled = [label for label, flag in zip(labels, vector) if flag]
-		disabled = [label for label, flag in zip(labels, vector) if not flag]
-		summary["state_mask"] = {
-			"spec": mask_payload.get("spec", "unknown"),
-			"vector": vector.astype(int).tolist(),
-			"labels": labels,
-			"enabled_features": enabled,
-			"disabled_features": disabled,
-		}
-	summary_path = output_dir / SUMMARY_NAME
-	with open(summary_path, "w", encoding="utf-8") as fp:
-		json.dump(summary, fp, indent=2)
-	print(f"Evaluation summary saved to {summary_path}")
-	return summary_path
-
-
-def save_json_summary(output_dir: Path, lines: list[str]) -> Path:
-	output_dir.mkdir(parents=True, exist_ok=True)
-	text_path = output_dir / SUMMARY_TEXT_NAME
-	with open(text_path, "w", encoding="utf-8") as fp:
-		json.dump({"lines": lines}, fp, indent=2)
-	return text_path
-
-
-def main() -> None:
-	device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-	base_tariff = _load_tariff_label(CONFIG_PATH, TARIFF_OVERRIDE)
-	tariffs = [str(t) for t in (TARIFFS if TARIFFS else [base_tariff])]
-
-	for tariff in tariffs:
-		set_tariff_dirs(tariff)
-		model, hparams, mask_payload = load_model(device)
-		teacher_mask = resolve_state_mask(mask_payload)
-
-		for dataset in DATASETS:
-			data_path = Path(f"data/Simulation_{dataset}_Fut_HP__PV5000-HB5000.csv")
-			config, dataframe = load_config_and_data(data_path)
-			for start_date, days in RUN_SCHEDULE:
-				run_label = f"{dataset}-{_month_range_label(start_date, days)}"
-				run_dir = _export_dir_for(run_label)
-				run_dir.mkdir(parents=True, exist_ok=True)
-				_snapshot_config(run_dir)
-				teacher_df = solve_teacher(config, dataframe, start_date, days)
-
-				teacher_reward, teacher_components, teacher_env_df, teacher_csv = rollout_env(
-					config,
-					dataframe,
-					teacher_policy(teacher_df),
-					"teacher",
-					teacher_mask,
-					start_date,
-					days,
-				)
-
-				mlp_reward, mlp_components, mlp_env_df, mlp_csv = rollout_env(
-					config,
-					dataframe,
-					mlp_policy(model, device),
-					"mlp",
-					teacher_mask,
-					start_date,
-					days,
-				)
-
-				delta_reward = mlp_reward - teacher_reward
-				teacher_comp_line = format_component_summary("Teacher", teacher_components)
-				mlp_comp_line = format_component_summary("MLP", mlp_components)
-				summary_lines = [
-					"Teacher results -> reward: {:.3f}, csv: {}".format(teacher_reward, teacher_csv),
-					"MLP results     -> reward: {:.3f}, csv: {}".format(mlp_reward, mlp_csv),
-					"Reward delta (MLP - Teacher): {:.3f}".format(delta_reward),
-					teacher_comp_line,
-					mlp_comp_line,
-				]
-				for line in summary_lines:
-					print(line)
-
-				teacher_env_df = enrich_operation_df(teacher_env_df, config)
-				mlp_env_df = enrich_operation_df(mlp_env_df, config)
-				power_ylim = compute_power_limits(teacher_env_df, mlp_env_df)
-
-				teacher_out = run_dir
-				mlp_out = run_dir
-				teacher_plot = plot_power_and_soc(teacher_env_df, "teacher", power_ylim, teacher_out)
-				mlp_plot = plot_power_and_soc(mlp_env_df, "mlp", power_ylim, mlp_out)
-
-				plot_line = f"Power/SOC plots saved: {teacher_plot} {mlp_plot}"
-				print(plot_line)
-				summary_lines.append(plot_line)
-				summary_json_path = export_summary(
-					mlp_out,
-					hparams,
-					mask_payload,
-					{
-						"teacher_reward": teacher_reward,
-						"mlp_reward": mlp_reward,
-						"delta_reward": delta_reward,
-						"teacher_components": teacher_components,
-						"mlp_components": mlp_components,
-					},
-				)
-				summary_lines.append(f"Evaluation summary JSON: {summary_json_path}")
-				text_summary_path = save_json_summary(mlp_out, summary_lines)
-				print(f"JSON summary saved to {text_summary_path}")
+def resolve_project_path(p: str | Path) -> Path:
+    p = Path(p)
+    if p.is_absolute():
+        return p
+    return PROJECT_ROOT / p
+
+
+def load_config(config_path: Path) -> dict:
+    with open(config_path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def load_dataframe(data_path: Path) -> pd.DataFrame:
+    df = pd.read_csv(data_path)
+    if "timestamp" in df.columns:
+        df["timestamp"] = pd.to_datetime(df["timestamp"], dayfirst=True, errors="coerce")
+    return df
+
+
+def get_env_feature_names(cfg: dict, df: pd.DataFrame, start_date: str, days: int) -> list[str]:
+    env = SmartHomeEnv(cfg, dataframe=df, start_date=start_date, days=days, state_mask=None)
+    obs, _ = env.reset()
+    if hasattr(env, "state_feature_labels"):
+        return list(getattr(env, "state_feature_labels"))
+    if hasattr(env, "_feature_names"):
+        return list(getattr(env, "_feature_names"))
+    return [f"f_{i}" for i in range(len(obs))]
+
+
+def resolve_state_mask(mask_payload: Any, feature_names: list[str]) -> np.ndarray | None:
+    if mask_payload is None:
+        return None
+    if isinstance(mask_payload, (list, tuple, np.ndarray)):
+        m = np.array(mask_payload, dtype=bool)
+        return m if m.size == len(feature_names) else None
+    if isinstance(mask_payload, dict):
+        m = mask_payload.get("mask")
+        fn = mask_payload.get("feature_names")
+        if m is None:
+            return None
+        m = np.array(m, dtype=bool)
+        if fn is None:
+            return m if m.size == len(feature_names) else None
+        if isinstance(fn, (list, tuple)) and len(fn) == len(m):
+            idx = {str(n): i for i, n in enumerate(fn)}
+            out = np.zeros(len(feature_names), dtype=bool)
+            for j, name in enumerate(feature_names):
+                if name in idx:
+                    out[j] = bool(m[idx[name]])
+            return out
+    return None
+
+
+def get_env_action_dataframe(env: SmartHomeEnv) -> pd.DataFrame:
+    """DataFrame com as ações efetivamente aplicadas pelo ambiente (prefixo act_*)."""
+    acts = env.sim.get_action_history()
+    if not acts:
+        return pd.DataFrame()
+
+    records: list[dict] = []
+    index: list[pd.Timestamp] = []
+    for a in acts:
+        rec = {f"act_{k}": float(v) for k, v in a.items() if k != "timestamp"}
+        ts = pd.to_datetime(a.get("timestamp"))
+        records.append(rec)
+        index.append(ts)
+
+    df = pd.DataFrame(records, index=index)
+    df.index.name = "timestamp"
+    return df
+
+
+def safe_step(env: SmartHomeEnv, action: np.ndarray):
+    out = env.step(action)
+    if len(out) == 5:
+        o, r, done, trunc, info = out
+        return o, float(r), bool(done or trunc), info
+    o, r, term, trunc, info = out
+    return o, float(r), bool(term or trunc), info
+
+
+def rollout_policy(env: SmartHomeEnv, actor: Actor, device: str) -> tuple[float, list[dict[str, float]]]:
+    obs, _ = env.reset()
+    done = False
+    total_r = 0.0
+    comps: list[dict[str, float]] = []
+
+    with torch.no_grad():
+        while not done:
+            x = torch.tensor(obs, dtype=torch.float32, device=device).unsqueeze(0)
+            a = actor(x).detach().cpu().numpy().squeeze(0)
+
+            obs, r, done, info = safe_step(env, a)
+            total_r += r
+
+            comps.append(
+                {
+                    "bess_degradation": float(getattr(env.bess, "_costdeg", 0.0)),
+                    "bess_penalty": float(getattr(env.bess, "_penalty", 0.0)),
+                    "ev_degradation": float(getattr(env.ev, "_costdeg", 0.0)),
+                    "ev_penalty": float(getattr(env.ev, "_penalty", 0.0)),
+                    "grid_cost": float(getattr(env.grid, "_cost", 0.0)),
+                    "grid_revenue": float(getattr(env.grid, "_revenue", 0.0)),
+                    "grid_penalty": float(getattr(env.grid, "_penalty", 0.0)),
+                    "pv_curt_cost": float(info.get("pv_curt_cost", 0.0)),
+                    "reward": float(r),
+                }
+            )
+
+    return float(total_r), comps
+
+
+def load_actor_checkpoint(ckpt_path: Path, device: str):
+    ckpt = torch.load(ckpt_path, map_location=device)
+    if isinstance(ckpt, dict) and "state_dict" in ckpt:
+        state_dict = ckpt["state_dict"]
+        mask_payload = ckpt.get("state_mask_payload", None)
+    else:
+        state_dict = ckpt
+        mask_payload = None
+
+    actor = Actor()
+    actor.load_state_dict(state_dict)
+    actor.to(device)
+    actor.eval()
+    return actor, mask_payload
+
+
+def default_ckpt_for(tariff: str, results_root: Path) -> Path:
+    """
+    Resolve checkpoint path without requiring JSON changes.
+
+    Priority:
+    1) Results/<tariff>/<MODEL_SUBDIR>/best.pt   (your layout)
+    2) Results/<tariff>/<MODEL_SUBDIR>/last.pt
+    3) Results/<MODEL_SUBDIR>/<tariff>/best.pt  (older layout)
+    4) Results/<MODEL_SUBDIR>/<tariff>/last.pt
+    """
+    candidates = [
+        results_root / tariff / MODEL_SUBDIR / "best.pt",
+        # results_root / tariff / MODEL_SUBDIR / "last.pt",
+        # results_root / MODEL_SUBDIR / tariff / "best.pt",
+        # results_root / MODEL_SUBDIR / tariff / "last.pt",
+    ]
+    for p in candidates:
+        if p.exists():
+            return p
+
+    tried = "\n".join(str(p) for p in candidates)
+    raise FileNotFoundError(f"No checkpoint found for tariff='{tariff}'. Tried:\n{tried}")
+
+
+
+def _read_eval_runs(cfg: dict) -> list[dict]:
+    ev = cfg.get("eval") or {}
+    runs = ev.get("runs")
+    if runs:
+        return list(runs)
+    return list(cfg.get("runs", []))
+
+
+def _pick_available_solver() -> str:
+    return "gurobi"
+
+
+def solve_teacher_and_extract(cfg: dict, df: pd.DataFrame, start_date: str, days: int, tariff: str):
+    teacher = Teacher(cfg, solver=_pick_available_solver())
+    teacher_df, teacher_obj = teacher.solve(df, start_date=start_date, days=days, tariff=tariff)
+    return teacher_df, float(teacher_obj), getattr(teacher, "solver_name", "unknown")
+
+
+def rollout_teacher_actions(env: SmartHomeEnv, teacher_df: pd.DataFrame) -> tuple[float, list[dict[str, float]]]:
+    obs, _ = env.reset()
+    done = False
+    total_r = 0.0
+    comps: list[dict[str, float]] = []
+
+    for _, row in teacher_df.iterrows():
+        if done:
+            break
+        pb = float(row.get("PBESS", 0.0))
+        pe = float(row.get("Pev", 0.0))
+        x = float(row.get("chi_pv", 0.0))
+        obs, r, done, info = safe_step(env, np.array([pb, pe, x], dtype=np.float32))
+        total_r += r
+
+        comps.append(
+            {
+                "bess_degradation": float(getattr(env.bess, "_costdeg", 0.0)),
+                "bess_penalty": float(getattr(env.bess, "_penalty", 0.0)),
+                "ev_degradation": float(getattr(env.ev, "_costdeg", 0.0)),
+                "ev_penalty": float(getattr(env.ev, "_penalty", 0.0)),
+                "grid_cost": float(getattr(env.grid, "_cost", 0.0)),
+                "grid_revenue": float(getattr(env.grid, "_revenue", 0.0)),
+                "grid_penalty": float(getattr(env.grid, "_penalty", 0.0)),
+                "pv_curt_cost": float(info.get("pv_curt_cost", 0.0)),
+                "reward": float(r),
+            }
+        )
+
+    return float(total_r), comps
+
+
+def main():
+    config = load_config(resolve_project_path(CONFIG_PATH))
+    exp = config.get("experiment", {}) or {}
+
+    device = str(exp.get("device", "cpu"))
+    results_root = resolve_project_path(exp.get("results_root", RESULTS_ROOT))
+    tariffs = exp.get("tariffs", ["tar_s", "tar_w", "tar_sw", "tar_flat", "tar_tou"])
+    runs = _read_eval_runs(config)
+
+    # SEM subpasta evaluation
+    out_dir = results_root / MODEL_SUBDIR
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    summary: dict = {"runs": []}
+    lines: list[str] = []
+
+    for tariff in [str(t) for t in tariffs]:
+        ckpt_path = resolve_project_path(exp.get("checkpoint", default_ckpt_for(tariff, results_root)))
+        actor, mask_payload = load_actor_checkpoint(ckpt_path, device=device)
+
+        for r in runs:
+            data_path = resolve_project_path(r["data"])
+            df = load_dataframe(data_path)
+            start_date = str(r["start_date"])
+            days = int(r["days"])
+            run_label = str(r.get("run_label", Path(r["data"]).stem))
+
+            cfg = json.loads(json.dumps(config))
+            cfg.setdefault("Grid", {})
+            cfg["Grid"]["tariff_column"] = tariff
+
+            teacher_csv = out_dir / f"teacher_{tariff}_{run_label}.csv"
+
+            teacher_df, teacher_obj, teacher_solver = solve_teacher_and_extract(cfg, df, start_date, days, tariff)
+
+            env_teacher = SmartHomeEnv(cfg, dataframe=df, start_date=start_date, days=days, state_mask=None)
+            teacher_R, teacher_comps = rollout_teacher_actions(env_teacher, teacher_df)
+
+            # CSV teacher alinhado: *_teacher + act_*
+            act_df = get_env_action_dataframe(env_teacher)
+            log_df = teacher_df.copy()
+            log_df["Pev_teacher"] = log_df.get("Pev", np.nan)
+            log_df["Pbess_teacher"] = log_df.get("PBESS", np.nan)
+            log_df["Xbess_teacher"] = log_df.get("chi_pv", np.nan)
+            log_df = log_df.join(act_df, how="left")
+            log_df.to_csv(teacher_csv, index=True)
+
+            fn = get_env_feature_names(config, df, start_date, days)
+            sm = resolve_state_mask(mask_payload, fn)
+            env_actor = SmartHomeEnv(cfg, dataframe=df, start_date=start_date, days=days, state_mask=sm)
+            actor_R, actor_comps = rollout_policy(env_actor, actor, device=device)
+
+            delta = float(actor_R - teacher_R)
+            better = "tie" if abs(delta) < 1e-9 else ("actor" if delta > 0 else "teacher")
+
+            rec = {
+                "tariff": tariff,
+                "run_label": run_label,
+                "start_date": start_date,
+                "days": days,
+                "data": str(data_path),
+                "checkpoint": str(ckpt_path),
+                "actor_total_reward": float(actor_R),
+                "actor_components_sum": {
+                    k: float(np.sum([c.get(k, 0.0) for c in actor_comps]))
+                    for k in [
+                        "bess_degradation",
+                        "bess_penalty",
+                        "ev_degradation",
+                        "ev_penalty",
+                        "pv_curt_cost",
+                        "grid_cost",
+                        "grid_revenue",
+                        "grid_penalty",
+                        "reward",
+                    ]
+                },
+                "teacher_objective": float(teacher_obj),
+                "teacher_reward_equiv": float(-teacher_obj),
+                "teacher_solver": teacher_solver,
+                "teacher_decisions_path": str(teacher_csv),
+                "teacher_total_reward_env": float(teacher_R),
+                "teacher_components_sum": {
+                    k: float(np.sum([c.get(k, 0.0) for c in teacher_comps]))
+                    for k in [
+                        "bess_degradation",
+                        "bess_penalty",
+                        "ev_degradation",
+                        "ev_penalty",
+                        "pv_curt_cost",
+                        "grid_cost",
+                        "grid_revenue",
+                        "grid_penalty",
+                        "reward",
+                    ]
+                },
+                "delta_reward_actor_minus_teacher": float(delta),
+                "better": better,
+            }
+            summary["runs"].append(rec)
+
+            line = (
+                f"{tariff} {run_label} start={start_date} days={days} "
+                f"ActorR={actor_R:.3f} TeacherR={teacher_R:.3f} "
+                f"TeacherObj={teacher_obj:.3f} better={better} ΔR={delta:.3f} ckpt={ckpt_path.name}"
+            )
+            lines.append(line)
+            print(line)
+
+    with open(out_dir / SUMMARY_NAME, "w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2, default=str)
+    with open(out_dir / SUMMARY_TEXT_NAME, "w", encoding="utf-8") as f:
+        json.dump(lines, f, indent=2, ensure_ascii=False)
+
+    print(f"Saved summary to: {out_dir}")
 
 
 if __name__ == "__main__":
-	main()
+    main()
