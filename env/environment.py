@@ -92,6 +92,9 @@ class Simulation:
         ppv_curtailed,
         pbess_cmd=None,
         pev_cmd=None,
+        load_kw=None,
+        soc_bess=None,
+        soc_ev=None,
     ):
         d = {
             "step": self.current_step,
@@ -108,6 +111,12 @@ class Simulation:
             d["PBESS_cmd"] = float(pbess_cmd)
         if pev_cmd is not None:
             d["Pev_cmd"] = float(pev_cmd)
+        if load_kw is not None:
+            d["Pload"] = float(load_kw)
+        if soc_bess is not None:
+            d["soc_bess"] = float(soc_bess)
+        if soc_ev is not None:
+            d["soc_ev"] = float(soc_ev)
         self.action_history.append(d)
 
     def _pad(self, seq, n):
@@ -574,6 +583,9 @@ class SmartHomeEnv(gym.Env):
             ppv_curtailed,
             pbess_cmd=pb_bus,
             pev_cmd=pe_bus,
+            load_kw=self.load._pload,
+            soc_bess=self.bess.soc,
+            soc_ev=self.ev.soc,
         )
         self.grid.step(pgrid)
 

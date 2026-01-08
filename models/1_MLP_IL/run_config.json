@@ -10,8 +10,8 @@
   ],
 
   "eval": [
-    { "data": "data/Simulation_CY_Fut_HP__PV5000-HB5000.csv", "start_date": "01/01/2000 00:00", "days": 365, "run_label": "EVAL_CY_year" },
-    { "data": "data/Simulation_WY_Fut_HP__PV5000-HB5000.csv", "start_date": "01/01/2000 00:00", "days": 365, "run_label": "EVAL_WY_year" }
+    { "data": "data/Simulation_CY_Fut_HP__PV5000-HB5000.csv", "start_date": "01/01/2000 00:00", "days": 15, "run_label": "EVAL_CY_year" },
+    { "data": "data/Simulation_WY_Fut_HP__PV5000-HB5000.csv", "start_date": "01/01/2000 00:00", "days": 15, "run_label": "EVAL_WY_year" }
   ],
 
   "il": {

@@ -86,25 +86,64 @@ def extract_reward_components(env: SmartHomeEnv) -> dict:
     }
 
 
-def get_env_action_dataframe(env: SmartHomeEnv) -> pd.DataFrame:
-    """
-    IL-aligned: build a dataframe with the actions actually applied by the environment,
-    using act_* column names.
-    """
+def build_action_log(env: SmartHomeEnv) -> pd.DataFrame:
+    cols = [
+        "timestamp",
+        "PPV",
+        "Pload",
+        "PGRID",
+        "EBESS",
+        "SoCBESS",
+        "EEV",
+        "SoCEV",
+        "PBESS",
+        "PEV",
+        "XPV",
+    ]
+
     acts = env.sim.get_action_history()
     if not acts:
-        return pd.DataFrame()
+        return pd.DataFrame(columns=cols)
 
-    records: list[dict] = []
-    index: list[pd.Timestamp] = []
+    rows: list[dict[str, float]] = []
+    pmax_ev = max(getattr(env.ev, "Pmax_c", 0.0), getattr(env.ev, "Pmax_d", 0.0), 1e-9)
+
     for a in acts:
-        rec = {f"act_{k}": float(v) for k, v in a.items() if k != "timestamp"}
-        ts = pd.to_datetime(a.get("timestamp"))
-        records.append(rec)
-        index.append(ts)
+        soc_bess = a.get("soc_bess")
+        soc_ev = a.get("soc_ev")
+        pload = a.get("Pload")
+        step_idx = a.get("step")
 
-    df = pd.DataFrame(records, index=index)
-    df.index.name = "timestamp"
+        pbess_val = float(a.get("PBESS", np.nan))
+        pev_val = float(a.get("PEV", np.nan))
+        ppv_val = float(a.get("ppv_used", np.nan))
+
+        if pload is None and step_idx is not None:
+            try:
+                row = env.sim.dataframe.iloc[int(step_idx)]
+                pload = float(row.get(env.load.column, np.nan) / 1000.0)
+            except Exception:
+                pload = np.nan
+
+        rows.append(
+            {
+                "timestamp": pd.to_datetime(a.get("timestamp")),
+                "PPV": ppv_val,
+                "Pload": float(pload) if pload is not None else np.nan,
+                "PGRID": float(a.get("pgrid", np.nan)),
+                "EBESS": float(soc_bess * env.bess.Emax) if soc_bess is not None else np.nan,
+                "SoCBESS": float(soc_bess) if soc_bess is not None else np.nan,
+                "EEV": float(soc_ev * env.ev.Emax) if soc_ev is not None else np.nan,
+                "SoCEV": float(soc_ev) if soc_ev is not None else np.nan,
+                "PBESS": pbess_val,
+                "PEV": pev_val,
+                "XPV": float(a.get("XPV", np.nan)),
+            }
+        )
+
+    df = pd.DataFrame(rows, columns=cols)
+    num_cols = df.select_dtypes(include=["float", "int"]).columns
+    df[num_cols] = df[num_cols].round(4)
     return df
 
 
@@ -242,23 +281,6 @@ def rollout_teacher_actions(env: SmartHomeEnv, tdf: pd.DataFrame) -> tuple[float
     return R, grid_net, comps
 
 
-def build_teacher_log_df(teacher_df: pd.DataFrame, env_teacher: SmartHomeEnv) -> pd.DataFrame:
-    """
-    IL-aligned teacher log:
-      - keep teacher_df columns (PBESS, Pev, chi_pv, ...)
-      - add explicit *_teacher copies
-      - join env-applied actions with act_* prefix
-    """
-    act_df = get_env_action_dataframe(env_teacher)
-
-    log_df = teacher_df.copy()
-    log_df["Pev_teacher"] = log_df.get("Pev", np.nan)
-    log_df["Pbess_teacher"] = log_df.get("PBESS", np.nan)
-    log_df["Xbess_teacher"] = log_df.get("chi_pv", np.nan)
-
-    log_df = log_df.join(act_df, how="left")
-    return log_df
-
 
 def main() -> None:
     run_cfg = json.load(open(RUN_CONFIG_PATH, "r", encoding="utf-8")) if RUN_CONFIG_PATH.exists() else {}
@@ -271,10 +293,9 @@ def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     det_eval = bool(run_cfg.get("deterministic_eval", True))
     use_teacher = bool(run_cfg.get("use_teacher", True))
-    save_actor_actions = bool(run_cfg.get("save_actor_actions", False))
 
     # NOTE: kept as-is from your SAC script; change to results_root / MODEL_SUBDIR if you also want to remove "evaluation"
-    out_dir = results_root / MODEL_SUBDIR / "evaluation"
+    out_dir = results_root / MODEL_SUBDIR 
     out_dir.mkdir(parents=True, exist_ok=True)
 
     print(
@@ -305,11 +326,9 @@ def main() -> None:
 
             env_actor = SmartHomeEnv(cfg, dataframe=df, start_date=start_date, days=days, state_mask=sm)
             actor_R, actor_grid, actor_comps = rollout_policy(env_actor, actor, device=device, deterministic=det_eval)
-
-            if save_actor_actions:
-                adf = get_env_action_dataframe(env_actor)
-                if not adf.empty:
-                    adf.to_csv(out_dir / f"actor_{tariff}_{run_label}.csv", index=True)
+            actor_csv = out_dir / f"actor_{tariff}_{run_label}.csv"
+            actor_log = build_action_log(env_actor)
+            actor_log.to_csv(actor_csv, index=False)
 
             teacher_obj = teacher_R = teacher_grid = None
             teacher_solver = None
@@ -322,8 +341,8 @@ def main() -> None:
                 env_teacher = SmartHomeEnv(cfg, dataframe=df, start_date=start_date, days=days, state_mask=sm)
                 teacher_R, teacher_grid, teacher_comps = rollout_teacher_actions(env_teacher, teacher_df)
 
-                log_df = build_teacher_log_df(teacher_df, env_teacher)
-                log_df.to_csv(teacher_csv, index=True)
+                teacher_log = build_action_log(env_teacher)
+                teacher_log.to_csv(teacher_csv, index=False)
 
             delta = None if teacher_R is None else float(actor_R - float(teacher_R))
             better = None if teacher_R is None else ("tie" if abs(delta) < 1e-9 else ("actor" if delta > 0 else "teacher"))
@@ -336,6 +355,7 @@ def main() -> None:
                 "data": str(data_path),
                 "checkpoint": str(ckpt_path),
                 "deterministic_eval": det_eval,
+                "actor_actions_path": str(actor_csv),
                 "actor_total_reward": float(actor_R),
                 "actor_reward_per_day": float(actor_R / max(days, 1e-12)),
                 "actor_grid_net_cost_total": float(actor_grid),
