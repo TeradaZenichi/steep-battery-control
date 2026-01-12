@@ -1,0 +1,21 @@
+{
+  "config": "data/parameters.json",
+  "results_root": "Results",
+  "tariffs": ["tar_s", "tar_w", "tar_sw", "tar_flat", "tar_tou"],
+  "runs": [
+    {
+      "run_label": "CY_cur",
+      "data": "data/Simulation_CY_Cur_HP__PV5000-HB5000.csv",
+      "start_date": "01/01/2000 00:00",
+      "days": 30
+    },
+    {
+      "run_label": "WY_cur",
+      "data": "data/Simulation_WY_Cur_HP__PV5000-HB5000.csv",
+      "start_date": "01/01/2000 00:00",
+      "days": 30
+    }
+  ],
+  "solver": "gurobi",
+  "notes": "Runs Teacher optimization per tariff and compares Pgrid, EBESS, and EEV trajectories with the environment rollout using the teacher actions. Outputs are saved under Results/teacher_vs_env/."
+}

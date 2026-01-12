@@ -1,61 +1,77 @@
 {
-    "general":{
-        "timestep": 5,
-        "simulation_duration": 24,
-        "simulation_days": 1,
-        "Pnorm": 10,
-        "state_normalization": {
-            "Pmax": 10,
-            "drybulb_C": {"min": -14.0, "max": 42.2},
-            "relhum_percent": {"min": 38.0, "max": 101.0},
-            "Global Horizontal Radiation": {"min": 0.0, "max": 911.2},
-            "dni_Wm2": {"min": 0.0, "max": 869.5},
-            "dhi_Wm2": {"min": 0.0, "max": 461.6},
-            "Wind Speed (m/s)": {"min": 0.0, "max": 20.0},
-            "tariff_base": 1.0
-
-        }
-    },
-    "Grid":{
-        "Pmax_import": 5,
-        "Pmax_export": 1,
-        "net_penalty": 15,
-        "tariff_column": "tar_tou"
-    },
-    "BESS":{
-        "Pmax": 5,
-        "Emax": 5,
-        "DoD": 0.8,
-        "η": 0.950,
-        "β": 0.999,
-        "soc_min": 0.1,
-        "soc_max": 0.9,
-        "capex": 9000,
-        "ncycles": 8000,
-        "ramp_penalty": 0.05
-    },
-    "PV":{
-        "Pmax": 5
-    },
-    "Load":{
-        "Pmax": 10
-    },
-    "EV":{
-        "Pmax_c": 20,
-        "Pmax_d": 10,
-        "Emax": 40,
-        "DoD": 0.9,
-        "η": 0.920,
-        "β": 0.998,
-        "soc_min": 0.1,
-        "soc_max": 1.0,
-        "soc_init": 0.5,
-        "soh_init": 1.0,
-        "column": "ev_status",
-        "capex": 5000,
-        "ncycles": 10000,
-        "ramp_penalty": 0.05,
-        "penalty_coef": 0.0,
-        "penalty_departure": 5.0
+  "general": {
+    "timestep": 5,
+    "simulation_duration": 24,
+    "simulation_days": 1,
+    "Pnorm": 10,
+    "state_normalization": {
+      "Pmax": 10,
+      "drybulb_C": { "min": -14.0, "max": 42.2 },
+      "relhum_percent": { "min": 38.0, "max": 101.0 },
+      "Global Horizontal Radiation": { "min": 0.0, "max": 911.2 },
+      "dni_Wm2": { "min": 0.0, "max": 869.5 },
+      "dhi_Wm2": { "min": 0.0, "max": 461.6 },
+      "Wind Speed (m/s)": { "min": 0.0, "max": 20.0 },
+      "tariff_base": 1.0
     }
+  },
+  "Grid": {
+    "Pmax_import": 5,
+    "Pmax_export": 1,
+    "net_penalty": 15,
+    "tariff_column": "tar_tou"
+  },
+  "BESS": {
+    "Pmax": 5,
+    "Emax": 5,
+    "DoD": 0.8,
+    "η": 0.95,
+    "β": 0.999,
+    "soc_min": 0.1,
+    "soc_max": 0.9,
+    "capex": 9000,
+    "ncycles": 8000,
+    "ramp_penalty": 0.05,
+
+    "soc_power_curve_pu": {
+      "soc": [0.10, 0.20, 0.40, 0.60, 0.80, 0.90],
+      "charge_pu":    [1.00, 1.00, 1.00, 0.95, 0.70, 0.40],
+      "discharge_pu": [0.50, 0.80, 1.00, 1.00, 0.90, 0.70]
+    }
+  },
+  "PV": {
+    "Pmax": 5
+  },
+  "Load": {
+    "Pmax": 10
+  },
+  "EV": {
+    "Pmax_c": 20,
+    "Pmax_d": 10,
+    "Emax": 40,
+    "DoD": 0.9,
+    "η": 0.92,
+    "β": 0.998,
+    "soc_min": 0.0,
+    "soc_max": 1.0,
+    "soc_init": 0.5,
+    "soh_init": 1.0,
+    "column": "ev_status",
+    "capex": 5000,
+    "ncycles": 10000,
+    "ramp_penalty": 0.05,
+
+    "penalty_coef": 1.0,
+
+    "departure_penalty": {
+      "thresholds": [0.5, 0.8, 0.9, 1.0],
+      "weights":    [300.0, 40.0, 10.0, 2.0]
+    },
+
+    "soc_power_curve_pu": {
+      "soc": [0.00, 0.10, 0.30, 0.60, 0.85, 1.00],
+      "charge_pu":    [1.00, 1.00, 1.00, 0.90, 0.60, 0.30],
+      "discharge_pu": [1.00, 1.00, 0.90, 0.80, 0.60, 0.40]
+    }
+  }
 }
