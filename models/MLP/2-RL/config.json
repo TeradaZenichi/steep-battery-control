@@ -1,0 +1,8 @@
+{
+    "training":{
+
+    },
+    "runs":{
+        "comment": "Each run is an episode and should be used Nepisode times during training"
+    }
+}

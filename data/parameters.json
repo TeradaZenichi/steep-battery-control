@@ -11,7 +11,8 @@
       "Global Horizontal Radiation": { "min": 0.0, "max": 911.2 },
       "dni_Wm2": { "min": 0.0, "max": 869.5 },
       "dhi_Wm2": { "min": 0.0, "max": 461.6 },
-      "Wind Speed (m/s)": { "min": 0.0, "max": 20.0 },
+      "Wind Speed (m/s)": { "min": 0.0, "max": 359.0 },
+      "wdir_deg": { "min": 0.0, "max": 16.0 },
       "tariff_base": 1.0
     }
   },
@@ -26,7 +27,7 @@
     "Emax": 5,
     "DoD": 0.8,
     "η": 0.95,
-    "β": 0.999,
+    "β": 0.0004,
     "soc_min": 0.1,
     "soc_max": 0.9,
     "capex": 9000,
@@ -46,12 +47,12 @@
     "Pmax": 10
   },
   "EV": {
-    "Pmax_c": 20,
-    "Pmax_d": 10,
+    "Pmax_c": 10,
+    "Pmax_d": 5,
     "Emax": 40,
     "DoD": 0.9,
     "η": 0.92,
-    "β": 0.998,
+    "β": 0.0004,
     "soc_min": 0.0,
     "soc_max": 1.0,
     "soc_init": 0.5,
