@@ -2,7 +2,8 @@
     "actor": {
         "input_dim": 23,
         "hidden_dims": [256, 256],
-        "head_dim": 64
+        "head_dim": 64,
+        "output_dim": 3
     },
     "critic": {
         "state_dim": 23,

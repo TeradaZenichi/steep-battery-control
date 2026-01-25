@@ -48,7 +48,7 @@ for tariff in ["tar_s", "tar_w", "tar_sw", "tar_tou", "tar_flat"]:
         days = run["days"]
         BESS_SoC = run["soc"]
 
-        actor = load_actor(model_cfg["actor"], weights_path=f"Results/train/MLP/1-IL/{tariff}/best.pth")
+        actor = load_actor(model_cfg["actor"], weights_path=f"Results/train/MLP/1-IL/{tariff}/best.pth", device=DEVICE)
         teacher = Teacher(df, par, start, days, BESS_SoC, tariff)
         teacher.build()
         teacher.solve()

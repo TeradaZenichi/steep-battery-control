@@ -82,7 +82,8 @@ def main():
         train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
         val_loader = DataLoader(val_dataset, batch_size=batch_size)
         
-        model = load_actor(model_cfg["actor"]).to(DEVICE)
+        model = load_actor(model_cfg["actor"], device=DEVICE)
+
         criterion = nn.MSELoss()
         optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
         
@@ -121,6 +122,9 @@ def main():
                         "val_loss": val_loss
                     }, f, indent=4)
                 best_val, patience = val_loss, 0
+                with open(folder / "actor_cfg.json", "w", encoding="utf-8") as f:
+                    json.dump(model_cfg["actor"], f, indent=4)
+
             else:
                 patience += 1
                 if patience >= train_cfg["training"]["patience"]:

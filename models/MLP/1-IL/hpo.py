@@ -63,7 +63,8 @@ class HPO:
         train_loader = DataLoader(self.train_dataset, batch_size=batch_size, shuffle=True)
         val_loader = DataLoader(self.val_dataset, batch_size=batch_size)
         
-        model = load_actor(self.model_cfg["actor"]).to(DEVICE)
+        model = load_actor(self.model_cfg["actor"], device=DEVICE)
+
         criterion = nn.MSELoss()
         optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
         
@@ -99,11 +100,6 @@ class HPO:
         
         #save the found parameters in self
         #lr
-        self.best_params = {
-            "lr": lr,
-            "batch_size": batch_size,
-            "weight_decay": weight_decay
-        }
         return best_val
     
     def run(self, tariff):
@@ -115,5 +111,5 @@ class HPO:
         
         print(f"\nBest val_loss: {study.best_value:.6f}")
         print(f"Best params: {study.best_params}")
-        
+        self.best_params = study.best_params
         return study.best_params

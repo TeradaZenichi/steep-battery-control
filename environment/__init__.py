@@ -330,7 +330,18 @@ class SmartHomeEnv(gym.Env):
     
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
-        self.sim.step = self.sim.start
+        options = options or {}
+        if "start" in options:
+            self.sim.start = options["start"]
+            self.sim.end = self.sim.start + timedelta(days=self.sim.days)
+            self.sim.step = self.sim.start
+        else:
+            self.sim.step = self.sim.start
+        if "days" in options:
+            self.sim.days = options["days"]
+            self.sim.end = self.sim.start + timedelta(days=self.sim.days)
+        if "bess_soc" in options:
+            self.bess.soc0 = float(options["bess_soc"])
         self.bess.reset()
         self.load.reset()
         self.grid.reset()
@@ -338,6 +349,7 @@ class SmartHomeEnv(gym.Env):
         self.ev.reset()
         self.state = self._get_observation()
         return self.state, {}
+
 
 
     def close(self):
