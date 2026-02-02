@@ -67,6 +67,11 @@ class Train:
         self.folder = PROJECT_ROOT / "Results" / "train" / "MLP" / "2-RL" / self.tariff
         self.folder.mkdir(parents=True, exist_ok=True)
 
+        # Arquivos únicos (sobrescrevem)
+        self.best_actor_path = self.folder / "best_actor_eval.pt"
+        self.best_ckpt_path  = self.folder / "best_checkpoint_eval.pt"
+        self.best_meta_path  = self.folder / "best_eval_meta.json"
+
         self.buffer = ReplayBuffer(
             capacity=self.hp.buffer_size,
             obs_dim=self.model_cfg["actor"]["input_dim"],
@@ -74,7 +79,12 @@ class Train:
             device=DEVICE,
         )
 
-        self.actor = load_actor(self.model_cfg["actor"], device=DEVICE)
+        # Merge actor architecture (model.json) with RL-specific stochastic settings (config.json).
+        self.actor_cfg = dict(self.model_cfg["actor"])
+        self.actor_cfg["log_std_min"] = float(self.hp.log_std_min)
+        self.actor_cfg["log_std_max"] = float(self.hp.log_std_max)
+
+        self.actor = load_actor(self.actor_cfg, device=DEVICE)
         self.critics = load_critic(self.model_cfg["critic"], device=DEVICE)
         self.critics_target = load_critic(self.model_cfg["critic"], device=DEVICE)
         self.critics_target.load_state_dict(self.critics.state_dict(), strict=True)
@@ -90,7 +100,8 @@ class Train:
 
         # eval and reward tracking
         self.best_eval_reward  = -float("inf")
-        self.best_train_reward = -float("inf")
+        self.best_eval_episode = -1
+        self.best_train_reward = -float("inf")  # rastrear apenas (não salvar arquivos)
 
         # tracking lists
         self.eval_rewards = []
@@ -98,6 +109,13 @@ class Train:
         self.q1_values = []
         self.q2_values = []
         self.total_episode_rewards = []
+
+        # additional metrics for audit (per update)
+        self.backup_means = []
+        self.backup_abs_maxs = []
+        self.q_next_means = []
+        self.logp_means = []
+        self.logp_mins = []
 
         # audit dataframe (updated at end of each episode)
         self.audit_df = pd.DataFrame(columns=[
@@ -108,12 +126,53 @@ class Train:
             "best_eval_reward",
             "q1_mean",
             "q2_mean",
+            "backup_mean",
+            "backup_abs_max",
+            "q_next_mean",
+            "logp_mean",
+            "logp_min",
             "n_updates",
             "steps",
             "buffer_size",
             "alpha",
         ])
         self.audit_csv = self.folder / "audit_training.csv"
+
+
+    def save_checkpoint(self, filepath: Path) -> None:
+        """Save a full checkpoint for reproducibility and training resumption."""
+        ckpt = {
+            "tariff": self.tariff,
+            "actor_cfg": self.actor_cfg,
+            "train_cfg": self.train_cfg,
+            "parameters_hash_hint": "data/parameters.json",
+            "actor_state_dict": self.actor.state_dict(),
+            "critics_state_dict": self.critics.state_dict(),
+            "critics_target_state_dict": self.critics_target.state_dict(),
+            "temperature_state_dict": self.temperature.state_dict(),
+            "opt_actor_state_dict": self.opt_actor.state_dict(),
+            "opt_critic_state_dict": self.opt_critic.state_dict(),
+            "opt_alpha_state_dict": self.opt_alpha.state_dict(),
+        }
+        torch.save(ckpt, filepath)
+
+
+    def _save_best_eval(self, eval_reward_value: float, episode: int) -> None:
+        """Save ONLY the best model/checkpoint according to eval, using fixed filenames."""
+        # 1) Actor weights
+        torch.save(self.actor.state_dict(), self.best_actor_path)
+
+        # 2) Full checkpoint
+        self.save_checkpoint(self.best_ckpt_path)
+
+        # 3) Meta (handy for quick inspection)
+        meta = {
+            "best_eval_reward": float(eval_reward_value),
+            "best_eval_episode": int(episode),
+            "tariff": self.tariff,
+        }
+        with open(self.best_meta_path, "w", encoding="utf-8") as f:
+            json.dump(meta, f, indent=2)
 
 
     def create_eval_envs(self):
@@ -159,8 +218,9 @@ class Train:
                 with torch.no_grad():
                     action_t = self.actor(obs_t)
                 action_np = action_t.squeeze(0).cpu().numpy()
+                action_exec = np.clip(action_np, env.action_space.low, env.action_space.high)
 
-                next_obs, rew, done, truncated, info = env.step(action_np)
+                next_obs, rew, done, truncated, info = env.step(action_exec)
 
                 if isinstance(next_obs, tuple):
                     next_obs = next_obs[0]
@@ -196,6 +256,10 @@ class Train:
                 q_next - self.temperature.alpha.detach() * log_prob_next
             )
 
+            self.backup_means.append(float(backup.detach().mean().cpu()))
+            self.backup_abs_maxs.append(float(backup.detach().abs().max().cpu()))
+            self.q_next_means.append(float(q_next.detach().mean().cpu()))
+
         # Critic update
         q1 = self.critics.q1(observations, actions)
         q2 = self.critics.q2(observations, actions)
@@ -210,11 +274,15 @@ class Train:
             torch.nn.utils.clip_grad_norm_(self.critics.parameters(), 10.0)
         self.opt_critic.step()
 
-        # actor update (freeze critic grads to avoid unnecessary accumulation)
+        # actor update
         for param in self.critics.parameters():
             param.requires_grad_(False)
 
         π_action, log_prob, μ_action = self.actor.sample(observations)
+
+        self.logp_means.append(float(log_prob.detach().mean().cpu()))
+        self.logp_mins.append(float(log_prob.detach().min().cpu()))
+
         q1_π = self.critics.q1(observations, π_action)
         q2_π = self.critics.q2(observations, π_action)
         q_π = torch.min(q1_π, q2_π)
@@ -252,18 +320,17 @@ class Train:
                             continue
 
                         obs_np = env._get_observation()
-                        action_np = np.random.uniform(
-                            -1.0, 1.0, size=self.model_cfg["actor"]["output_dim"]
-                        )
+                        action_np = np.asarray(env.action_space.sample(), dtype=np.float32)
+                        action_exec = np.clip(action_np, env.action_space.low, env.action_space.high)
 
-                        next_obs, rew, done, truncated, info = env.step(action_np)
+                        next_obs, rew, done, truncated, info = env.step(action_exec)
 
                         if isinstance(next_obs, tuple):
                             next_obs = next_obs[0]
                         if isinstance(next_obs, dict):
                             next_obs = next_obs["obs"] if "obs" in next_obs else (next_obs["observation"] if "observation" in next_obs else next(iter(next_obs.values())))
 
-                        self.buffer.add(obs_np, action_np, rew * self.hp.reward_scale, next_obs, done or truncated)
+                        self.buffer.add(obs_np, action_exec, rew * self.hp.reward_scale, next_obs, done or truncated)
                         env_dones[key] = done or truncated
                         steps += 1
                         pbar.update(1)
@@ -280,8 +347,8 @@ class Train:
             reward = {"cy": 0.0, "wy": 0.0, "total": 0.0}
 
             q_start = len(self.q1_values)
-
             steps = 0
+
             with tqdm(total=self.episode_length, desc="Train Steps", position=1, dynamic_ncols=True, leave=False) as pbar:
                 while not all(env_dones.values()) and steps < self.episode_length:
                     for key, env in self.envs.items():
@@ -292,17 +359,18 @@ class Train:
                         obs_t = torch.as_tensor(obs_np, device=DEVICE).unsqueeze(0)
 
                         with torch.no_grad():
-                            action_t = self.actor(obs_t)
+                            action_t, _, _ = self.actor.sample(obs_t)
 
                         action_np = action_t.squeeze(0).cpu().numpy()
-                        next_obs, rew, done, truncated, info = env.step(action_np)
+                        action_exec = np.clip(action_np, env.action_space.low, env.action_space.high)
+                        next_obs, rew, done, truncated, info = env.step(action_exec)
 
                         if isinstance(next_obs, tuple):
                             next_obs = next_obs[0]
                         if isinstance(next_obs, dict):
-                            next_obs = next_obs["obs"] if "obs" in next_obs else (next_obs["observation"] if "observation" in next_obs else next(iter(next_obs.values())))
+                            next_obs = next_obs["obs"] if "obs" in obs else (next_obs["observation"] if "observation" in next_obs else next(iter(next_obs.values())))
 
-                        self.buffer.add(obs_np, action_np, rew * self.hp.reward_scale, next_obs, done or truncated)
+                        self.buffer.add(obs_np, action_exec, rew * self.hp.reward_scale, next_obs, done or truncated)
 
                         reward[key] += rew
                         reward["total"] += rew
@@ -323,33 +391,41 @@ class Train:
             self.train_rewards.append(train_total)
             self.total_episode_rewards.append(train_total)
 
+            # Atualiza o "best_train_reward" apenas para auditoria (SEM salvar arquivos)
             if train_total > self.best_train_reward:
                 self.best_train_reward = train_total
-                torch.save(
-                    self.actor.state_dict(),
-                    self.folder / f"best_actor_train_reward_{self.best_train_reward:.2f}.pt",
-                )
 
             eval_reward_value = np.nan
             if episode % self.hp.eval_every == 0:
                 eval_reward_value = float(self.eval())
                 self.eval_rewards.append(eval_reward_value)
 
+                # Salva SOMENTE o melhor do ponto de vista do eval, com nomes fixos
                 if eval_reward_value > self.best_eval_reward:
                     self.best_eval_reward = eval_reward_value
-                    torch.save(
-                        self.actor.state_dict(),
-                        self.folder / f"best_actor_eval_reward_{self.best_eval_reward:.2f}.pt",
-                    )
+                    self.best_eval_episode = int(episode)
+                    self._save_best_eval(eval_reward_value, episode)
 
             q_end = len(self.q1_values)
             n_updates = int(q_end - q_start)
+
             if n_updates > 0:
                 q1_mean = float(np.mean(self.q1_values[q_start:q_end]))
                 q2_mean = float(np.mean(self.q2_values[q_start:q_end]))
+
+                backup_mean = float(np.mean(self.backup_means[q_start:q_end]))
+                backup_abs_max = float(np.max(self.backup_abs_maxs[q_start:q_end]))
+                q_next_mean = float(np.mean(self.q_next_means[q_start:q_end]))
+                logp_mean = float(np.mean(self.logp_means[q_start:q_end]))
+                logp_min = float(np.min(self.logp_mins[q_start:q_end]))
             else:
                 q1_mean = np.nan
                 q2_mean = np.nan
+                backup_mean = np.nan
+                backup_abs_max = np.nan
+                q_next_mean = np.nan
+                logp_mean = np.nan
+                logp_min = np.nan
 
             alpha_val = float(self.temperature.alpha.detach().cpu())
 
@@ -361,16 +437,22 @@ class Train:
                 "best_eval_reward": float(self.best_eval_reward),
                 "q1_mean": float(q1_mean) if not np.isnan(q1_mean) else np.nan,
                 "q2_mean": float(q2_mean) if not np.isnan(q2_mean) else np.nan,
+                "backup_mean": float(backup_mean) if not np.isnan(backup_mean) else np.nan,
+                "backup_abs_max": float(backup_abs_max) if not np.isnan(backup_abs_max) else np.nan,
+                "q_next_mean": float(q_next_mean) if not np.isnan(q_next_mean) else np.nan,
+                "logp_mean": float(logp_mean) if not np.isnan(logp_mean) else np.nan,
+                "logp_min": float(logp_min) if not np.isnan(logp_min) else np.nan,
                 "n_updates": n_updates,
                 "steps": int(steps),
                 "buffer_size": int(self.buffer.size),
                 "alpha": alpha_val,
             }
 
-            self.audit_df = pd.concat([self.audit_df, pd.DataFrame([row])], ignore_index=True)
+            # Evita FutureWarning do concat com DF vazio
+            self.audit_df.loc[len(self.audit_df)] = row
             self.audit_df.to_csv(self.audit_csv, index=False)
 
-            p_outer.set_postfix({"best_eval": f"{self.best_eval_reward:.2f}", "best_train": f"{self.best_train_reward:.2f}"})
+            p_outer.set_postfix({"best_eval": f"{self.best_eval_reward:.2f}", "train": f"{train_total:.2f}"})
 
 
     def run(self):
@@ -378,11 +460,10 @@ class Train:
         self.train()
 
 
-
 def main():
-    tariff = "tar_tou"
-    train = Train(tariff)
-    train.run()
+    for tariff in ["tar_w", "tar_sw"]:
+        train = Train(tariff)
+        train.run()
 
     a = 1
 

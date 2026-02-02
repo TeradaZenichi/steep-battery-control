@@ -89,15 +89,15 @@ class Actor(nn.Module):
         pv = self._map_pv(z[..., 2:3])
         action = torch.cat([z[..., 0:1], z[..., 1:2], pv], dim=-1)
 
-        # log_prob in u-space
+        # log_prob in u-space (joint over dims)
         logp_u = dist.log_prob(u).sum(dim=-1, keepdim=True)
 
-        # tanh change-of-variables: z = tanh(u)
-        log_det = torch.log(1.0 - z.pow(2) + eps).sum(dim=-1, keepdim=True)
-        logp_z = logp_u - log_det
+        # tanh change-of-variables per-dim, then sum; includes PV dim
+        log_det_tanh = torch.log(1.0 - z.pow(2) + eps).sum(dim=-1, keepdim=True)
+        logp_z = logp_u - log_det_tanh
 
-        # PV affine mapping: pv = 0.5*(z_pv + 1) -> z_pv = 2*pv - 1, |dz/dpv| = 2
-        # Therefore log pi(pv) = log pi(z_pv) + log(2). Constant but included for consistency.
+        # PV affine mapping only on PV channel: pv = 0.5*(z_pv + 1) -> |dz/dpv| = 2
+        # Add log(2) once (not scaled by action dims) to account only for PV mapping
         logp = logp_z + math.log(2.0)
 
         # Deterministic action from mu
@@ -158,6 +158,7 @@ def load_actor(config, weights_path=None, device=None):
         config["input_dim"],
         config["hidden_dims"],
         config["head_dim"],
+        # Default bounds match the Actor constructor (and common SAC settings).
         log_std_min=config.get("log_std_min", -20.0),
         log_std_max=config.get("log_std_max", 2.0),
         init_log_std_bias=config.get("init_log_std_bias", -2.0),
@@ -184,4 +185,3 @@ def load_critic(config, weights_path=None, device=None):
         model.to(device)
 
     return model
-

@@ -113,6 +113,7 @@ class BatteryEnv():
         self.soc    = SoC
         self.E      = self.soc * self.Emax
         self.ncycles        = parameters["ncycles"]
+        self.sat_penalty    = parameters["sat_penalty"]
         self.ramp_penalty   = parameters["ramp_penalty"]
         self.soc_power      = parameters["soc_power_curve_pu"]
         self.history = []   #(command, action, soc, energy)
@@ -141,10 +142,14 @@ class BatteryEnv():
             P = max(P, (Emin - self.E) * self.η / self.sim.Δt)
             self.E = max(self.E + P * self.sim.Δt / self.η, Emin)
 
+        eps = 1e-3
+        sat = max(0.0, abs(P - Pcmd) - eps)
+        sat_penalty = sat * self.sat_penalty * self.sim.Δt
+        
         self.soc = np.clip(self.E / self.Emax, 0.0, 1.0)
         self.history.append((Pcmd, P, self.soc, self.E))
 
-        cost = (self.capex / (self.Emax * self.ncycles)) * abs(P) * self.sim.Δt
+        cost = (self.capex / (self.Emax * self.ncycles)) * abs(P) * self.sim.Δt + sat_penalty
         return P, cost
     
 
@@ -166,16 +171,21 @@ class EVEnv():
         self.E          = 0.0
         self.status     = "disconnected"
         
+        self.sat_penalty        = parameters["sat_penalty"]
         self.departure_penalty  = parameters["departure_penalty"]
         self.soc_power_curve_pu = parameters["soc_power_curve_pu"]
         self.history = []  #(command, action, soc, energy, status)
         return
 
     def reset(self):
+        # Reset internal states for a new episode.
+        # NOTE: self.status must be reset to avoid carrying the EV finite-state-machine
+        # between episodes (which would corrupt transitions and departure penalties).
         self.soc = 0.0
+        self.E = 0.0
+        self.status = "disconnected"
         self.history = []
-        self.E = 0.0        
-        return 
+        return
 
     def step(self, action):
         if action >= 0:
@@ -217,7 +227,14 @@ class EVEnv():
             self.status = "disconnected"
             self.E, self.soc = 0.0, 0.0
 
-        cost += (self.capex / (self.Emax * self.ncycles)) * abs(P) * self.sim.Δt
+        if status != "connected":
+            sat_penalty = 0.0
+        else:
+            eps = 1e-3
+            sat = max(0.0, abs(P - command) - eps)
+            sat_penalty = sat * self.sat_penalty * self.sim.Δt
+
+        cost += (self.capex / (self.Emax * self.ncycles)) * abs(P) * self.sim.Δt + sat_penalty
         self.history.append((command, P, self.soc, self.E, self.status))
 
         return P, cost
@@ -285,27 +302,29 @@ class SmartHomeEnv(gym.Env):
         PGrid, energy_cost, penalty = self.grid.step(PD + PBESS + PEV - PPV)
         reward = - (energy_cost + penalty + bess_cost + ev_cost)
 
-        self.operation.loc[self.sim.step] = {
-            "bess_cmd": action[0],
-            "ev_cmd": action[1],
-            "pv_cmd": action[2],
-            "PLoad": PD,
-            "PPV": PPV,
-            "PBESS": PBESS,
-            "PEV": PEV,
-            "PGrid": PGrid,
-            "EBESS": self.bess.E,
-            "EEV": self.ev.E,
-            "SoCBESS": self.bess.soc,
-            "SoCEV": self.ev.soc,
-            "χPV": action[2],
-            "tariff": self.grid.df[self.sim.step],
-            "reward": reward,
-            "energy_cost": energy_cost,
-            "bess_cost": bess_cost,
-            "ev_cost": ev_cost,
-            "grid_penalty": penalty,
-        }
+        row = {
+        "bess_cmd": float(action[0]),
+        "ev_cmd": float(action[1]),
+        "pv_cmd": float(action[2]),
+        "PLoad": float(PD),
+        "PPV": float(PPV),
+        "PBESS": float(PBESS),
+        "PEV": float(PEV),
+        "PGrid": float(PGrid),
+        "EBESS": float(self.bess.E),
+        "EEV": float(self.ev.E),
+        "SoCBESS": float(self.bess.soc),
+        "SoCEV": float(self.ev.soc),
+        "χPV": float(action[2]),
+        "tariff": float(self.grid.df[self.sim.step]),
+        "reward": float(reward),
+        "energy_cost": float(energy_cost),
+        "bess_cost": float(bess_cost),
+        "ev_cost": float(ev_cost),
+        "grid_penalty": float(penalty),
+    }
+        self.operation.loc[self.sim.step] = row
+
 
         info = {
             "energy_cost": energy_cost,
