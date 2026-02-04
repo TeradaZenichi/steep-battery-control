@@ -1,16 +1,11 @@
-import math
-import torch
-import torch.nn as nn
 from torch.distributions import Normal
+import torch.nn as nn
+import torch
+import math
+
 
 
 class Actor(nn.Module):
-    """
-    Unified Actor for IL (deterministic forward) and SAC (stochastic sample).
-    - forward(): deterministic action in env bounds (BESS/EV in [-1,1], PV in [0,1])
-    - sample(): stochastic action + log_prob consistent with tanh + PV affine mapping
-    """
-
     def __init__(
         self,
         input_dim: int,
@@ -42,8 +37,6 @@ class Actor(nn.Module):
 
         self.log_std_min = float(log_std_min)
         self.log_std_max = float(log_std_max)
-
-        # Initialize log-std to a small value (near-deterministic) by default.
         self._init_logstd(init_log_std_bias)
 
     def _init_logstd(self, init_log_std_bias: float) -> None:
@@ -61,23 +54,15 @@ class Actor(nn.Module):
 
     @staticmethod
     def _map_pv(z_pv: torch.Tensor) -> torch.Tensor:
-        # Map PV from [-1,1] to [0,1]
         return 0.5 * (z_pv + 1.0)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Deterministic policy used by IL (and by SAC evaluation if desired).
         mu, _ = self._dist_params(x)
         z = torch.tanh(mu)  # [-1,1] for all three dims
         pv = self._map_pv(z[..., 2:3])  # [0,1]
         return torch.cat([z[..., 0:1], z[..., 1:2], pv], dim=-1)
 
     def sample(self, x: torch.Tensor, eps: float = 1e-6) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        Returns:
-          action:     [batch,3] with (bess, ev) in [-1,1] and pv in [0,1]
-          log_prob:   [batch,1] log pi(action|state) with correct change-of-variables
-          mu_action:  [batch,3] deterministic action from mu (for eval/logging)
-        """
         mu, log_std = self._dist_params(x)
         std = torch.exp(log_std)
         dist = Normal(mu, std)
@@ -85,22 +70,13 @@ class Actor(nn.Module):
         u = dist.rsample()          # reparameterized sample
         z = torch.tanh(u)           # [-1,1]
 
-        # Build final action with PV mapped to [0,1]
         pv = self._map_pv(z[..., 2:3])
         action = torch.cat([z[..., 0:1], z[..., 1:2], pv], dim=-1)
 
-        # log_prob in u-space (joint over dims)
         logp_u = dist.log_prob(u).sum(dim=-1, keepdim=True)
-
-        # tanh change-of-variables per-dim, then sum; includes PV dim
         log_det_tanh = torch.log(1.0 - z.pow(2) + eps).sum(dim=-1, keepdim=True)
         logp_z = logp_u - log_det_tanh
-
-        # PV affine mapping only on PV channel: pv = 0.5*(z_pv + 1) -> |dz/dpv| = 2
-        # Add log(2) once (not scaled by action dims) to account only for PV mapping
         logp = logp_z + math.log(2.0)
-
-        # Deterministic action from mu
         mu_z = torch.tanh(mu)
         mu_pv = self._map_pv(mu_z[..., 2:3])
         mu_action = torch.cat([mu_z[..., 0:1], mu_z[..., 1:2], mu_pv], dim=-1)
@@ -108,7 +84,6 @@ class Actor(nn.Module):
         return action, logp, mu_action
 
     def predict(self, obs):
-        # Deterministic prediction (IL-style): uses forward()
         self.eval()
         with torch.no_grad():
             if isinstance(obs, torch.Tensor):

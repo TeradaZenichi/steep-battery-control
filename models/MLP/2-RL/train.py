@@ -205,8 +205,6 @@ class Train:
             obs = env.reset()
             if isinstance(obs, tuple):
                 obs = obs[0]
-            if isinstance(obs, dict):
-                obs = obs["obs"] if "obs" in obs else (obs["observation"] if "observation" in obs else next(iter(obs.values())))
 
             done = False
             truncated = False
@@ -221,11 +219,6 @@ class Train:
                 action_exec = np.clip(action_np, env.action_space.low, env.action_space.high)
 
                 next_obs, rew, done, truncated, info = env.step(action_exec)
-
-                if isinstance(next_obs, tuple):
-                    next_obs = next_obs[0]
-                if isinstance(next_obs, dict):
-                    next_obs = next_obs["obs"] if "obs" in next_obs else (next_obs["observation"] if "observation" in next_obs else next(iter(next_obs.values())))
 
                 episode_reward += float(rew)
                 obs = next_obs
@@ -325,11 +318,6 @@ class Train:
 
                         next_obs, rew, done, truncated, info = env.step(action_exec)
 
-                        if isinstance(next_obs, tuple):
-                            next_obs = next_obs[0]
-                        if isinstance(next_obs, dict):
-                            next_obs = next_obs["obs"] if "obs" in next_obs else (next_obs["observation"] if "observation" in next_obs else next(iter(next_obs.values())))
-
                         self.buffer.add(obs_np, action_exec, rew * self.hp.reward_scale, next_obs, done or truncated)
                         env_dones[key] = done or truncated
                         steps += 1
@@ -364,11 +352,6 @@ class Train:
                         action_np = action_t.squeeze(0).cpu().numpy()
                         action_exec = np.clip(action_np, env.action_space.low, env.action_space.high)
                         next_obs, rew, done, truncated, info = env.step(action_exec)
-
-                        if isinstance(next_obs, tuple):
-                            next_obs = next_obs[0]
-                        if isinstance(next_obs, dict):
-                            next_obs = next_obs["obs"] if "obs" in obs else (next_obs["observation"] if "observation" in next_obs else next(iter(next_obs.values())))
 
                         self.buffer.add(obs_np, action_exec, rew * self.hp.reward_scale, next_obs, done or truncated)
 
