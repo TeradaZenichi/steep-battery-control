@@ -12,17 +12,17 @@ class Simulation:
         self.start      = start
         self.step       = start
         self.days       = days
-        
 
         return
-    
+
+
 class Weather:
     def __init__(self, parameters, df, simulation):
         self.parameters = parameters
         self.sim = simulation
         self.df = df
         return
-    
+
     def _get_obs(self, t):
         row = self.df.loc[t]
         obs = [
@@ -30,7 +30,7 @@ class Weather:
             for col in self.df.columns
         ]
         return obs
-    
+
 
 class Grid:
     def __init__(self, parameters, df, simulation):
@@ -44,6 +44,7 @@ class Grid:
     def cost(self, t):
         return self.df[t]
 
+
 class Load():
     def __init__(self, parameters, df, simulation):
         self.parameters = parameters
@@ -51,11 +52,11 @@ class Load():
         self.history = []
         self.df = df
         return
-    
+
     def power(self, t):
         return self.df[t]/1000  # kW
-    
-    
+
+
 class PV():
     def __init__(self, parameters, df, simulation):
         self.parameters = parameters
@@ -63,7 +64,7 @@ class PV():
         self.history = []
         self.df = df
         return
-    
+
     def power(self, t):
         return self.df[t]/1000  # kW
 
@@ -84,8 +85,9 @@ class Battery():
         self.ramp_penalty   = parameters["ramp_penalty"]
         self.soc_power      = parameters["soc_power_curve_pu"]
         self.history = []   #(command, action, soc, energy)
-        
+
         return
+
 
 class EV():
     def __init__(self, parameters, df, simulation):
@@ -104,12 +106,12 @@ class EV():
         self.soc        = 0.0
         self.E          = 0.0
         self.status     = "disconnected"
-        
+
         self.departure_penalty  = parameters["departure_penalty"]
         self.soc_power_curve_pu = parameters["soc_power_curve_pu"]
         self.history = []  #(command, action, soc, energy, status)
         return
-            
+
 
 class Teacher:
     def __init__(self, df, parameters, start, days, BESS_SoC, tariff):
@@ -119,22 +121,21 @@ class Teacher:
         self.pv     = PV(parameters["PV"], df["produced_electricity_rate_W"], simulation = self.sim)
         self.ev     = EV(parameters["EV"], df["ev_status"], simulation = self.sim)
         self.grid   = Grid(parameters["Grid"], df[tariff], simulation = self.sim)
-    
-        weather_df  = df[["drybulb_C", "relhum_percent", "Global Horizontal Radiation", 
+
+        weather_df  = df[["drybulb_C", "relhum_percent", "Global Horizontal Radiation",
                           "dni_Wm2", "dhi_Wm2", "Wind Speed (m/s)", "wdir_deg"]]
         self.weather = Weather(parameters["general"]["state_normalization"], weather_df, simulation = self.sim)
         self.Pnorm = parameters["general"]["Pnorm"]
-        
+
         # Use datetime index for operations to avoid storing timestamp as a column
         self.operation = pd.DataFrame(columns=[
             "bess_cmd", "ev_cmd", "pv_cmd", "PLoad", "PPV", "PBESS", "PEV", "PGrid",
             "tariff", "reward", "energy_cost", "bess_cost", "ev_cost", "grid_penalty"
         ])
 
-     
         self.Ωt = [start + timedelta(minutes=i*self.sim.timestep) for i in range(int((self.sim.end - start).total_seconds() / 60 / self.sim.timestep))]
-        
-        
+
+
     def build(self):
         m = pyo.ConcreteModel()
         m.Ωt = pyo.Set(initialize=self.Ωt, ordered=True)
@@ -216,7 +217,6 @@ class Teacher:
                 return model.EEV[t] == 0
         m.ev_energy_update = pyo.Constraint(m.Ωt, rule=ev_energy_update_rule)
 
-
         def ev_soc_rule(model, t):
             if t == self.sim.start:
                 if self.ev.df[t] > 0.01:
@@ -240,7 +240,7 @@ class Teacher:
                 return model.EEV[t] >= self.ev.Emax * (1 - self.ev.DoD)
             return pyo.Constraint.Skip
         m.ev_dod_constraint = pyo.Constraint(m.Ωt, rule=ev_dod_rule)
-        
+
         def power_arrival_departure_rule(model, t):
             if t == self.sim.start:
                 if self.ev.df[t] > 0.01:
@@ -260,7 +260,7 @@ class Teacher:
         def ev_charge_discharge_rule(model, t):
             return model.γEV_c[t] + model.γEV_d[t] <= 1
         m.ev_charge_discharge = pyo.Constraint(m.Ωt, rule=ev_charge_discharge_rule)
-        
+
         def ev_power(model, t):
             return model.PEV[t] == model.PEV_c[t] - model.PEV_d[t]
         m.ev_power_def = pyo.Constraint(m.Ωt, rule=ev_power)
@@ -276,17 +276,19 @@ class Teacher:
         self.model = m
 
         return
-    
+
+
     def solve(self, solver="gurobi"):
         solve = pyo.SolverFactory(solver)
         self.results = solve.solve(self.model, tee=True)
         return  self.results
- 
+
+
     def get_operation(self):
-        self.operation = pd.DataFrame(columns=[ 
+        self.operation = pd.DataFrame(columns=[
             "PLoad", "PPV", "PBESS", "PEV", "PGrid", "EBESS", "EEV", "SoCBESS", "SoCEV", "χPV", "tariff", "energy_cost", "bess_cost", "ev_cost"
         ])
-        
+
         for t in self.model.Ωt:
             self.operation.loc[t] = {
                 "PLoad": self.load.power(t),
@@ -306,26 +308,49 @@ class Teacher:
             }
         return self.operation
 
+
     def get_obs(self, t):
+        # Same time encoding as SmartHomeEnv._get_observation()
         observation = [
-            np.sin(2 * np.pi * (t.minute / 60.0)), 
+            np.sin(2 * np.pi * (t.minute / 60.0)),
             np.cos(2 * np.pi * (t.minute / 60.0)),
-            np.sin(2 * np.pi * (t.hour / 24.0)), 
+            np.sin(2 * np.pi * (t.hour / 24.0)),
             np.cos(2 * np.pi * (t.hour / 24.0)),
-            np.sin(2 * np.pi * ((t.day - 1) / 31.0)), 
+            np.sin(2 * np.pi * ((t.day - 1) / 31.0)),
             np.cos(2 * np.pi * ((t.day - 1) / 31.0)),
-            np.sin(2 * np.pi * ((t.month - 1) / 12.0)), 
+            np.sin(2 * np.pi * ((t.month - 1) / 12.0)),
             np.cos(2 * np.pi * ((t.month - 1) / 12.0)),
-            np.sin(2 * np.pi * (t.weekday() / 7.0)), 
+            np.sin(2 * np.pi * (t.weekday() / 7.0)),
             np.cos(2 * np.pi * (t.weekday() / 7.0)),
         ]
+
+        # State-at-decision (env-style): SoC BEFORE action at t
+        if t == self.sim.start:
+            bess_soc_state = float(self.bess.soc0)
+            ev_prev_connected = False
+            ev_soc_state = 0.0
+        else:
+            t_prev = t - timedelta(minutes=self.sim.timestep)
+            bess_soc_state = float(self.operation.loc[t_prev, "SoCBESS"])
+            ev_prev_connected = bool(self.ev.df[t_prev] > 0.01)
+
+            ev_connected = bool(self.ev.df[t] > 0.01)
+            if not ev_connected:
+                ev_soc_state = 0.0
+            elif not ev_prev_connected:
+                # "arriving" step: env observation still has ev.soc = 0.0
+                ev_soc_state = 0.0
+            else:
+                ev_soc_state = float(self.operation.loc[t_prev, "SoCEV"])
+
+        ev_connected = bool(self.ev.df[t] > 0.01)
 
         power_obs = [
             self.load.power(t)/self.Pnorm,
             self.pv.power(t)/self.Pnorm,
-            self.operation.loc[t, "SoCBESS"],
-            self.operation.loc[t, "SoCEV"],
-            1.0 if self.ev.df[t] > 0.01 else 0.0,
+            bess_soc_state,
+            ev_soc_state,
+            1.0 if ev_connected else 0.0,
         ]
 
         tariff_obs  = [self.grid.df[t]]
@@ -333,17 +358,46 @@ class Teacher:
         observations = observation + power_obs + tariff_obs + weather_obs
         return np.array(observations, dtype=np.float32)
 
+
     def get_actions(self, t):
-        actions = [
-            self.operation.loc[t, "PBESS"] / self.bess.Pmax,
-            self.operation.loc[t, "PEV"] / self.ev.Pmax_c,
-            self.operation.loc[t, "χPV"],
-        ]
+        # Actions WITHOUT projection: only normalization to match SmartHomeEnv action space
+        PBESS_des = float(self.operation.loc[t, "PBESS"])
+        PEV_des   = float(self.operation.loc[t, "PEV"])
+        χPV       = float(self.operation.loc[t, "χPV"])
+
+        # BESS normalized command (symmetric limits)
+        bess_cmd = float(np.clip(PBESS_des / self.bess.Pmax, -1.0, 1.0))
+
+        # EV normalized command (asymmetric limits) + arrival/disconnected rules consistent with env
+        ev_connected = bool(self.ev.df[t] > 0.01)
+
+        if not ev_connected:
+            ev_cmd = 0.0
+        else:
+            if t == self.sim.start:
+                ev_prev_connected = False
+            else:
+                t_prev = t - timedelta(minutes=self.sim.timestep)
+                ev_prev_connected = bool(self.ev.df[t_prev] > 0.01)
+
+            # Arriving step: env forces P=0
+            if not ev_prev_connected:
+                ev_cmd = 0.0
+            else:
+                if PEV_des >= 0.0:
+                    ev_cmd = PEV_des / self.ev.Pmax_c
+                else:
+                    ev_cmd = PEV_des / self.ev.Pmax_d
+                ev_cmd = float(np.clip(ev_cmd, -1.0, 1.0))
+
+        χPV = float(np.clip(χPV, 0.0, 1.0))
+
+        actions = [bess_cmd, ev_cmd, χPV]
         return actions
-    
+
+
     def get_training_data(self):
         self.get_operation()
         X_train = np.asarray([self.get_obs(t) for t in self.model.Ωt], dtype=np.float32)
         y_train = np.asarray([self.get_actions(t) for t in self.model.Ωt], dtype=np.float32)
         return X_train, y_train
-

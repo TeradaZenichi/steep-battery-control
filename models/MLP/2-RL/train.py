@@ -98,6 +98,14 @@ class Train:
         self.opt_actor = torch.optim.Adam(self.actor.parameters(), lr=self.hp.actor_lr)
         self.opt_critic = torch.optim.Adam(self.critics.parameters(), lr=self.hp.critic_lr)
 
+        # --- CHANGE (Lagrangian): initialize dual variable (lambda) and its hyperparameters ---
+        # This lambda penalizes infeasible raw actions via a cost produced by the projected sample().
+        self.lmbda = torch.zeros(1, device=DEVICE)  # lambda >= 0
+        self.lmbda_lr = float(self.train_cfg["train"].get("lambda_lr", 1e-3))
+        self.cost_limit = float(self.train_cfg["train"].get("cost_limit", 0.0))  # target cost (0 means no violation)
+        self.lmbda_max = float(self.train_cfg["train"].get("lambda_max", 100.0))
+        # --- END CHANGE ---
+
         # eval and reward tracking
         self.best_eval_reward  = -float("inf")
         self.best_eval_episode = -1
@@ -117,6 +125,17 @@ class Train:
         self.logp_means = []
         self.logp_mins = []
 
+        # --- CHANGE (Projection/Loss audit): extra per-update metrics ---
+        # These are appended once per update, and sliced per-episode using q_start:q_end.
+        self.cost_means = []
+        self.cost_p95s = []
+        self.frac_violations = []
+        self.actor_losses = []
+        self.critic_losses = []
+        self.alpha_losses = []
+        self.violation_eps = float(self.train_cfg["train"].get("violation_eps", 1e-8))
+        # --- END CHANGE ---
+
         # audit dataframe (updated at end of each episode)
         self.audit_df = pd.DataFrame(columns=[
             "episode",
@@ -135,6 +154,17 @@ class Train:
             "steps",
             "buffer_size",
             "alpha",
+            # --- CHANGE (Lagrangian): log lambda value for audit ---
+            "lambda",
+            # --- END CHANGE ---
+            # --- CHANGE (Projection/Loss audit): aggregated per-episode from per-update values ---
+            "cost_mean",
+            "cost_p95",
+            "frac_violation",
+            "critic_loss",
+            "actor_loss",
+            "alpha_loss",
+            # --- END CHANGE ---
         ])
         self.audit_csv = self.folder / "audit_training.csv"
 
@@ -153,6 +183,9 @@ class Train:
             "opt_actor_state_dict": self.opt_actor.state_dict(),
             "opt_critic_state_dict": self.opt_critic.state_dict(),
             "opt_alpha_state_dict": self.opt_alpha.state_dict(),
+            # --- CHANGE (Lagrangian): persist lambda for reproducibility ---
+            "lambda_value": float(self.lmbda.detach().cpu().item()),
+            # --- END CHANGE ---
         }
         torch.save(ckpt, filepath)
 
@@ -214,7 +247,10 @@ class Train:
             while (not done) and (not truncated) and steps < self.episode_length:
                 obs_t = torch.as_tensor(obs, device=DEVICE).unsqueeze(0)
                 with torch.no_grad():
-                    action_t = self.actor(obs_t)
+                    # --- CHANGE (Projected deterministic eval): use projected mean action from sample() ---
+                    # sample() returns (action_proj, logp, mu_action_proj, cost)
+                    _, _, action_t, _ = self.actor.sample(obs_t)
+                    # --- END CHANGE ---
                 action_np = action_t.squeeze(0).cpu().numpy()
                 action_exec = np.clip(action_np, env.action_space.low, env.action_space.high)
 
@@ -242,7 +278,9 @@ class Train:
 
         # Critic target
         with torch.no_grad():
-            next_action, log_prob_next, μ_action = self.actor.sample(next_obs)
+            # --- CHANGE (new sample signature): ignore mu_action and cost here ---
+            next_action, log_prob_next, _, _ = self.actor.sample(next_obs)
+            # --- END CHANGE ---
             q1_next, q2_next = self.critics_target(next_obs, next_action)
             q_next = torch.min(q1_next, q2_next)
             backup = rewards + self.hp.γ * (1 - dones) * (
@@ -261,6 +299,11 @@ class Train:
         self.q2_values.append(float(q2.detach().mean().cpu()))
 
         critics_loss = nn.MSELoss()(q1, backup) + nn.MSELoss()(q2, backup)
+
+        # --- CHANGE (Loss audit): log critic loss per update (detached) ---
+        self.critic_losses.append(float(critics_loss.detach().cpu()))
+        # --- END CHANGE ---
+
         self.opt_critic.zero_grad()
         critics_loss.backward()
         if self.hp.grad_clip:
@@ -271,7 +314,9 @@ class Train:
         for param in self.critics.parameters():
             param.requires_grad_(False)
 
-        π_action, log_prob, μ_action = self.actor.sample(observations)
+        # --- CHANGE (new sample signature): get cost for Lagrangian penalty ---
+        π_action, log_prob, _, cost = self.actor.sample(observations)
+        # --- END CHANGE ---
 
         self.logp_means.append(float(log_prob.detach().mean().cpu()))
         self.logp_mins.append(float(log_prob.detach().min().cpu()))
@@ -279,18 +324,50 @@ class Train:
         q1_π = self.critics.q1(observations, π_action)
         q2_π = self.critics.q2(observations, π_action)
         q_π = torch.min(q1_π, q2_π)
-        actor_loss = (self.temperature.alpha.detach() * log_prob - q_π).mean()
+
+        # --- CHANGE (Lagrangian): add lambda * cost penalty to actor objective ---
+        # Lagrangian penalty: encourages the policy to avoid infeasible raw actions
+        # by penalizing the projected violation cost returned by sample().
+        actor_loss = (self.temperature.alpha.detach() * log_prob - q_π + self.lmbda.detach() * cost).mean()
+        # --- END CHANGE ---
+
+        # --- CHANGE (Projection/Loss audit): log cost stats and actor loss per update ---
+        # Note: cost is expected to be per-sample (batch-wise). If it is scalar, p95==mean.
+        with torch.no_grad():
+            cost_cpu = cost.detach().view(-1).cpu().numpy()
+            cost_mean = float(cost_cpu.mean())
+            cost_p95 = float(np.percentile(cost_cpu, 95)) if cost_cpu.size > 1 else float(cost_mean)
+            frac_violation = float((cost_cpu > self.violation_eps).mean())
+        self.cost_means.append(cost_mean)
+        self.cost_p95s.append(cost_p95)
+        self.frac_violations.append(frac_violation)
+        self.actor_losses.append(float(actor_loss.detach().cpu()))
+        # --- END CHANGE ---
+
         self.opt_actor.zero_grad()
         actor_loss.backward()
         if self.hp.grad_clip:
             torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 10.0)
         self.opt_actor.step()
 
+        # --- CHANGE (Lagrangian): dual ascent update for lambda (keep lambda >= 0) ---
+        # Dual update (projected gradient ascent): lambda <- [lambda + lr*(E[cost] - cost_limit)]_+
+        with torch.no_grad():
+            target = cost.new_tensor(self.cost_limit)
+            self.lmbda += self.lmbda_lr * (cost.mean() - target)
+            self.lmbda.clamp_(0.0, self.lmbda_max)
+        # --- END CHANGE ---
+
         for param in self.critics.parameters():
             param.requires_grad_(True)
 
         # Temperature (entropy) update
         alpha_loss = self.temperature.loss(log_prob.detach())
+
+        # --- CHANGE (Loss audit): log alpha loss per update (detached) ---
+        self.alpha_losses.append(float(alpha_loss.detach().cpu()))
+        # --- END CHANGE ---
+
         self.opt_alpha.zero_grad()
         alpha_loss.backward()
         self.opt_alpha.step()
@@ -347,7 +424,9 @@ class Train:
                         obs_t = torch.as_tensor(obs_np, device=DEVICE).unsqueeze(0)
 
                         with torch.no_grad():
-                            action_t, _, _ = self.actor.sample(obs_t)
+                            # --- CHANGE (new sample signature): use projected action directly ---
+                            action_t, _, _, _ = self.actor.sample(obs_t)
+                            # --- END CHANGE ---
 
                         action_np = action_t.squeeze(0).cpu().numpy()
                         action_exec = np.clip(action_np, env.action_space.low, env.action_space.high)
@@ -401,6 +480,15 @@ class Train:
                 q_next_mean = float(np.mean(self.q_next_means[q_start:q_end]))
                 logp_mean = float(np.mean(self.logp_means[q_start:q_end]))
                 logp_min = float(np.min(self.logp_mins[q_start:q_end]))
+
+                # --- CHANGE (Projection/Loss audit): aggregate per-episode from per-update values ---
+                cost_mean_ep = float(np.mean(self.cost_means[q_start:q_end]))
+                cost_p95_ep = float(np.mean(self.cost_p95s[q_start:q_end]))
+                frac_violation_ep = float(np.mean(self.frac_violations[q_start:q_end]))
+                critic_loss_ep = float(np.mean(self.critic_losses[q_start:q_end]))
+                actor_loss_ep = float(np.mean(self.actor_losses[q_start:q_end]))
+                alpha_loss_ep = float(np.mean(self.alpha_losses[q_start:q_end]))
+                # --- END CHANGE ---
             else:
                 q1_mean = np.nan
                 q2_mean = np.nan
@@ -409,6 +497,15 @@ class Train:
                 q_next_mean = np.nan
                 logp_mean = np.nan
                 logp_min = np.nan
+
+                # --- CHANGE (Projection/Loss audit) ---
+                cost_mean_ep = np.nan
+                cost_p95_ep = np.nan
+                frac_violation_ep = np.nan
+                critic_loss_ep = np.nan
+                actor_loss_ep = np.nan
+                alpha_loss_ep = np.nan
+                # --- END CHANGE ---
 
             alpha_val = float(self.temperature.alpha.detach().cpu())
 
@@ -429,6 +526,17 @@ class Train:
                 "steps": int(steps),
                 "buffer_size": int(self.buffer.size),
                 "alpha": alpha_val,
+                # --- CHANGE (Lagrangian): log lambda ---
+                "lambda": float(self.lmbda.detach().cpu().item()),
+                # --- END CHANGE ---
+                # --- CHANGE (Projection/Loss audit): log aggregated per-episode values ---
+                "cost_mean": float(cost_mean_ep) if not np.isnan(cost_mean_ep) else np.nan,
+                "cost_p95": float(cost_p95_ep) if not np.isnan(cost_p95_ep) else np.nan,
+                "frac_violation": float(frac_violation_ep) if not np.isnan(frac_violation_ep) else np.nan,
+                "critic_loss": float(critic_loss_ep) if not np.isnan(critic_loss_ep) else np.nan,
+                "actor_loss": float(actor_loss_ep) if not np.isnan(actor_loss_ep) else np.nan,
+                "alpha_loss": float(alpha_loss_ep) if not np.isnan(alpha_loss_ep) else np.nan,
+                # --- END CHANGE ---
             }
 
             # Evita FutureWarning do concat com DF vazio
@@ -444,7 +552,7 @@ class Train:
 
 
 def main():
-    for tariff in ["tar_w", "tar_sw"]:
+    for tariff in ["tar_s", "tar_w", "tar_sw", "tar_tou", "tar_flat"]:
         train = Train(tariff)
         train.run()
 

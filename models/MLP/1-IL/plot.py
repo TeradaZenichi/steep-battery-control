@@ -8,6 +8,7 @@ import sys
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib import dates as mdates
 
 
 # =============================================================================
@@ -28,7 +29,7 @@ sys.path.append(str(Path(__file__).resolve().parent))
 MODEL_NAME = Path(__file__).resolve().parent.name     # e.g., "1-IL"
 SPLIT = "test"                                       # "test", "run", ...
 
-TARIFFS = ["tar_s", "tar_w", "tar_sw", "tar_tou", "tar_flat"]
+TARIFFS = ["tar_s"] #, "tar_w", "tar_sw", "tar_tou", "tar_flat"]
 
 CONFIG_JSON = Path(__file__).resolve().parent / "config.json"
 RESULTS_ROOT = PROJECT_ROOT / "Results"
@@ -106,31 +107,101 @@ def _slice_window(df: pd.DataFrame, start_date: str, days: int) -> pd.DataFrame:
 def _plot_actor(df: pd.DataFrame, title: str, out_path: Path) -> None:
     _require_cols(df, POWER_COLS + SOC_COLS_ACTOR + CMD_COLS_ACTOR + [CURTAIL_COL], "actor plot")
 
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=FIGSIZE, sharex=True)
+    fig, (ax0, ax1, ax2) = plt.subplots(3, 1, figsize=FIGSIZE, sharex=True)
 
-    # Power
+    colors = {
+        "BESS": "#1f77b4",
+        "EV": "#ff7f0e",
+        "PV": "#2ca02c",
+        "Load": "#d62728",
+        "Grid": "#9467bd",
+    }
+
+    if len(df.index) >= 2:
+        step = (df.index[1] - df.index[0]).total_seconds() / 86400.0
+        bar_width = step * 0.8
+    else:
+        bar_width = 0.02
+
+    # Commands (top)
+    ax0.bar(
+        df.index,
+        df["bess_cmd"].astype(float).values,
+        width=bar_width,
+        color=colors["BESS"],
+        alpha=0.7,
+        label="bess_cmd",
+    )
+    ax0.bar(
+        df.index,
+        df["ev_cmd"].astype(float).values,
+        width=bar_width,
+        color=colors["EV"],
+        alpha=0.7,
+        label="ev_cmd",
+    )
+    ax0.plot(
+        df.index,
+        df["pv_cmd"].astype(float).values,
+        color=colors["PV"],
+        label="pv_cmd",
+    )
+    ax0.axhline(0.0, linewidth=1.0)
+    ax0.set_ylabel("Commands")
+    ax0.set_ylim(-1.0, 1.0)
+    ax0.grid(True, alpha=0.3)
+    ax0.legend(loc="best")
+
+    # Power (operation)
     if PLOT_PV_AVAILABLE:
         denom = (1.0 - df[CURTAIL_COL].astype(float)).replace(0.0, np.nan)
         pv_available = (df["PPV"].astype(float) / denom).fillna(df["PPV"].astype(float))
-        ax1.plot(df.index, pv_available.values, label="PV_available")
+        ax1.plot(
+            df.index,
+            pv_available.values,
+            label="PV_available",
+            color=colors["PV"],
+            linestyle="--",
+        )
 
-    for c in POWER_COLS:
-        ax1.plot(df.index, df[c].astype(float).values, label=c)
+    ax1.plot(df.index, df["PPV"].astype(float).values, label="PPV", color=colors["PV"])
+    ax1.plot(df.index, df["PLoad"].astype(float).values, label="PLoad", color=colors["Load"])
+    ax1.plot(df.index, df["PGrid"].astype(float).values, label="PGrid", color=colors["Grid"])
+
+    ax1.bar(
+        df.index,
+        df["PBESS"].astype(float).values,
+        width=bar_width,
+        color=colors["BESS"],
+        alpha=0.7,
+        label="PBESS",
+    )
+    ax1.bar(
+        df.index,
+        df["PEV"].astype(float).values,
+        width=bar_width,
+        color=colors["EV"],
+        alpha=0.7,
+        label="PEV",
+    )
+
     ax1.axhline(0.0, linewidth=1.0)
     ax1.set_ylabel("Power (kW)")
+    ax1.set_ylim(-2.5, 5.0)
     ax1.grid(True, alpha=0.3)
     ax1.legend(loc="best")
 
-    # SoC + commands
+    # SoC (bottom)
     for c in SOC_COLS_ACTOR:
         ax2.plot(df.index, df[c].astype(float).values, label=c)
-    for c in CMD_COLS_ACTOR:
-        ax2.plot(df.index, df[c].astype(float).values, label=c)
 
-    ax2.set_ylabel("SoC / commands")
+    ax2.set_ylabel("SoC")
+    ax2.set_ylim(0.0, 1.0)
     ax2.set_xlabel("Time")
     ax2.grid(True, alpha=0.3)
     ax2.legend(loc="best")
+
+    ax2.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
 
     fig.suptitle(title)
     fig.tight_layout()
