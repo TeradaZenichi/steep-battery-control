@@ -19,7 +19,7 @@
   "Grid": {
     "Pmax_import": 5,
     "Pmax_export": 1,
-    "net_penalty": 15,
+    "net_penalty": 5,
     "tariff_column": "tar_tou"
   },
   "BESS": {
@@ -32,7 +32,7 @@
     "soc_max": 0.9,
     "capex": 987,
     "ncycles": 6000,
-    "sat_penalty": 3.0,
+    "sat_penalty": 1.0,
     "ramp_penalty": 0.05,
     "soc_power_curve_pu": {
       "soc": [0.10, 0.20, 0.40, 0.60, 0.80, 0.90],
@@ -53,23 +53,23 @@
     "DoD": 0.9,
     "η": 0.92,
     "β": 0.0004,
-    "soc_min": 0.0,
+    "soc_min": 0.5,
     "soc_max": 1.0,
     "soc_init": 0.5,
     "soh_init": 1.0,
+    "penalty": 0.05,
     "column": "ev_status",
     "capex": 370,
     "ncycles": 671,
-    "sat_penalty": 3.0,
-    "ramp_penalty": 0.05,
-
+    "sat_penalty": 0.0001,
+    "ramp_penalty": 0.0001,
+    "soc_critical": 0.2,
+    "fast_tariff": 1.5,
     "penalty_coef": 1.0,
-
     "departure_penalty": {
       "thresholds": [0.5, 0.8, 0.9, 1.0],
-      "weights":    [300.0, 40.0, 10.0, 2.0]
+      "weights":    [0.0, 0.0, 0.0, 0.0]
     },
-
     "soc_power_curve_pu": {
       "soc": [0.00, 0.10, 0.30, 0.60, 0.85, 1.00],
       "charge_pu":    [1.00, 1.00, 1.00, 0.90, 0.60, 0.30],

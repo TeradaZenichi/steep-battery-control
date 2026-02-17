@@ -200,165 +200,114 @@ class Actor(nn.Module):
         soc_ev   = x[..., 13:14]
         ev_on    = x[..., 14:15]
 
-        bmin, bmax = self.bess.limits(soc_bess)
-        emin, emax = self.ev.get_limits(soc_ev, ev_on)
+        amin_b, amax_b = self.bess.limits(soc_bess)
+        amin_e, amax_e = self.ev.get_limits(soc_ev, ev_on)
 
-        a_bess = torch.clamp(action_raw[..., 0:1], bmin, bmax)
-        a_ev   = torch.clamp(action_raw[..., 1:2], emin, emax)
+        a_bess = torch.clamp(action_raw[..., 0:1], amin_b, amax_b)
+        a_ev   = torch.clamp(action_raw[..., 1:2], amin_e, amax_e)
         a_pv   = torch.clamp(action_raw[..., 2:3], 0.0, 1.0)
 
         action_proj = torch.cat([a_bess, a_ev, a_pv], dim=-1)
 
-        viol = (action_raw[..., 0:1] - a_bess).abs() + (action_raw[..., 1:2] - a_ev).abs()
-        cost = viol.pow(2)
+        # --- CHANGE: gate EV violation when disconnected ---
+        viol_bess = (action_raw[..., 0:1] - a_bess).abs()
+        viol_ev   = (action_raw[..., 1:2] - a_ev).abs() * ev_on
+        viol = viol_bess + viol_ev
+        # --- END CHANGE ---
 
+        cost = viol.pow(2)
         return action_proj, cost
 
-
-    def sample(
-        self,
-        x: torch.Tensor,
-        eps: float = 1e-6
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    def sample(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        SAC sample with feasibility projection.
         Returns:
-        action_proj      : action used by env/Q (projected)
-        logp_raw         : log pi(a_raw|s) (pre-projection, used in SAC)
-        mu_action_proj   : deterministic projected action (for eval/debug)
-        cost             : violation^2 for Lagrange multiplier
+          action_proj  : projected sampled action
+          logp         : log prob of squashed raw action (standard SAC)
+          mu_action_proj : projected deterministic action (tanh(mu))
+          cost         : violation^2 computed from projection residual
         """
         mu, log_std = self._dist_params(x)
         std = torch.exp(log_std)
         dist = Normal(mu, std)
 
-        u = dist.rsample()          # reparameterized sample
-        z = torch.tanh(u)           # [-1,1]
+        raw = dist.rsample()
+        z = torch.tanh(raw)
 
-        pv = self._map_pv(z[..., 2:3])
-        action_raw = torch.cat([z[..., 0:1], z[..., 1:2], pv], dim=-1)
+        # map pv to [0,1]
+        z_pv = self._map_pv(z[..., 2:3])
+        z = torch.cat([z[..., 0:1], z[..., 1:2], z_pv], dim=-1)
 
-        # log pi(z|s) with tanh correction + PV affine map correction
-        logp_u = dist.log_prob(u).sum(dim=-1, keepdim=True)
-        log_det_tanh = torch.log(1.0 - z.pow(2) + eps).sum(dim=-1, keepdim=True)
-        logp = (logp_u - log_det_tanh) + math.log(2.0)
+        action_proj, cost = self._project(x, z)
 
-        # deterministic (mean) action, then project it too
-        mu_z = torch.tanh(mu)
-        mu_pv = self._map_pv(mu_z[..., 2:3])
-        mu_action_raw = torch.cat([mu_z[..., 0:1], mu_z[..., 1:2], mu_pv], dim=-1)
+        # log prob of tanh-squashed action
+        logp = dist.log_prob(raw).sum(dim=-1, keepdim=True)
+        logp -= torch.log(1.0 - torch.tanh(raw).pow(2) + 1e-6).sum(dim=-1, keepdim=True)
 
-        action_proj, cost = self._project(x, action_raw)
-        mu_action_proj, _ = self._project(x, mu_action_raw)
+        mu_tanh = torch.tanh(mu)
+        mu_pv = self._map_pv(mu_tanh[..., 2:3])
+        mu_tanh = torch.cat([mu_tanh[..., 0:1], mu_tanh[..., 1:2], mu_pv], dim=-1)
+        mu_action_proj, _ = self._project(x, mu_tanh)
 
         return action_proj, logp, mu_action_proj, cost
 
 
-    def predict(self, obs):
-        self.eval()
-        with torch.no_grad():
-            if isinstance(obs, torch.Tensor):
-                x = obs
-                if x.ndim == 1:
-                    x = x.unsqueeze(0)
-            else:
-                x = torch.as_tensor(obs, dtype=torch.float32)
-                if x.ndim == 1:
-                    x = x.unsqueeze(0)
-            out = self.forward(x)
-            return out.cpu().numpy().squeeze()
-
-    def action(self, obs):
-        """
-        Deterministic action with feasibility projection.
-
-        - Uses the policy mean (mu) deterministically (no sampling).
-        - Applies tanh squashing and PV mapping to [0,1].
-        - Projects the raw deterministic action to the feasible set.
-        - Returns a numpy array (squeezed), consistent with predict().
-        """
-        self.eval()
-        with torch.no_grad():
-            if isinstance(obs, torch.Tensor):
-                x = obs
-                if x.ndim == 1:
-                    x = x.unsqueeze(0)
-                x = x.to(next(self.parameters()).device, dtype=torch.float32)
-            else:
-                x = torch.as_tensor(obs, dtype=torch.float32, device=next(self.parameters()).device)
-                if x.ndim == 1:
-                    x = x.unsqueeze(0)
-
-            mu, _ = self._dist_params(x)
-
-            mu_z = torch.tanh(mu)  # [-1,1] for first two dims and PV latent
-            mu_pv = self._map_pv(mu_z[..., 2:3])  # [0,1]
-            action_raw = torch.cat([mu_z[..., 0:1], mu_z[..., 1:2], mu_pv], dim=-1)
-
-            action_proj, _ = self._project(x, action_raw)
-
-            return action_proj.cpu().numpy().squeeze()
-
-
 class Critic(nn.Module):
-    def __init__(self, state_dim: int, action_dim: int, hidden_dims: list[int]):
+    def __init__(self, input_dim: int, hidden_dims: list[int], head_dim: int):
         super().__init__()
 
-        layers = []
-        prev = state_dim + action_dim
-        for dim in hidden_dims:
-            layers += [nn.Linear(prev, dim), nn.ReLU()]
-            prev = dim
-        layers.append(nn.Linear(prev, 1))
-        self.net = nn.Sequential(*layers)
+        def build():
+            layers = []
+            prev = input_dim
+            for dim in hidden_dims:
+                layers += [nn.Linear(prev, dim), nn.ReLU()]
+                prev = dim
+            layers += [nn.Linear(prev, head_dim), nn.ReLU(), nn.Linear(head_dim, 1)]
+            return nn.Sequential(*layers)
 
-    def forward(self, state: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
-        return self.net(torch.cat([state, action], dim=-1))
+        self.q1 = build()
+        self.q2 = build()
 
-
-class DoubleCritic(nn.Module):
-    def __init__(self, state_dim: int, action_dim: int, hidden_dims: list[int]):
-        super().__init__()
-        self.q1 = Critic(state_dim, action_dim, hidden_dims)
-        self.q2 = Critic(state_dim, action_dim, hidden_dims)
-
-    def forward(self, state: torch.Tensor, action: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        return self.q1(state, action), self.q2(state, action)
-
-    def q_min(self, state: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
-        q1, q2 = self.forward(state, action)
-        return torch.min(q1, q2)
+    def forward(self, obs: torch.Tensor, act: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        x = torch.cat([obs, act], dim=-1)
+        return self.q1(x), self.q2(x)
 
 
-def load_actor(config, weights_path=None, device=None):
-    model = Actor(
-        config["input_dim"],
-        config["hidden_dims"],
-        config["head_dim"],
-        # Default bounds match the Actor constructor (and common SAC settings).
-        log_std_min=config.get("log_std_min", -20.0),
-        log_std_max=config.get("log_std_max", 2.0),
-        init_log_std_bias=config.get("init_log_std_bias", -2.0),
+def load_actor(actor_cfg: dict, device=None):
+    actor = Actor(
+        input_dim=actor_cfg["input_dim"],
+        hidden_dims=actor_cfg["hidden_dims"],
+        head_dim=actor_cfg["head_dim"],
+        log_std_min=actor_cfg.get("log_std_min", -20.0),
+        log_std_max=actor_cfg.get("log_std_max", 2.0),
+        init_log_std_bias=actor_cfg.get("init_log_std_bias", -2.0),
+        parameters=actor_cfg.get("parameters", "data/parameters.json"),
     )
-
-    if weights_path:
-        state = torch.load(weights_path, map_location=device if device is not None else "cpu")
-        model.load_state_dict(state, strict=True)
-
     if device is not None:
-        model.to(device)
+        actor = actor.to(device)
+    return actor
 
-    return model
 
+def load_critic(critic_cfg: dict, device=None):
+    input_dim = critic_cfg.get("input_dim")
+    if input_dim is None:
+        state_dim = critic_cfg.get("state_dim")
+        action_dim = critic_cfg.get("action_dim")
+        if state_dim is None or action_dim is None:
+            raise KeyError("critic config must provide either 'input_dim' or both 'state_dim' and 'action_dim'")
+        input_dim = int(state_dim) + int(action_dim)
 
-def load_critic(config, weights_path=None, device=None):
-    model = DoubleCritic(config["state_dim"], config["action_dim"], config["hidden_dims"])
+    head_dim = critic_cfg.get("head_dim")
+    if head_dim is None:
+        hidden_dims = critic_cfg.get("hidden_dims", [])
+        if not hidden_dims:
+            raise KeyError("critic config must provide 'head_dim' or non-empty 'hidden_dims'")
+        head_dim = int(hidden_dims[-1])
 
-    if weights_path:
-        state = torch.load(weights_path, map_location=device if device is not None else "cpu")
-        model.load_state_dict(state, strict=True)
-
+    critics = Critic(
+        input_dim=input_dim,
+        hidden_dims=critic_cfg["hidden_dims"],
+        head_dim=head_dim,
+    )
     if device is not None:
-        model.to(device)
-
-    return model
+        critics = critics.to(device)
+    return critics

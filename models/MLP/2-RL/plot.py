@@ -108,7 +108,7 @@ def _slice_window(df: pd.DataFrame, start_date: str, days: int) -> pd.DataFrame:
 def _plot_actor(df: pd.DataFrame, title: str, out_path: Path) -> None:
     _require_cols(df, POWER_COLS + SOC_COLS_ACTOR + CMD_COLS_ACTOR + [CURTAIL_COL], "actor plot")
 
-    fig, (ax0, ax1, ax2) = plt.subplots(3, 1, figsize=FIGSIZE, sharex=True)
+    fig, (ax0, ax1) = plt.subplots(2, 1, figsize=FIGSIZE, sharex=True)
 
     colors = {
         "BESS": "#1f77b4",
@@ -125,39 +125,39 @@ def _plot_actor(df: pd.DataFrame, title: str, out_path: Path) -> None:
         bar_width = 0.02
 
     # Commands (top)
-    ax0.bar(
-        df.index,
-        df["bess_cmd"].astype(float).values,
-        width=bar_width,
-        color=colors["BESS"],
-        alpha=0.7,
-        label="bess_cmd",
-    )
-    ax0.bar(
-        df.index,
-        df["ev_cmd"].astype(float).values,
-        width=bar_width,
-        color=colors["EV"],
-        alpha=0.7,
-        label="ev_cmd",
-    )
-    ax0.plot(
-        df.index,
-        df["pv_cmd"].astype(float).values,
-        color=colors["PV"],
-        label="pv_cmd",
-    )
-    ax0.axhline(0.0, linewidth=1.0)
-    ax0.set_ylabel("Commands")
-    ax0.set_ylim(-1.0, 1.0)
-    ax0.grid(True, alpha=0.3)
-    ax0.legend(loc="best")
+    # ax0.bar(
+    #     df.index,
+    #     df["bess_cmd"].astype(float).values,
+    #     width=bar_width,
+    #     color=colors["BESS"],
+    #     alpha=0.7,
+    #     label="bess_cmd",
+    # )
+    # ax0.bar(
+    #     df.index,
+    #     df["ev_cmd"].astype(float).values,
+    #     width=bar_width,
+    #     color=colors["EV"],
+    #     alpha=0.7,
+    #     label="ev_cmd",
+    # )
+    # ax0.plot(
+    #     df.index,
+    #     df["pv_cmd"].astype(float).values,
+    #     color=colors["PV"],
+    #     label="pv_cmd",
+    # )
+    # ax0.axhline(0.0, linewidth=1.0)
+    # ax0.set_ylabel("Commands")
+    # ax0.set_ylim(-1.0, 1.1)
+    # ax0.grid(True, alpha=0.3)
+    # ax0.legend(loc="best")
 
     # Power (operation)
     if PLOT_PV_AVAILABLE:
         denom = (1.0 - df[CURTAIL_COL].astype(float)).replace(0.0, np.nan)
         pv_available = (df["PPV"].astype(float) / denom).fillna(df["PPV"].astype(float))
-        ax1.plot(
+        ax0.plot(
             df.index,
             pv_available.values,
             label="PV_available",
@@ -165,11 +165,11 @@ def _plot_actor(df: pd.DataFrame, title: str, out_path: Path) -> None:
             linestyle="--",
         )
 
-    ax1.plot(df.index, df["PPV"].astype(float).values, label="PPV", color=colors["PV"])
-    ax1.plot(df.index, df["PLoad"].astype(float).values, label="PLoad", color=colors["Load"])
-    ax1.plot(df.index, df["PGrid"].astype(float).values, label="PGrid", color=colors["Grid"])
+    ax0.plot(df.index, df["PPV"].astype(float).values, label="PPV", color=colors["PV"])
+    ax0.plot(df.index, df["PLoad"].astype(float).values, label="PLoad", color=colors["Load"])
+    ax0.plot(df.index, df["PGrid"].astype(float).values, label="PGrid", color=colors["Grid"])
 
-    ax1.bar(
+    ax0.bar(
         df.index,
         df["PBESS"].astype(float).values,
         width=bar_width,
@@ -177,7 +177,7 @@ def _plot_actor(df: pd.DataFrame, title: str, out_path: Path) -> None:
         alpha=0.7,
         label="PBESS",
     )
-    ax1.bar(
+    ax0.bar(
         df.index,
         df["PEV"].astype(float).values,
         width=bar_width,
@@ -186,23 +186,23 @@ def _plot_actor(df: pd.DataFrame, title: str, out_path: Path) -> None:
         label="PEV",
     )
 
-    ax1.axhline(0.0, linewidth=1.0)
-    ax1.set_ylabel("Power (kW)")
-    ax1.set_ylim(-2.5, 5.0)
-    ax1.grid(True, alpha=0.3)
-    ax1.legend(loc="best")
+    ax0.axhline(0.0, linewidth=1.0)
+    ax0.set_ylabel("Power (kW)")
+    ax0.set_ylim(-2.5, 6.0)
+    ax0.grid(True, alpha=0.3)
+    ax0.legend(loc="best")
 
     # SoC (bottom)
     for c in SOC_COLS_ACTOR:
-        ax2.plot(df.index, df[c].astype(float).values, label=c)
+        ax1.plot(df.index, df[c].astype(float).values, label=c)
 
-    ax2.set_ylabel("SoC")
-    ax2.set_ylim(0.0, 1.0)
-    ax2.set_xlabel("Time")
-    ax2.grid(True, alpha=0.3)
-    ax2.legend(loc="best")
+    ax1.set_ylabel("SoC")
+    ax1.set_ylim(0.0, 1.1)
+    ax1.set_xlabel("Time")
+    ax1.grid(True, alpha=0.3)
+    ax1.legend(loc="best")
 
-    ax2.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
+    ax1.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
 
     fig.suptitle(title)
     fig.tight_layout()
@@ -215,29 +215,93 @@ def _plot_actor(df: pd.DataFrame, title: str, out_path: Path) -> None:
 def _plot_teacher(df: pd.DataFrame, title: str, out_path: Path) -> None:
     _require_cols(df, POWER_COLS + SOC_COLS_TEACHER + [CURTAIL_COL], "teacher plot")
 
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=FIGSIZE, sharex=True)
+    fig, (ax0, ax1) = plt.subplots(2, 1, figsize=FIGSIZE, sharex=True)
 
-    # Power
+    colors = {
+        "BESS": "#1f77b4",
+        "EV": "#ff7f0e",
+        "PV": "#2ca02c",
+        "Load": "#d62728",
+        "Grid": "#9467bd",
+    }
+
+    if len(df.index) >= 2:
+        step = (df.index[1] - df.index[0]).total_seconds() / 86400.0
+        bar_width = step * 0.8
+    else:
+        bar_width = 0.02
+
+    # Power (match actor style)
     if PLOT_PV_AVAILABLE:
         denom = (1.0 - df[CURTAIL_COL].astype(float)).replace(0.0, np.nan)
         pv_available = (df["PPV"].astype(float) / denom).fillna(df["PPV"].astype(float))
-        ax1.plot(df.index, pv_available.values, label="PV_available")
+        ax0.plot(
+            df.index,
+            pv_available.values,
+            label="PV_available",
+            color=colors["PV"],
+            linestyle="--",
+        )
 
-    for c in POWER_COLS:
+    ax0.plot(df.index, df["PPV"].astype(float).values, label="PPV", color=colors["PV"])
+    ax0.plot(df.index, df["PLoad"].astype(float).values, label="PLoad", color=colors["Load"])
+    ax0.plot(df.index, df["PGrid"].astype(float).values, label="PGrid", color=colors["Grid"])
+
+    ax0.bar(
+        df.index,
+        df["PBESS"].astype(float).values,
+        width=bar_width,
+        color=colors["BESS"],
+        alpha=0.7,
+        label="PBESS",
+    )
+    ax0.bar(
+        df.index,
+        df["PEV"].astype(float).values,
+        width=bar_width,
+        color=colors["EV"],
+        alpha=0.7,
+        label="PEV",
+    )
+
+    ax0.axhline(0.0, linewidth=1.0)
+    ax0.set_ylabel("Power (kW)")
+    ax0.set_ylim(-2.5, 6.0)
+    ax0.grid(True, alpha=0.3)
+    ax0.legend(loc="best")
+
+    # SoC (bottom)
+    for c in SOC_COLS_TEACHER:
         ax1.plot(df.index, df[c].astype(float).values, label=c)
-    ax1.axhline(0.0, linewidth=1.0)
-    ax1.set_ylabel("Power (kW)")
+
+    ax1.set_ylabel("SoC")
+    ax1.set_ylim(0.0, 1.1)
+    ax1.set_xlabel("Time")
     ax1.grid(True, alpha=0.3)
     ax1.legend(loc="best")
 
-    # SoC (teacher has no commands)
-    for c in SOC_COLS_TEACHER:
-        ax2.plot(df.index, df[c].astype(float).values, label=c)
+    ax1.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
 
-    ax2.set_ylabel("SoC")
-    ax2.set_xlabel("Time")
-    ax2.grid(True, alpha=0.3)
-    ax2.legend(loc="best")
+    fig.suptitle(title)
+    fig.tight_layout()
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=DPI, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _plot_tariff(df: pd.DataFrame, title: str, out_path: Path) -> None:
+    _require_cols(df, ["tariff"], "tariff plot")
+
+    fig, ax = plt.subplots(1, 1, figsize=FIGSIZE, sharex=True)
+
+    ax.plot(df.index, df["tariff"].astype(float).values, label="tariff", color="#9467bd")
+    ax.set_ylabel("Tariff")
+    ax.set_xlabel("Time")
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="best")
+
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
 
     fig.suptitle(title)
     fig.tight_layout()
@@ -279,6 +343,12 @@ def main() -> None:
             title_actor = f"ACTOR | model={MODEL_NAME} | tariff={tariff} | {name} | {start_ts.strftime('%Y-%m-%d')} +{days}d"
             _plot_actor(w_actor, title_actor, out_actor)
             print(f"[OK] Saved: {out_actor}")
+
+            # Tariff (shared)
+            out_tariff = out_dir / f"{name}__{start_ts.strftime('%Y-%m-%d')}__{days}d__tariff.{EXT}"
+            title_tariff = f"TARIFF | tariff={tariff} | {name} | {start_ts.strftime('%Y-%m-%d')} +{days}d"
+            _plot_tariff(w_actor, title_tariff, out_tariff)
+            print(f"[OK] Saved: {out_tariff}")
 
             # Teacher
             df_teacher = _read_csv(teacher_csv)

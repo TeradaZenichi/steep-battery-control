@@ -63,12 +63,21 @@ class ReplayBuffer:
         batch_size = int(batch_size)
         idx = np.random.randint(0, self.size, size=batch_size)
 
+        obs_t = torch.as_tensor(self.obs[idx], device=self.device)
+        acts_t = torch.as_tensor(self.acts[idx], device=self.device)
+        rews_t = torch.as_tensor(self.rews[idx], device=self.device)
+        next_obs_t = torch.as_tensor(self.next_obs[idx], device=self.device)
+        dones_t = torch.as_tensor(self.dones[idx], device=self.device)
+
         batch = {
-            "obs": torch.as_tensor(self.obs[idx], device=self.device),
-            "acts": torch.as_tensor(self.acts[idx], device=self.device),
-            "rews": torch.as_tensor(self.rews[idx], device=self.device),
-            "next_obs": torch.as_tensor(self.next_obs[idx], device=self.device),
-            "dones": torch.as_tensor(self.dones[idx], device=self.device),
+            "obs": obs_t,
+            "act": acts_t,
+            "rew": rews_t,
+            "next_obs": next_obs_t,
+            "done": dones_t,
+            "acts": acts_t,
+            "rews": rews_t,
+            "dones": dones_t,
         }
         return batch
     
@@ -85,6 +94,7 @@ class Hyperparameters:
         self.critic_lr      = config["critic_lr"]
         self.α_lr           = config["α_lr"]
         self.auto_α         = config["auto_entropy"]
+        self.auto_entropy   = config["auto_entropy"]
         self.policy_delay   = config["policy_delay"]
         self.grad_clip      = config["grad_clip"]
         self.log_std_min    = config["log_std_min"]
@@ -165,6 +175,10 @@ class EpisodeGen:
             raise RuntimeError("No valid start timestamps outside eval windows.")
         start = candidates[self.rng.integers(0, len(candidates))]
         return start
+
+    def load(self, dataset: str):
+        key = self._normalize_dataset(dataset)
+        return self.df_cy if key == "cy" else self.df_wy
 
 
 def _eval_worker(run, parameters, tariff, actor_cfg, actor_state_dict, episode_length):

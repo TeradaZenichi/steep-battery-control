@@ -15,7 +15,7 @@ df = pd.read_csv(
 with open("data/parameters.json", encoding="utf-8") as f:
 	par = json.load(f)
 	
-start = datetime.strptime("2000-09-01 00:00:00", "%Y-%m-%d %H:%M:%S")
+start = datetime.strptime("2000-01-01 00:00:00", "%Y-%m-%d %H:%M:%S")
 days = 10
 tariff = "tar_s"
 BESS_SoC = 0.5

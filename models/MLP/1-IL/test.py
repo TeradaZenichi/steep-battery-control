@@ -29,6 +29,24 @@ def enrich_operation_with_reward_breakdown(operation: pd.DataFrame, raw_df: pd.D
     dt = float(par["general"]["timestep"]) / 60.0
 
     # -------------------------
+    # EV connection mask
+    # -------------------------
+    if "ev_status" in raw_df.columns:
+        ev_status = raw_df.loc[op.index, "ev_status"].astype(float)
+    else:
+        ev_status = (op["SoCEV"].astype(float) > 0.0).astype(float)
+
+    ev_present = ev_status > 0.01
+    prev_present = ev_present.shift(1, fill_value=False)
+    # arriving step: first positive
+    connected_mask = (ev_present & prev_present).astype(float)
+    departing_mask = ((~ev_present) & prev_present).astype(float)
+
+    # Mask EV power and SoC between departure and arrival
+    op["PEV"] = op["PEV"].astype(float) * connected_mask
+    op["SoCEV"] = op["SoCEV"].astype(float) * connected_mask
+
+    # -------------------------
     # Energy cost decomposition
     # -------------------------
     tar = op["tariff"].astype(float)
@@ -72,19 +90,6 @@ def enrich_operation_with_reward_breakdown(operation: pd.DataFrame, raw_df: pd.D
     Pmax_d = float(ev["Pmax_d"])
     wear_coeff_e = float(ev["capex"]) / (float(ev["Emax"]) * float(ev["ncycles"]))
 
-    # EV presence derived from raw data (matches EVEnv finite-state machine)
-    if "ev_status" in raw_df.columns:
-        ev_status = raw_df.loc[op.index, "ev_status"].astype(float)
-    else:
-        # Fallback: infer presence from SoCEV > 0 (less reliable)
-        ev_status = (op["SoCEV"].astype(float) > 0.0).astype(float)
-
-    ev_present = ev_status > 0.01
-    prev_present = ev_present.shift(1).fillna(False)
-    # arriving step: first positive
-    connected_mask = (ev_present & prev_present).astype(float)
-    departing_mask = ((~ev_present) & prev_present).astype(float)
-
     a_ev = op["ev_cmd"].astype(float)
     cmd_ev = np.where(a_ev >= 0.0, a_ev * Pmax_c, a_ev * Pmax_d)
     cmd_ev = pd.Series(cmd_ev, index=op.index)
@@ -96,17 +101,43 @@ def enrich_operation_with_reward_breakdown(operation: pd.DataFrame, raw_df: pd.D
     op["ev_wear_cost"] = wear_coeff_e * P_ev.abs() * dt
     op["ev_sat_cost"]  = sat_ev * float(ev["sat_penalty"]) * dt * connected_mask
 
-    # Departure penalty occurs on the first step after presence turns off.
-    # EVEnv uses the SoC *before* resetting to 0. We recover it from SoCEV shifted by 1.
-    thresholds = np.array(ev["departure_penalty"]["thresholds"], dtype=float)
-    weights = np.array(ev["departure_penalty"]["weights"], dtype=float)
-    soc_before_depart = op["SoCEV"].astype(float).shift(1).fillna(0.0).to_numpy()
-    idx = np.searchsorted(thresholds, soc_before_depart, side="right")
-    idx = np.clip(idx, 0, len(weights) - 1)
-    dep_cost = weights[idx] * (1.0 - soc_before_depart)
-    op["ev_departure_cost"] = pd.Series(dep_cost, index=op.index) * departing_mask
+    # SoC min penalty (connected only)
+    Emax_e = float(ev["Emax"])
+    soc_min = float(ev["soc_min"])
+    sev = (Emax_e * soc_min - op["EEV"].astype(float)).clip(lower=0.0)
+    op["ev_soc_min_cost"] = sev * float(ev["penalty"]) * dt * connected_mask
 
-    op["ev_cost_recon"] = op["ev_wear_cost"] + op["ev_sat_cost"] + op["ev_departure_cost"]
+    # Arrival fast-charging penalty
+    if "ev_conn" in raw_df.columns and "ev_arrival" in raw_df.columns:
+        conn_t = raw_df.loc[op.index, "ev_conn"].astype(int)
+        connected_t = conn_t.isin([1, 2])
+        connected_prev_t = conn_t.shift(1, fill_value=0).isin([1, 2])
+        is_start_t = op.index == op.index.min()
+        arrival_mask = connected_t & (~connected_prev_t) & (~is_start_t)
+
+        E_dep = op["EEV"].astype(float).shift(1).fillna(0.0)
+        E_trip = Emax_e * raw_df.loc[op.index, "ev_arrival"].astype(float)
+        Ecrit = float(ev["soc_critical"]) * Emax_e
+        E_leg = Emax_e - Ecrit
+
+        fast_tariff = float(ev["fast_tariff"])
+        tariff_t = op["tariff"].astype(float)
+
+        E_pre = (E_dep - Ecrit).clip(lower=0.0)
+        R = (E_trip - E_pre).clip(lower=0.0)
+
+        n_fast = np.ceil(np.where(E_leg > 1e-9, R / E_leg, 0.0)).astype(float)
+        arrival_cost = n_fast * fast_tariff * tariff_t * (E_leg if E_leg > 1e-9 else 0.0)
+        op["ev_arrival_fast_cost"] = pd.Series(arrival_cost, index=op.index) * arrival_mask.astype(float)
+    else:
+        op["ev_arrival_fast_cost"] = 0.0
+
+    op["ev_cost_recon"] = (
+        op["ev_wear_cost"]
+        + op["ev_sat_cost"]
+        + op["ev_soc_min_cost"]
+        + op["ev_arrival_fast_cost"]
+    )
     op["ev_cost_err"] = op["ev_cost"].astype(float) - op["ev_cost_recon"]
 
     # -------------------------
@@ -130,14 +161,15 @@ def enrich_operation_with_reward_breakdown(operation: pd.DataFrame, raw_df: pd.D
         totals[k] = float(op[k].astype(float).sum())
 
     # EV breakdown
-    for k in ["ev_wear_cost", "ev_sat_cost", "ev_departure_cost"]:
+    for k in ["ev_wear_cost", "ev_sat_cost", "ev_soc_min_cost", "ev_arrival_fast_cost"]:
         totals[k] = float(op[k].astype(float).sum())
 
     totals["total_penalties"] = float(
         totals["grid_penalty"]
         + totals["bess_sat_cost"]
         + totals["ev_sat_cost"]
-        + totals["ev_departure_cost"]
+        + totals["ev_soc_min_cost"]
+        + totals["ev_arrival_fast_cost"]
     )
 
     # Reward contributions (negative of costs)
@@ -149,6 +181,8 @@ def enrich_operation_with_reward_breakdown(operation: pd.DataFrame, raw_df: pd.D
         "reward_from_demand_energy": -totals["energy_cost_load"],
         "reward_from_ev_energy": -totals["energy_cost_ev"],
         "reward_from_penalties_total": -totals["total_penalties"],
+        "reward_from_ev_soc_min": -totals["ev_soc_min_cost"],
+        "reward_from_ev_arrival_fast": -totals["ev_arrival_fast_cost"],
     }
 
     denom = abs(totals["total_cost"]) if abs(totals["total_cost"]) > 1e-12 else 1.0
@@ -160,6 +194,8 @@ def enrich_operation_with_reward_breakdown(operation: pd.DataFrame, raw_df: pd.D
         "demand_energy_cost": totals["energy_cost_load"] / denom,
         "ev_energy_cost": totals["energy_cost_ev"] / denom,
         "penalties_total": totals["total_penalties"] / denom,
+        "ev_soc_min_cost": totals["ev_soc_min_cost"] / denom,
+        "ev_arrival_fast_cost": totals["ev_arrival_fast_cost"] / denom,
     }
 
     # Sanity checks (should be near 0)
@@ -168,6 +204,25 @@ def enrich_operation_with_reward_breakdown(operation: pd.DataFrame, raw_df: pd.D
     totals["max_abs_ev_cost_err"] = float(op["ev_cost_err"].abs().max())
 
     return op, totals
+
+
+def mask_operation_with_ev_conn(operation: pd.DataFrame, raw_df: pd.DataFrame):
+    op = operation.copy()
+
+    if "ev_status" in raw_df.columns:
+        ev_status = raw_df.loc[op.index, "ev_status"].astype(float)
+    else:
+        ev_status = (op["SoCEV"].astype(float) > 0.0).astype(float)
+
+    ev_present = ev_status > 0.01
+    prev_present = ev_present.shift(1, fill_value=False)
+    connected_mask = (ev_present & prev_present).astype(float)
+
+    op["PEV"] = op["PEV"].astype(float) * connected_mask
+    op["SoCEV"] = op["SoCEV"].astype(float) * connected_mask
+    op["EEV"] = op["EEV"].astype(float) * connected_mask
+
+    return op
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -186,13 +241,24 @@ np.random.seed(test_cfg["seed"])
 # Toggle: in IL evaluation, you may want to run with the same feasibility projection as RL.
 # - False: uses actor.predict(state_t) (no projection)
 # - True:  uses actor.action(state) (deterministic + projection)
-USE_PROJECTION = False
+USE_PROJECTION = True
 
-for tariff in ["tar_s"]: #, "tar_w", "tar_sw", "tar_tou", "tar_flat"]:
+# I/O and breakdown toggles to speed up tests
+SAVE_OPERATION_CSV = True
+SAVE_BREAKDOWN_CSV = True
+INCLUDE_BREAKDOWN_SUMMARY = True
+
+for tariff in ["tar_s", "tar_w", "tar_sw", "tar_tou", "tar_flat"]:
     folder = PROJECT_ROOT / "Results" / "test" / "MLP" / "1-IL" / tariff
     folder.mkdir(parents=True, exist_ok=True)
 
     summary = {}
+
+    actor = load_actor(
+        model_cfg["actor"],
+        weights_path=f"Results/train/MLP/1-IL/{tariff}/best.pth",
+        device=DEVICE,
+    )
 
     for run in test_cfg["test"]:
         start = datetime.strptime(run["date"], "%Y-%m-%d %H:%M:%S")
@@ -208,21 +274,16 @@ for tariff in ["tar_s"]: #, "tar_w", "tar_sw", "tar_tou", "tar_flat"]:
             index_col="timestamp",
         )
 
-        actor = load_actor(
-            model_cfg["actor"],
-            weights_path=f"Results/train/MLP/1-IL/{tariff}/best.pth",
-            device=DEVICE,
-        )
-
         teacher = Teacher(df, par, start, days, BESS_SoC, tariff)
         teacher.build()
         teacher.solve()
 
         teacher_operation = teacher.get_operation()
-        teacher_operation.to_csv(
-            f"Results/test/MLP/1-IL/{tariff}/{run['name']}_teacher_operation.csv",
-            index_label="timestamp",
-        )
+        if SAVE_OPERATION_CSV:
+            teacher_operation.to_csv(
+                f"Results/test/MLP/1-IL/{tariff}/{run['name']}_teacher_operation.csv",
+                index_label="timestamp",
+            )
 
         teacher_env = SmartHomeEnv(df, par, start, days, BESS_SoC, tariff)
         actor_env = SmartHomeEnv(df, par, start, days, BESS_SoC, tariff)
@@ -250,17 +311,26 @@ for tariff in ["tar_s"]: #, "tar_w", "tar_sw", "tar_tou", "tar_flat"]:
             done = terminated or truncated
             teacher_reward += reward
 
-        teacher_env.operation.to_csv(
-            f"Results/test/MLP/1-IL/{tariff}/{run['name']}_env_operation.csv",
-            index_label="timestamp",
-        )
+        if SAVE_OPERATION_CSV:
+            teacher_op_masked = mask_operation_with_ev_conn(teacher_env.operation, df)
+            teacher_op_masked.to_csv(
+                f"Results/test/MLP/1-IL/{tariff}/{run['name']}_env_operation.csv",
+                index_label="timestamp",
+            )
 
         # Reward breakdown (teacher executed in env)
-        teacher_op_break, teacher_totals = enrich_operation_with_reward_breakdown(teacher_env.operation, df, par)
-        teacher_op_break.to_csv(
-            f"Results/test/MLP/1-IL/{tariff}/{run['name']}_env_operation_breakdown.csv",
-            index_label="timestamp",
-        )
+        teacher_totals = None
+        if SAVE_BREAKDOWN_CSV or INCLUDE_BREAKDOWN_SUMMARY:
+            teacher_op_break, teacher_totals = enrich_operation_with_reward_breakdown(
+                teacher_env.operation,
+                df,
+                par,
+            )
+            if SAVE_BREAKDOWN_CSV:
+                teacher_op_break.to_csv(
+                    f"Results/test/MLP/1-IL/{tariff}/{run['name']}_env_operation_breakdown.csv",
+                    index_label="timestamp",
+                )
 
         print("Starting actor evaluation...")
         done = False
@@ -279,24 +349,33 @@ for tariff in ["tar_s"]: #, "tar_w", "tar_sw", "tar_tou", "tar_flat"]:
             done = terminated or truncated
             actor_reward += reward
 
-        actor_env.operation.to_csv(
-            f"Results/test/MLP/1-IL/{tariff}/{run['name']}_actor_env_operation.csv",
-            index_label="timestamp",
-        )
+        if SAVE_OPERATION_CSV:
+            actor_op_masked = mask_operation_with_ev_conn(actor_env.operation, df)
+            actor_op_masked.to_csv(
+                f"Results/test/MLP/1-IL/{tariff}/{run['name']}_actor_env_operation.csv",
+                index_label="timestamp",
+            )
 
         # Reward breakdown (actor executed in env)
-        actor_op_break, actor_totals = enrich_operation_with_reward_breakdown(actor_env.operation, df, par)
-        actor_op_break.to_csv(
-            f"Results/test/MLP/1-IL/{tariff}/{run['name']}_actor_env_operation_breakdown.csv",
-            index_label="timestamp",
-        )
+        actor_totals = None
+        if SAVE_BREAKDOWN_CSV or INCLUDE_BREAKDOWN_SUMMARY:
+            actor_op_break, actor_totals = enrich_operation_with_reward_breakdown(
+                actor_env.operation,
+                df,
+                par,
+            )
+            if SAVE_BREAKDOWN_CSV:
+                actor_op_break.to_csv(
+                    f"Results/test/MLP/1-IL/{tariff}/{run['name']}_actor_env_operation_breakdown.csv",
+                    index_label="timestamp",
+                )
 
         summary[run["name"]] = {
             "teacher_reward": teacher_reward,
             "actor_reward": actor_reward,
             "reward_diff": actor_reward - teacher_reward,
-            "teacher_breakdown": teacher_totals,
-            "actor_breakdown": actor_totals,
+            "teacher_breakdown": teacher_totals if INCLUDE_BREAKDOWN_SUMMARY else None,
+            "actor_breakdown": actor_totals if INCLUDE_BREAKDOWN_SUMMARY else None,
             "use_projection": USE_PROJECTION,
             "dataset": run["dataset"],
             "date": run["date"],
