@@ -93,16 +93,13 @@ class Hyperparameters:
         self.actor_lr       = config["actor_lr"]
         self.critic_lr      = config["critic_lr"]
         self.α_lr           = config["α_lr"]
-        self.auto_α         = config["auto_entropy"]
         self.auto_entropy   = config["auto_entropy"]
-        self.policy_delay   = config["policy_delay"]
         self.grad_clip      = config["grad_clip"]
         self.log_std_min    = config["log_std_min"]
         self.log_std_max    = config["log_std_max"]
         self.warmup_episodes = config["warmup_episodes"]
         self.train_episodes  = config["train_episodes"]
         self.eval_every      = config["evaluate_every"]
-        self.batch_size      = config["batch_size"]
         self.buffer_size     = config["buffer_size"]
         self.reward_scale    = config["reward_scale"]
         self.target_entropy  = config["target_entropy"]
@@ -121,9 +118,9 @@ class Temperature(torch.nn.Module):
         return self.log_alpha.exp()
 
     def loss(self, log_prob: torch.Tensor) -> torch.Tensor:
-        # SAC original (minimização em log_alpha):
+        # Original SAC objective (minimization in log_alpha):
         # L = - log_alpha * (log_prob + target_entropy)
-        # grad = -(log_prob + target_entropy); se entropia está abaixo da meta (log_prob menos negativo), grad > 0 -> alpha aumenta.
+        # grad = -(log_prob + target_entropy); if entropy is below target (less negative log_prob), grad > 0 -> alpha increases.
         return -(self.log_alpha * (log_prob.detach() + self.target_entropy)).mean()
 
 class EpisodeGen:

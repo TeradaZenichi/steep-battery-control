@@ -12,11 +12,12 @@ import sys
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]  # .../steep-battery-control
 MODEL_ROOT   = Path(__file__).resolve().parents[2]  # .../models
-MLP_ROOT     = Path(__file__).resolve().parent.parent   # .../models/MLP
-sys.path.insert(0, str(PROJECT_ROOT))
-sys.path.insert(0, str(MLP_ROOT))
-sys.path.insert(0, str(MODEL_ROOT))
-sys.path.append(str(Path(__file__).resolve().parent))
+GRU_ROOT     = Path(__file__).resolve().parents[1]  # .../models/GRU
+ALGO_ROOT    = Path(__file__).resolve().parent      # .../models/GRU/3-FT
+sys.path.insert(0, str(ALGO_ROOT))
+sys.path.insert(1, str(GRU_ROOT))
+sys.path.insert(2, str(MODEL_ROOT))
+sys.path.insert(3, str(PROJECT_ROOT))
 
 from utils import ReplayBuffer, EpisodeGen, Hyperparameters, Temperature, _eval_worker
 from model import load_actor, load_critic
@@ -29,7 +30,7 @@ class Train:
     def __init__(self, tariff: str):
         self.tariff = tariff
 
-        with open(Path(__file__).resolve().parent.parent / "model.json") as f:
+        with open(GRU_ROOT / "model.json", encoding="utf-8") as f:
             self.model_cfg = json.load(f)
 
         with open(Path(__file__).resolve().parent / "config.json", encoding="utf-8") as f:
@@ -40,6 +41,7 @@ class Train:
 
         self.episodegen = EpisodeGen(self.train_cfg, PROJECT_ROOT / "data")
         self.hp = Hyperparameters(self.train_cfg["train"])
+        self.history_len = max(1, int(self.train_cfg["train"].get("history_len", 1)))
         self.log_every_steps = int(self.train_cfg["train"].get("log_every_steps", 50))
         self.audit_every_episodes = int(self.train_cfg["train"].get("audit_every_episodes", 5))
         self.update_every_steps = int(self.train_cfg["train"].get("update_every_steps", 1))
@@ -48,6 +50,7 @@ class Train:
         self.eval_ma_window = int(self.train_cfg["train"].get("eval_ma_window", 10))
         self.early_stop_patience = int(self.train_cfg["train"].get("early_stop_patience", 120))
         self.min_episodes_before_early_stop = int(self.train_cfg["train"].get("min_episodes_before_early_stop", 150))
+        self.ft_cfg = self.train_cfg.get("finetune", {})
 
         self.env_cy = SmartHomeEnv(
             self.episodegen.df_cy,
@@ -75,7 +78,7 @@ class Train:
         torch.manual_seed(self.hp.seed)
         np.random.seed(self.hp.seed)
 
-        self.folder = PROJECT_ROOT / "Results" / "train" / "MLP" / "2-RL" / self.tariff
+        self.folder = PROJECT_ROOT / "Results" / "train" / "GRU" / "3-FT" / self.tariff
         self.folder.mkdir(parents=True, exist_ok=True)
 
         # Arquivos únicos (sobrescrevem)
@@ -93,6 +96,7 @@ class Train:
             obs_dim=self.model_cfg["actor"]["input_dim"],
             act_dim=self.model_cfg["actor"]["output_dim"],
             device=DEVICE,
+            history_len=self.history_len,
         )
 
         # Merge actor architecture (model.json) with RL-specific stochastic settings (config.json).
@@ -104,6 +108,25 @@ class Train:
         self.critics = load_critic(self.model_cfg["critic"], device=DEVICE)
         self.critics_target = load_critic(self.model_cfg["critic"], device=DEVICE)
         self.critics_target.load_state_dict(self.critics.state_dict(), strict=True)
+
+        self.init_from_il = bool(self.ft_cfg.get("init_from_il", True))
+        self.il_ckpt = PROJECT_ROOT / str(
+            self.ft_cfg.get("il_checkpoint_pattern", "Results/train/GRU/1-IL/{tariff}/best.pth").format(
+                tariff=self.tariff
+            )
+        )
+        self.actor_reg_coef = float(self.ft_cfg.get("actor_reg_coef", 0.0))
+        self.actor_reg_decay_episodes = int(self.ft_cfg.get("actor_reg_decay_episodes", 0))
+        self.actor_reg_use_projection = bool(self.ft_cfg.get("actor_reg_use_projection", True))
+
+        if self.init_from_il:
+            self.actor.load_state_dict(torch.load(self.il_ckpt, map_location=DEVICE), strict=True)
+
+        self.il_anchor = load_actor(self.actor_cfg, device=DEVICE)
+        self.il_anchor.load_state_dict(torch.load(self.il_ckpt, map_location=DEVICE), strict=True)
+        self.il_anchor.eval()
+        for p in self.il_anchor.parameters():
+            p.requires_grad_(False)
 
         self.temperature = Temperature(
             init_log_alpha=0.0,
@@ -121,6 +144,13 @@ class Train:
         self.cost_limit = float(self.train_cfg["train"].get("cost_limit", 1e-4))  # target cost (0 means no violation)
         self.lmbda_max = float(self.train_cfg["train"].get("lambda_max", 100.0))
         self.lambda_deadzone = float(self.train_cfg["train"].get("lambda_deadzone", 0.0))
+        self.critic_pretrain_steps = int(self.ft_cfg.get("critic_pretrain_steps", 0))
+        self.critic_pretrain_batch_size = int(self.ft_cfg.get("critic_pretrain_batch_size", self.hp.batch_size))
+        self.warmup_mode = str(self.ft_cfg.get("warmup_mode", "random"))
+        self.warmup_noise_std = float(self.ft_cfg.get("warmup_noise_std", 0.1))
+        self.warmup_noise_std_final = float(self.ft_cfg.get("warmup_noise_std_final", 0.02))
+        self.phase = "init"
+        self.current_episode = 0
         # --- END CHANGE ---
 
         # eval and reward tracking
@@ -156,6 +186,7 @@ class Train:
         self.actor_term_entropies = []
         self.actor_term_qs = []
         self.actor_term_duals = []
+        self.actor_term_il_regs = []
         self.critic_losses = []
         self.alpha_losses = []
         self.violation_eps = float(self.train_cfg["train"].get("violation_eps", 1e-6))
@@ -180,6 +211,7 @@ class Train:
             "logp_min",
             "n_updates",
             "steps",
+            "phase",
             "buffer_size",
             "alpha",
             # --- CHANGE (Lagrangian): log lambda value for audit ---
@@ -194,6 +226,7 @@ class Train:
             "actor_term_entropy",
             "actor_term_q",
             "actor_term_dual",
+            "actor_term_il_reg",
             "alpha_loss",
             "no_improve_episodes",
             # --- END CHANGE ---
@@ -293,6 +326,7 @@ class Train:
                         self.actor_cfg,
                         actor_state_cpu,
                         self.episode_length,
+                        self.history_len,
                         deterministic,
                     )
                     for run in runs
@@ -313,9 +347,10 @@ class Train:
         return float(np.mean(rewards))
 
 
-    def update(self):
+    def update(self, update_actor: bool = True, actor_reg_coef: float = 0.0):
         """Single SAC update step."""
-        batch = self.buffer.sample(self.hp.batch_size)
+        batch_size = self.hp.batch_size if update_actor else self.critic_pretrain_batch_size
+        batch = self.buffer.sample(batch_size)
 
         obs = batch["obs"]
         act = batch["act"]
@@ -323,18 +358,21 @@ class Train:
         next_obs = batch["next_obs"]
         done = batch["done"]
 
+        obs_critic = obs[:, -1, :] if obs.dim() == 3 else obs
+        next_obs_critic = next_obs[:, -1, :] if next_obs.dim() == 3 else next_obs
+
         with torch.no_grad():
             # Next action sampled from current policy
             next_action, logp_next, _, cost_next = self.actor.sample(next_obs)
 
-            q1_next, q2_next = self.critics_target(next_obs, next_action)
+            q1_next, q2_next = self.critics_target(next_obs_critic, next_action)
             q_next = torch.min(q1_next, q2_next)
 
             alpha = self.temperature.alpha
 
             backup = rew + self.hp.γ * (1.0 - done) * (q_next - alpha * logp_next)
 
-        q1, q2 = self.critics(obs, act)
+        q1, q2 = self.critics(obs_critic, act)
         critic_loss = torch.mean((q1 - backup) ** 2) + torch.mean((q2 - backup) ** 2)
 
         self.opt_critic.zero_grad()
@@ -345,7 +383,7 @@ class Train:
 
         # Actor update
         action_pi, logp_pi, _, cost = self.actor.sample(obs)
-        q1_pi, q2_pi = self.critics(obs, action_pi)
+        q1_pi, q2_pi = self.critics(obs_critic, action_pi)
         q_pi = torch.min(q1_pi, q2_pi)
 
         alpha = self.temperature.alpha.detach()
@@ -353,22 +391,35 @@ class Train:
         actor_term_entropy = alpha * logp_pi
         actor_term_q = -q_pi
         actor_term_dual = self.lmbda * cost
+        actor_term_il_reg = torch.zeros_like(actor_term_q)
         actor_loss = torch.mean(actor_term_entropy + actor_term_q + actor_term_dual)
 
-        self.opt_actor.zero_grad()
-        actor_loss.backward()
-        if self.hp.grad_clip:
-            nn.utils.clip_grad_norm_(self.actor.parameters(), max_norm=1.0)
-        self.opt_actor.step()
+        if update_actor:
+            if actor_reg_coef > 0.0:
+                with torch.no_grad():
+                    if self.actor_reg_use_projection:
+                        _, _, il_action_ref, _ = self.il_anchor.sample(obs)
+                    else:
+                        il_action_ref = self.il_anchor(obs)
+                actor_term_il_reg = actor_reg_coef * torch.mean((action_pi - il_action_ref) ** 2, dim=-1, keepdim=True)
+                actor_loss = torch.mean(actor_term_entropy + actor_term_q + actor_term_dual + actor_term_il_reg)
+
+            self.opt_actor.zero_grad()
+            actor_loss.backward()
+            if self.hp.grad_clip:
+                nn.utils.clip_grad_norm_(self.actor.parameters(), max_norm=1.0)
+            self.opt_actor.step()
 
         # Temperature update
-        if self.hp.auto_entropy:
+        if update_actor and self.hp.auto_entropy:
             alpha_loss = torch.mean(-self.temperature.log_alpha * (logp_pi + self.hp.target_entropy).detach())
             self.opt_alpha.zero_grad()
             alpha_loss.backward()
             self.opt_alpha.step()
-        else:
+        elif update_actor:
             alpha_loss = torch.tensor(0.0, device=DEVICE)
+        else:
+            alpha_loss = torch.tensor(np.nan, device=DEVICE)
 
         # Target critics soft update
         for param, target_param in zip(self.critics.parameters(), self.critics_target.parameters()):
@@ -376,12 +427,13 @@ class Train:
 
         # --- CHANGE (Lagrangian): lambda dual update ---
         # lambda <- max(0, min(lambda_max, lambda + lr*(E[cost] - cost_limit)))
-        with torch.no_grad():
-            target = cost.new_tensor(self.cost_limit)
-            grad = torch.mean(cost) - target
-            if abs(float(grad.detach().cpu())) > self.lambda_deadzone:
-                self.lmbda += self.lmbda_lr * grad
-            self.lmbda = torch.clamp(self.lmbda, min=0.0, max=self.lmbda_max)
+        if update_actor:
+            with torch.no_grad():
+                target = cost.new_tensor(self.cost_limit)
+                grad = torch.mean(cost) - target
+                if abs(float(grad.detach().cpu())) > self.lambda_deadzone:
+                    self.lmbda += self.lmbda_lr * grad
+                self.lmbda = torch.clamp(self.lmbda, min=0.0, max=self.lmbda_max)
         # --- END CHANGE ---
 
         # Logging for audit
@@ -404,6 +456,7 @@ class Train:
         self.actor_term_entropies.append(float(torch.mean(actor_term_entropy).detach().cpu()))
         self.actor_term_qs.append(float(torch.mean(actor_term_q).detach().cpu()))
         self.actor_term_duals.append(float(torch.mean(actor_term_dual).detach().cpu()))
+        self.actor_term_il_regs.append(float(torch.mean(actor_term_il_reg).detach().cpu()))
         self.alpha_losses.append(float(alpha_loss.detach().cpu()))
         # --- END CHANGE ---
 
@@ -413,11 +466,91 @@ class Train:
             env.reset(options={"start": self.episodegen.sample(key), "bess_soc": np.random.uniform(0.1, 0.9)})
 
 
+    def _actor_reg_coef_at_episode(self, episode: int) -> float:
+        if self.actor_reg_coef <= 0.0:
+            return 0.0
+        if self.actor_reg_decay_episodes <= 0:
+            return self.actor_reg_coef
+        ratio = max(0.0, 1.0 - (float(episode) / float(self.actor_reg_decay_episodes)))
+        return float(self.actor_reg_coef * ratio)
+
+
+    @staticmethod
+    def _obs_vector(obs) -> np.ndarray:
+        return np.asarray(obs, dtype=np.float32).reshape(-1)
+
+
+    def _init_histories(self) -> dict:
+        histories = {}
+        for key, env in self.envs.items():
+            obs0 = self._obs_vector(env._get_observation())
+            histories[key] = deque([obs0.copy() for _ in range(self.history_len)], maxlen=self.history_len)
+        return histories
+
+
+    def _sample_il_guided_action(self, obs_seq_np: np.ndarray, noise_std: float, env) -> np.ndarray:
+        obs_t = torch.as_tensor(obs_seq_np, dtype=torch.float32, device=DEVICE).unsqueeze(0)
+        with torch.no_grad():
+            _, _, action_t, _ = self.il_anchor.sample(obs_t)
+        action = action_t.squeeze(0).detach().cpu().numpy()
+        if noise_std > 0.0:
+            action = action + np.random.normal(0.0, noise_std, size=action.shape)
+        action = np.clip(action, env.action_space.low, env.action_space.high)
+        return action.astype(np.float32)
+
+
+    def _run_critic_pretrain(self):
+        if self.critic_pretrain_steps <= 0:
+            return
+
+        self.phase = "critic_pretrain"
+        print(f"Starting critic pretrain ({self.critic_pretrain_steps} updates)...")
+
+        while self.buffer.size < self.critic_pretrain_batch_size:
+            self._reset_train_envs()
+            histories = self._init_histories()
+            env_dones = {"cy": False, "wy": False}
+
+            while not all(env_dones.values()) and self.buffer.size < self.critic_pretrain_batch_size:
+                for key, env in self.envs.items():
+                    if env_dones[key]:
+                        continue
+
+                    obs_seq = np.stack(histories[key], axis=0)
+                    action = self._sample_il_guided_action(obs_seq, self.warmup_noise_std, env)
+                    next_obs, rew, done, truncated, info = env.step(action)
+
+                    next_obs_vec = self._obs_vector(next_obs)
+                    histories[key].append(next_obs_vec.copy())
+                    next_obs_seq = np.stack(histories[key], axis=0)
+
+                    self.buffer.add(obs_seq, action, rew * self.hp.reward_scale, next_obs_seq, done or truncated)
+
+                    env_dones[key] = done or truncated
+
+                    if self.buffer.size >= self.critic_pretrain_batch_size:
+                        break
+
+        with tqdm(range(self.critic_pretrain_steps), desc="Critic Pretrain", position=0, dynamic_ncols=True) as pbar:
+            for _ in pbar:
+                self.update(update_actor=False, actor_reg_coef=0.0)
+                pbar.set_postfix({"buf": int(self.buffer.size), "batch": int(self.critic_pretrain_batch_size)})
+
+
     def _run_warmup(self):
+        self.phase = "warmup"
         print("Starting warmup episodes...")
         for episode in tqdm(range(self.hp.warmup_episodes), desc="Warmup Episodes", position=0, dynamic_ncols=True):
+            self._reset_train_envs()
+            histories = self._init_histories()
             env_dones = {"cy": False, "wy": False}
             steps = 0
+
+            if self.hp.warmup_episodes <= 1:
+                noise_std = self.warmup_noise_std
+            else:
+                frac = float(episode) / float(self.hp.warmup_episodes - 1)
+                noise_std = self.warmup_noise_std + frac * (self.warmup_noise_std_final - self.warmup_noise_std)
 
             with tqdm(total=self.episode_length, desc="Warmup Steps", position=1, dynamic_ncols=True, leave=False) as pbar:
                 while not all(env_dones.values()) and steps < self.episode_length:
@@ -425,21 +558,27 @@ class Train:
                         if env_dones[key]:
                             continue
 
-                        obs_np = env._get_observation()
-                        action = env.action_space.sample()
+                        obs_seq = np.stack(histories[key], axis=0)
+                        if self.warmup_mode == "il_guided":
+                            action = self._sample_il_guided_action(obs_seq, noise_std, env)
+                        else:
+                            action = env.action_space.sample()
                         next_obs, rew, done, truncated, info = env.step(action)
+                        next_obs_vec = self._obs_vector(next_obs)
+                        histories[key].append(next_obs_vec.copy())
+                        next_obs_seq = np.stack(histories[key], axis=0)
 
-                        self.buffer.add(obs_np, action, rew * self.hp.reward_scale, next_obs, done or truncated)
+                        self.buffer.add(obs_seq, action, rew * self.hp.reward_scale, next_obs_seq, done or truncated)
 
                         env_dones[key] = done or truncated
                         steps += 1
 
+                        pbar.set_postfix({"mode": self.warmup_mode, "noise": f"{noise_std:.3f}"})
                         pbar.update(1)
 
-            self._reset_train_envs()
-
-
     def _collect_training_episode(self, episode: int) -> tuple[float, int]:
+        self._reset_train_envs()
+        histories = self._init_histories()
         env_dones = {"cy": False, "wy": False}
         reward = {"cy": 0.0, "wy": 0.0, "total": 0.0}
 
@@ -453,7 +592,7 @@ class Train:
                 while not all(env_dones.values()) and steps < episode_total_steps:
                     active = [(key, env) for key, env in self.envs.items() if not env_dones[key]]
 
-                    obs_map = {key: env._get_observation() for key, env in active}
+                    obs_map = {key: np.stack(histories[key], axis=0) for key, env in active}
                     obs_batch = np.stack([obs_map[key] for key, _ in active], axis=0)
                     obs_t = torch.as_tensor(obs_batch, device=DEVICE)
 
@@ -475,8 +614,11 @@ class Train:
                         for fut in as_completed(futures)
                     ]
 
-                    for (key, obs_np, action_exec), (next_obs, rew, done, truncated, info) in completed:
-                        self.buffer.add(obs_np, action_exec, rew * self.hp.reward_scale, next_obs, done or truncated)
+                    for (key, obs_seq, action_exec), (next_obs, rew, done, truncated, info) in completed:
+                        next_obs_vec = self._obs_vector(next_obs)
+                        histories[key].append(next_obs_vec.copy())
+                        next_obs_seq = np.stack(histories[key], axis=0)
+                        self.buffer.add(obs_seq, action_exec, rew * self.hp.reward_scale, next_obs_seq, done or truncated)
 
                         reward[key] += rew
                         reward["total"] += rew
@@ -499,10 +641,12 @@ class Train:
 
                         if self.buffer.size >= self.hp.batch_size and (steps % self.update_every_steps == 0):
                             for _ in range(self.hp.update_steps):
-                                self.update()
+                                self.update(
+                                    update_actor=True,
+                                    actor_reg_coef=self._actor_reg_coef_at_episode(self.current_episode),
+                                )
                                 updates_in_episode += 1
 
-        self._reset_train_envs()
         return float(reward["total"]), int(steps)
 
 
@@ -561,6 +705,7 @@ class Train:
                 "actor_term_entropy_ep": float(np.mean(self.actor_term_entropies[q_start:q_end])),
                 "actor_term_q_ep": float(np.mean(self.actor_term_qs[q_start:q_end])),
                 "actor_term_dual_ep": float(np.mean(self.actor_term_duals[q_start:q_end])),
+                "actor_term_il_reg_ep": float(np.mean(self.actor_term_il_regs[q_start:q_end])),
                 "alpha_loss_ep": float(np.mean(self.alpha_losses[q_start:q_end])),
             }
 
@@ -581,6 +726,7 @@ class Train:
             "actor_term_entropy_ep": np.nan,
             "actor_term_q_ep": np.nan,
             "actor_term_dual_ep": np.nan,
+            "actor_term_il_reg_ep": np.nan,
             "alpha_loss_ep": np.nan,
         }
 
@@ -606,6 +752,7 @@ class Train:
             "logp_min": float(metrics["logp_min"]) if not np.isnan(metrics["logp_min"]) else np.nan,
             "n_updates": int(metrics["n_updates"]),
             "steps": int(steps),
+            "phase": self.phase,
             "buffer_size": int(self.buffer.size),
             "alpha": alpha_val,
             "lambda": float(self.lmbda.detach().cpu().item()),
@@ -617,12 +764,14 @@ class Train:
             "actor_term_entropy": float(metrics["actor_term_entropy_ep"]) if not np.isnan(metrics["actor_term_entropy_ep"]) else np.nan,
             "actor_term_q": float(metrics["actor_term_q_ep"]) if not np.isnan(metrics["actor_term_q_ep"]) else np.nan,
             "actor_term_dual": float(metrics["actor_term_dual_ep"]) if not np.isnan(metrics["actor_term_dual_ep"]) else np.nan,
+            "actor_term_il_reg": float(metrics["actor_term_il_reg_ep"]) if not np.isnan(metrics["actor_term_il_reg_ep"]) else np.nan,
             "alpha_loss": float(metrics["alpha_loss_ep"]) if not np.isnan(metrics["alpha_loss_ep"]) else np.nan,
             "no_improve_episodes": int(no_improve_episodes),
         }
 
 
     def _update_train_postfix(self, p_outer, train_total: float, eval_reward_value: float, eval_reward_ma: float, eval_reward_stoch: float, metrics: dict, no_improve_episodes: int):
+        reg_coef_now = self._actor_reg_coef_at_episode(self.current_episode)
         p_outer.set_postfix({
             "train_total": f"{train_total:.2f}",
             "eval": f"{eval_reward_value:.2f}" if not np.isnan(eval_reward_value) else "-",
@@ -632,6 +781,8 @@ class Train:
             "best_eval_ma": f"{self.best_eval_ma:.2f}",
             "alpha": f"{float(self.temperature.alpha.detach().cpu()):.3f}",
             "lambda": f"{float(self.lmbda.detach().cpu().item()):.3f}",
+            "reg": f"{reg_coef_now:.4f}",
+            "phase": self.phase,
             "frac_viol": f"{float(metrics['frac_violation_ep']):.3f}" if not np.isnan(metrics["frac_violation_ep"]) else "nan",
             "no_imp": int(no_improve_episodes),
         })
@@ -650,12 +801,15 @@ class Train:
         print(f"Training SAC with tariff: {self.tariff}")
         print(f"Using device: {DEVICE}")
 
+        self._run_critic_pretrain()
         self._run_warmup()
 
         # Training
+        self.phase = "online"
         self.create_eval_envs()
         print("Starting training episodes...")
         for episode in (p_outer := tqdm(range(self.hp.train_episodes), desc="Training Episodes", position=0, dynamic_ncols=True)):
+            self.current_episode = int(episode)
             q_start = len(self.q1_values)
             train_total, steps = self._collect_training_episode(episode)
             self.train_rewards.append(train_total)

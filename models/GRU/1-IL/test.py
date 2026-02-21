@@ -1,4 +1,5 @@
 from datetime import datetime
+from collections import deque
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import pandas as pd
@@ -10,11 +11,12 @@ from tqdm import tqdm
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]  # .../steep-battery-control
 MODEL_ROOT   = Path(__file__).resolve().parents[2]  # .../models
-MLP_ROOT     = Path(__file__).resolve().parent.parent   # .../models/MLP
+GRU_ROOT     = Path(__file__).resolve().parents[1]  # .../models/GRU
+ALGO_ROOT    = Path(__file__).resolve().parent      # .../models/GRU/1-IL
 sys.path.insert(0, str(PROJECT_ROOT))
-sys.path.insert(0, str(MLP_ROOT))
+sys.path.insert(0, str(GRU_ROOT))
 sys.path.insert(0, str(MODEL_ROOT))
-sys.path.append(str(Path(__file__).resolve().parent))
+sys.path.append(str(ALGO_ROOT))
 
 from environment import SmartHomeEnv
 from model import load_actor
@@ -25,20 +27,6 @@ from opt import Teacher
 # ------------------------------------------------------------
 
 def enrich_operation_with_reward_breakdown(operation: pd.DataFrame, raw_df: pd.DataFrame, par: dict):
-    """Add per-step reward/cost breakdown columns to SmartHomeEnv.operation.
-
-    Reward in the env is:
-        reward_t = -(energy_cost_t + grid_penalty_t + bess_cost_t + ev_cost_t)
-
-    This function reconstructs additional interpretable components:
-      - energy_cost split into: load, bess, ev, pv (exact, linear)
-      - bess_cost split into: wear, saturation penalty (reconstructed)
-      - ev_cost split into: wear, saturation penalty, departure penalty (reconstructed)
-
-    Returns:
-      op_enriched: DataFrame with extra columns
-      totals: dict with summed components (costs and reward contributions)
-    """
     op = operation.copy()
 
     # dt in hours (consistent with environment.Simulation.Δt)
@@ -54,6 +42,7 @@ def enrich_operation_with_reward_breakdown(operation: pd.DataFrame, raw_df: pd.D
 
     ev_present = ev_status > 0.01
     prev_present = ev_present.shift(1, fill_value=False)
+    # arriving step: first positive
     connected_mask = (ev_present & prev_present).astype(float)
     departing_mask = ((~ev_present) & prev_present).astype(float)
 
@@ -68,6 +57,7 @@ def enrich_operation_with_reward_breakdown(operation: pd.DataFrame, raw_df: pd.D
     op["energy_cost_load"] = op["PLoad"].astype(float) * tar * dt
     op["energy_cost_bess"] = op["PBESS"].astype(float) * tar * dt
     op["energy_cost_ev"]   = op["PEV"].astype(float) * tar * dt
+    # PV reduces net grid import; keep the sign consistent with PGrid = load + bess + ev - pv
     op["energy_cost_pv"]   = -op["PPV"].astype(float) * tar * dt
 
     op["energy_cost_recon"] = (
@@ -162,15 +152,19 @@ def enrich_operation_with_reward_breakdown(operation: pd.DataFrame, raw_df: pd.D
     }
     totals["total_cost"] = float(-totals["total_reward"])
 
+    # Base components used by the env
     for k in ["energy_cost", "grid_penalty", "bess_cost", "ev_cost"]:
         totals[k] = float(op[k].astype(float).sum())
 
+    # Energy breakdown
     for k in ["energy_cost_load", "energy_cost_bess", "energy_cost_ev", "energy_cost_pv"]:
         totals[k] = float(op[k].astype(float).sum())
 
+    # BESS breakdown
     for k in ["bess_wear_cost", "bess_sat_cost"]:
         totals[k] = float(op[k].astype(float).sum())
 
+    # EV breakdown
     for k in ["ev_wear_cost", "ev_sat_cost", "ev_soc_min_cost", "ev_arrival_fast_cost"]:
         totals[k] = float(op[k].astype(float).sum())
 
@@ -182,6 +176,7 @@ def enrich_operation_with_reward_breakdown(operation: pd.DataFrame, raw_df: pd.D
         + totals["ev_arrival_fast_cost"]
     )
 
+    # Reward contributions (negative of costs)
     totals["reward_components"] = {
         "reward_from_energy": -totals["energy_cost"],
         "reward_from_grid_penalty": -totals["grid_penalty"],
@@ -207,6 +202,7 @@ def enrich_operation_with_reward_breakdown(operation: pd.DataFrame, raw_df: pd.D
         "ev_arrival_fast_cost": totals["ev_arrival_fast_cost"] / denom,
     }
 
+    # Sanity checks (should be near 0)
     totals["max_abs_energy_cost_err"] = float(op["energy_cost_err"].abs().max())
     totals["max_abs_bess_cost_err"] = float(op["bess_cost_err"].abs().max())
     totals["max_abs_ev_cost_err"] = float(op["ev_cost_err"].abs().max())
@@ -233,7 +229,7 @@ def mask_operation_with_ev_conn(operation: pd.DataFrame, raw_df: pd.DataFrame):
     return op
 
 
-def eval_actor_run_parallel(run: dict, tariff: str, par: dict, actor_cfg: dict, actor_state_dict: dict, save_operation_csv: bool, save_breakdown_csv: bool, include_breakdown_summary: bool, folder: Path, show_step_pbar: bool, pbar_position: int):
+def eval_actor_run_parallel(run: dict, tariff: str, par: dict, actor_cfg: dict, actor_state_dict: dict, use_projection: bool, save_operation_csv: bool, save_breakdown_csv: bool, include_breakdown_summary: bool, folder: Path, show_step_pbar: bool, history_len: int, pbar_position: int):
     start = datetime.strptime(run["date"], "%Y-%m-%d %H:%M:%S")
     days = run["days"]
     bess_soc = run["soc"]
@@ -252,6 +248,10 @@ def eval_actor_run_parallel(run: dict, tariff: str, par: dict, actor_cfg: dict, 
 
     actor_env = SmartHomeEnv(df, par, start, days, bess_soc, tariff)
     max_steps = int((24 * 60 * float(days)) / float(par["general"]["timestep"]))
+    history_len = max(1, int(history_len))
+
+    state0 = np.asarray(actor_env._get_observation(), dtype=np.float32).reshape(-1)
+    history = deque([state0.copy() for _ in range(history_len)], maxlen=history_len)
 
     done = False
     actor_reward = 0.0
@@ -264,12 +264,18 @@ def eval_actor_run_parallel(run: dict, tariff: str, par: dict, actor_cfg: dict, 
         disable=not show_step_pbar,
     ) as pbar_actor:
         while not done:
-            state = actor_env._get_observation()
-            state_t = torch.as_tensor(state, dtype=torch.float32, device=torch.device("cpu")).unsqueeze(0)
+            state_seq = np.stack(history, axis=0)
+            state_t = torch.as_tensor(state_seq, dtype=torch.float32, device=torch.device("cpu")).unsqueeze(0)
             with torch.no_grad():
-                _, _, action_t, _ = actor.sample(state_t)  # determinístico + projeção
+                if use_projection:
+                    _, _, action_t, _ = actor.sample(state_t)  # deterministic + projection
+                else:
+                    action_t, _, _, _ = actor.sample(state_t)  # stochastic + projection
             action = action_t.squeeze(0).detach().cpu().numpy()
-            state, reward, terminated, truncated, info = actor_env.step(action)
+
+            next_state, reward, terminated, truncated, info = actor_env.step(action)
+            next_state = np.asarray(next_state, dtype=np.float32).reshape(-1)
+            history.append(next_state.copy())
             done = terminated or truncated
             actor_reward += reward
             pbar_actor.update(1)
@@ -302,41 +308,50 @@ def eval_actor_run_parallel(run: dict, tariff: str, par: dict, actor_cfg: dict, 
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-with open("data/parameters.json", encoding="utf-8") as f:
+with open(PROJECT_ROOT / "data" / "parameters.json", encoding="utf-8") as f:
     par = json.load(f)
 
-with open("models/MLP/model.json") as f:
+with open(ALGO_ROOT / "config.json", encoding="utf-8") as f:
+    test_cfg = json.load(f)
+
+with open(GRU_ROOT / "model.json", encoding="utf-8") as f:
     model_cfg = json.load(f)
 
-with open("models/MLP/2-RL/config.json") as f:
-    cfg = json.load(f)
+model_cfg["actor"]["parameters"] = str(PROJECT_ROOT / "data" / "parameters.json")
 
-seed = int(cfg["train"]["seed"])
-torch.manual_seed(seed)
-np.random.seed(seed)
-EVAL_WORKERS = int(cfg["train"].get("eval_workers", 1))
-SHOW_ACTOR_STEP_PBAR = bool(cfg["train"].get("show_actor_step_pbar", True))
+torch.manual_seed(test_cfg["seed"])
+np.random.seed(test_cfg["seed"])
+EVAL_WORKERS = int(test_cfg.get("eval_workers", 1))
+SHOW_ACTOR_STEP_PBAR = bool(test_cfg.get("show_actor_step_pbar", True))
+
+# Toggle: in IL evaluation, you may want to run with the same feasibility projection as RL.
+# - False: uses actor.predict(state_t) (no projection)
+# - True:  uses actor.action(state) (deterministic + projection)
+USE_PROJECTION = True
 
 # I/O and breakdown toggles to speed up tests
 SAVE_OPERATION_CSV = True
 SAVE_BREAKDOWN_CSV = True
 INCLUDE_BREAKDOWN_SUMMARY = True
 
-# for tariff in ["tar_s", "tar_w", "tar_sw", "tar_tou", "tar_flat"]:
 for tariff in tqdm(["tar_s", "tar_w", "tar_sw", "tar_tou", "tar_flat"], desc="Tariffs", position=0, dynamic_ncols=True):
-
-    folder = PROJECT_ROOT / "Results" / "test" / "MLP" / "2-RL" / tariff
+    folder = PROJECT_ROOT / "Results" / "test" / "GRU" / "1-IL" / tariff
     folder.mkdir(parents=True, exist_ok=True)
+
+    history_len = int(test_cfg.get("training", {}).get("history_len", 1))
+    best_params_path = PROJECT_ROOT / "Results" / "train" / "GRU" / "1-IL" / tariff / "best_params.json"
+    if best_params_path.exists():
+        with open(best_params_path, "r", encoding="utf-8") as f:
+            history_len = int(json.load(f).get("history_len", history_len))
 
     summary = {}
 
     actor_state_dict = torch.load(
-        f"Results/train/MLP/2-RL/{tariff}/best_actor_eval.pt",
+        PROJECT_ROOT / "Results" / "train" / "GRU" / "1-IL" / tariff / "best.pth",
         map_location=torch.device("cpu"),
     )
 
-    runs = list(cfg["test"])
-
+    runs = list(test_cfg["test"])
     actor_results = {}
     with ThreadPoolExecutor(max_workers=EVAL_WORKERS) as actor_pool:
         futures = {
@@ -347,11 +362,13 @@ for tariff in tqdm(["tar_s", "tar_w", "tar_sw", "tar_tou", "tar_flat"], desc="Ta
                 par,
                 model_cfg["actor"],
                 actor_state_dict,
+                USE_PROJECTION,
                 SAVE_OPERATION_CSV,
                 SAVE_BREAKDOWN_CSV,
                 INCLUDE_BREAKDOWN_SUMMARY,
                 folder,
                 SHOW_ACTOR_STEP_PBAR,
+                history_len,
                 2 + idx,
             ): run["name"]
             for idx, run in enumerate(runs)
@@ -417,6 +434,7 @@ for tariff in tqdm(["tar_s", "tar_w", "tar_sw", "tar_tou", "tar_flat"], desc="Ta
 
                     action = [a_bess, a_ev, chi]
                     state, reward, terminated, truncated, info = teacher_env.step(action)
+
                     done = terminated or truncated
                     teacher_reward += reward
                     pbar_teacher.update(1)
@@ -448,11 +466,12 @@ for tariff in tqdm(["tar_s", "tar_w", "tar_sw", "tar_tou", "tar_flat"], desc="Ta
         actor_totals = actor_info.get("actor_breakdown", None)
 
         summary[run["name"]] = {
-            "teacher_reward": float(teacher_reward),
-            "actor_reward": float(actor_reward),
-            "reward_diff": float(actor_reward - teacher_reward),
+            "teacher_reward": teacher_reward,
+            "actor_reward": actor_reward,
+            "reward_diff": actor_reward - teacher_reward,
             "teacher_breakdown": teacher_totals if INCLUDE_BREAKDOWN_SUMMARY else None,
             "actor_breakdown": actor_totals if INCLUDE_BREAKDOWN_SUMMARY else None,
+            "use_projection": USE_PROJECTION,
             "dataset": run["dataset"],
             "date": run["date"],
             "days": run["days"],

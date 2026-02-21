@@ -267,7 +267,7 @@ def eval_actor_run_parallel(run: dict, tariff: str, par: dict, actor_cfg: dict, 
             state = actor_env._get_observation()
             state_t = torch.as_tensor(state, dtype=torch.float32, device=torch.device("cpu")).unsqueeze(0)
             with torch.no_grad():
-                _, _, action_t, _ = actor.sample(state_t)  # determinístico + projeção
+                _, _, action_t, _ = actor.sample(state_t)  # deterministic + projection
             action = action_t.squeeze(0).detach().cpu().numpy()
             state, reward, terminated, truncated, info = actor_env.step(action)
             done = terminated or truncated
@@ -308,7 +308,7 @@ with open("data/parameters.json", encoding="utf-8") as f:
 with open("models/MLP/model.json") as f:
     model_cfg = json.load(f)
 
-with open("models/MLP/2-RL/config.json") as f:
+with open("models/MLP/3-FT/config.json") as f:
     cfg = json.load(f)
 
 seed = int(cfg["train"]["seed"])
@@ -325,13 +325,13 @@ INCLUDE_BREAKDOWN_SUMMARY = True
 # for tariff in ["tar_s", "tar_w", "tar_sw", "tar_tou", "tar_flat"]:
 for tariff in tqdm(["tar_s", "tar_w", "tar_sw", "tar_tou", "tar_flat"], desc="Tariffs", position=0, dynamic_ncols=True):
 
-    folder = PROJECT_ROOT / "Results" / "test" / "MLP" / "2-RL" / tariff
+    folder = PROJECT_ROOT / "Results" / "test" / "MLP" / "3-FT" / tariff
     folder.mkdir(parents=True, exist_ok=True)
 
     summary = {}
 
     actor_state_dict = torch.load(
-        f"Results/train/MLP/2-RL/{tariff}/best_actor_eval.pt",
+        f"Results/train/MLP/3-FT/{tariff}/best_actor_eval.pt",
         map_location=torch.device("cpu"),
     )
 

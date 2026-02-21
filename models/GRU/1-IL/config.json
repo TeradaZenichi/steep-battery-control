@@ -1,93 +1,141 @@
 {
-    "train": {
-        "seed": 42,
-        "days": 7,
-        "evaluate_every": 2,
-        "eval_ma_window": 10,
-        "early_stop_patience": 120,
-        "min_episodes_before_early_stop": 150,
-        "γ": 0.995,
-        "τ": 0.005,
-        "warmup_episodes": 10,
-        "train_episodes": 500,
-        "batch_size": 512,
-        "update_steps": 1,
-        "update_every_steps": 4,
-        "train_env_workers": 2,
-        "eval_workers": 8,
-        "policy_delay": 1,
-        "actor_lr": 1e-4,
-        "critic_lr": 1e-4,
-        "α_lr": 3e-5,
-        "auto_entropy": true,
-        "target_entropy": -1.5,
-        "grad_clip": true,
-        "log_std_min": -10,
-        "log_std_max": 1,
-        "reward_scale": 1.0,
-        "buffer_size": 1000000,
-        "lambda_lr": 1e-3,
-        "lambda_deadzone": 1e-5,
-        "cost_limit": 1e-4,
-        "lambda_max": 100.0,
-        "violation_eps": 1e-6
+    "seed": 42,
+    "eval_workers": 8,
+    "training": {
+        "epochs": 1000,
+        "patience": 20,
+        "eval": 0.2,
+        "history_len": 1
     },
-    "val": [
+    "optuna": {
+        "enabled": true,
+        "epochs": 200,
+        "eval": 0.2,
+        "patience": 10,
+        "n_trials": 50,
+        "search_space": {
+            "lr": [1e-5, 1e-2],
+            "batch_size": [32, 64, 128, 256],
+            "weight_decay": [0, 0.1],
+            "history_len": [96, 144, 192, 288]
+        }
+    },
+    "searches":[
         {
-            "name": "val_1",
+            "name": "search_1",
             "dataset": "data/Simulation_CY_Cur_HP__PV5000-HB5000.csv",
             "date": "2000-01-01 00:00:00",
-            "days": 7,
-            "soc": 0.1
+            "days": 10,
+            "soc": 0.5
+
         },
         {
-            "name": "val_2",
+            "name": "search_2",
             "dataset": "data/Simulation_CY_Cur_HP__PV5000-HB5000.csv",
-            "date": "2000-04-10 00:00:00",
-            "days": 7,
-            "soc": 0.3
+            "date": "2000-04-05 00:00:00",
+            "days": 10,
+            "soc": 0.5
+
         },
         {
-            "name": "val_3",
+            "name": "search_3",
             "dataset": "data/Simulation_CY_Cur_HP__PV5000-HB5000.csv",
-            "date": "2000-07-15 00:00:00",
-            "days": 7,
+            "date": "2000-07-10 00:00:00",
+            "days": 10,
             "soc": 0.5
         },
         {
-            "name": "val_4",
+            "name": "search_4",
             "dataset": "data/Simulation_CY_Cur_HP__PV5000-HB5000.csv",
-            "date": "2000-10-20 00:00:00",
-            "days": 7,
-            "soc": 0.8
+            "date": "2000-09-15 00:00:00",
+            "days": 10,
+            "soc": 0.5
         },
         {
-            "name": "val_5",
+            "name": "search_5",
             "dataset": "data/Simulation_WY_Cur_HP__PV5000-HB5000.csv",
             "date": "2000-01-20 00:00:00",
-            "days": 7,
-            "soc": 0.7
+            "days": 10,
+            "soc": 0.5
         },
         {
-            "name": "val_6",
+            "name": "search_6",
             "dataset": "data/Simulation_WY_Cur_HP__PV5000-HB5000.csv",
-            "date": "2000-05-01 00:00:00",
-            "days": 7,
-            "soc": 0.6
+            "date": "2000-04-25 00:00:00",
+            "days": 10,
+            "soc": 0.5
         },
         {
-            "name": "val_7",
+            "name": "search_7",
             "dataset": "data/Simulation_WY_Cur_HP__PV5000-HB5000.csv",
-            "date": "2000-08-05 00:00:00",
-            "days": 7,
-            "soc": 0.2
+            "date": "2000-07-30 00:00:00",
+            "days": 10,
+            "soc": 0.5
         },
         {
-            "name": "val_8",
+            "name": "search_8",
             "dataset": "data/Simulation_WY_Cur_HP__PV5000-HB5000.csv",
-            "date": "2000-11-10 00:00:00",
-            "days": 7,
-            "soc": 0.9
+            "date": "2000-09-10 00:00:00",
+            "days": 10,
+            "soc": 0.5
+        }
+    ],
+    "runs": [
+        {
+            "name": "run_1",
+            "dataset": "data/Simulation_CY_Cur_HP__PV5000-HB5000.csv",
+            "date": "2000-01-01 00:00:00",
+            "days": 120,
+            "soc": 0.5
+        },
+        {
+            "name": "run_2",
+            "dataset": "data/Simulation_CY_Cur_HP__PV5000-HB5000.csv",
+            "date": "2000-01-03 00:00:00",
+            "days": 120,
+            "soc": 0.5
+        },
+        {
+            "name": "run_3",
+            "dataset": "data/Simulation_CY_Cur_HP__PV5000-HB5000.csv",
+            "date": "2000-01-06 00:00:00",
+            "days": 120,
+            "soc": 0.5
+        },
+        {
+            "name": "run_4",
+            "dataset": "data/Simulation_CY_Cur_HP__PV5000-HB5000.csv",
+            "date": "2000-01-09 00:00:00",
+            "days": 120,
+            "soc": 0.5
+        },
+        {
+            "name": "run_5",
+            "dataset": "data/Simulation_WY_Cur_HP__PV5000-HB5000.csv",
+            "date": "2000-01-01 00:00:00",
+            "days": 120,
+            "soc": 0.5
+        },
+        {
+            "name": "run_6",
+            "dataset": "data/Simulation_WY_Cur_HP__PV5000-HB5000.csv",
+            "date": "2000-04-01 00:00:00",
+            "days": 120,
+            "soc": 0.5
+        },
+        {
+            "name": "run_7",
+            "dataset": "data/Simulation_WY_Cur_HP__PV5000-HB5000.csv",
+            "date": "2000-07-01 00:00:00",
+            "days": 120,
+            "soc": 0.5
+        },
+        {
+            "name": "run_8",
+            "dataset": "data/Simulation_WY_Cur_HP__PV5000-HB5000.csv",
+            "date": "2000-09-01 00:00:00",
+            "days": 120,
+            "soc": 0.5
         }
     ],
     "test": [
@@ -148,7 +196,7 @@
             "soc": 0.5
         }
     ],
-     "plot": [
+    "plot": [
         {
             "name": "test_1",
             "date": "2000-01-01 00:00:00",

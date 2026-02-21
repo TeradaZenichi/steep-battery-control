@@ -15,6 +15,7 @@
         "update_every_steps": 4,
         "train_env_workers": 2,
         "eval_workers": 8,
+        "history_len": 8,
         "policy_delay": 1,
         "actor_lr": 1e-4,
         "critic_lr": 1e-4,
@@ -31,6 +32,18 @@
         "cost_limit": 1e-4,
         "lambda_max": 100.0,
         "violation_eps": 1e-6
+    },
+    "finetune": {
+        "init_from_il": true,
+        "il_checkpoint_pattern": "Results/train/GRU/1-IL/{tariff}/best.pth",
+        "critic_pretrain_steps": 3000,
+        "critic_pretrain_batch_size": 512,
+        "warmup_mode": "il_guided",
+        "warmup_noise_std": 0.10,
+        "warmup_noise_std_final": 0.02,
+        "actor_reg_coef": 0.03,
+        "actor_reg_decay_episodes": 150,
+        "actor_reg_use_projection": true
     },
     "val": [
         {

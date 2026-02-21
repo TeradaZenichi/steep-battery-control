@@ -17,8 +17,8 @@
     }
   },
   "Grid": {
-    "Pmax_import": 5,
-    "Pmax_export": 1,
+    "Pmax_import": 10,
+    "Pmax_export": 2,
     "net_penalty": 5,
     "tariff_column": "tar_tou"
   },
@@ -64,7 +64,7 @@
     "sat_penalty": 0.0001,
     "ramp_penalty": 0.0001,
     "soc_critical": 0.2,
-    "fast_tariff": 1.5,
+    "fast_tariff": 3.0,
     "penalty_coef": 1.0,
     "departure_penalty": {
       "thresholds": [0.5, 0.8, 0.9, 1.0],

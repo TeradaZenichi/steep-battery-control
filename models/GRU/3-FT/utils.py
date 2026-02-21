@@ -1,4 +1,5 @@
 from pathlib import Path
+from collections import deque
 import pandas as pd
 import numpy as np
 import torch
@@ -7,25 +8,27 @@ import sys
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]  # .../steep-battery-control
 MODEL_ROOT   = Path(__file__).resolve().parents[2]  # .../models
-MLP_ROOT     = Path(__file__).resolve().parent.parent   # .../models/MLP
+GRU_ROOT     = Path(__file__).resolve().parents[1]  # .../models/GRU
+ALGO_ROOT    = Path(__file__).resolve().parent      # .../models/GRU/2-RL
 sys.path.insert(0, str(PROJECT_ROOT))
-sys.path.insert(0, str(MLP_ROOT))
+sys.path.insert(0, str(GRU_ROOT))
 sys.path.insert(0, str(MODEL_ROOT))
-sys.path.append(str(Path(__file__).resolve().parent))
+sys.path.append(str(ALGO_ROOT))
 
 
 from environment import SmartHomeEnv
 from model import load_actor
 
 class ReplayBuffer:
-    def __init__(self, capacity: int, obs_dim: int, act_dim: int, device: torch.device):
+    def __init__(self, capacity: int, obs_dim: int, act_dim: int, device: torch.device, history_len: int = 1):
         self.capacity = int(capacity)
         self.obs_dim = int(obs_dim)
         self.act_dim = int(act_dim)
         self.device = device
+        self.history_len = max(1, int(history_len))
 
-        self.obs        = np.zeros((self.capacity, self.obs_dim), dtype=np.float32)
-        self.next_obs   = np.zeros((self.capacity, self.obs_dim), dtype=np.float32)
+        self.obs        = np.zeros((self.capacity, self.history_len, self.obs_dim), dtype=np.float32)
+        self.next_obs   = np.zeros((self.capacity, self.history_len, self.obs_dim), dtype=np.float32)
         self.acts       = np.zeros((self.capacity, self.act_dim), dtype=np.float32)
         self.rews       = np.zeros((self.capacity, 1), dtype=np.float32)
         self.dones      = np.zeros((self.capacity, 1), dtype=np.float32)
@@ -37,14 +40,19 @@ class ReplayBuffer:
         return self.size
 
     def add(self, obs: np.ndarray, act: np.ndarray, rew: float, next_obs: np.ndarray, done: bool) -> None:
-        obs = np.asarray(obs, dtype=np.float32).reshape(-1)
-        next_obs = np.asarray(next_obs, dtype=np.float32).reshape(-1)
+        obs = np.asarray(obs, dtype=np.float32)
+        next_obs = np.asarray(next_obs, dtype=np.float32)
         act = np.asarray(act, dtype=np.float32).reshape(-1)
 
-        if obs.shape[0] != self.obs_dim:
-            raise ValueError(f"obs_dim mismatch: expected {self.obs_dim}, got {obs.shape[0]}")
-        if next_obs.shape[0] != self.obs_dim:
-            raise ValueError(f"next_obs_dim mismatch: expected {self.obs_dim}, got {next_obs.shape[0]}")
+        if obs.ndim == 1:
+            obs = np.repeat(obs[None, :], self.history_len, axis=0)
+        if next_obs.ndim == 1:
+            next_obs = np.repeat(next_obs[None, :], self.history_len, axis=0)
+
+        if obs.shape != (self.history_len, self.obs_dim):
+            raise ValueError(f"obs_shape mismatch: expected {(self.history_len, self.obs_dim)}, got {obs.shape}")
+        if next_obs.shape != (self.history_len, self.obs_dim):
+            raise ValueError(f"next_obs_shape mismatch: expected {(self.history_len, self.obs_dim)}, got {next_obs.shape}")
         if act.shape[0] != self.act_dim:
             raise ValueError(f"act_dim mismatch: expected {self.act_dim}, got {act.shape[0]}")
 
@@ -181,7 +189,7 @@ class EpisodeGen:
         return self.df_cy if key == "cy" else self.df_wy
 
 
-def _eval_worker(run, parameters, tariff, actor_cfg, actor_state_dict, episode_length, deterministic=True):
+def _eval_worker(run, parameters, tariff, actor_cfg, actor_state_dict, episode_length, history_len=1, deterministic=True):
     import torch
     import pandas as pd
 
@@ -214,6 +222,10 @@ def _eval_worker(run, parameters, tariff, actor_cfg, actor_state_dict, episode_l
         obs = obs[0]
     if isinstance(obs, dict):
         obs = obs["obs"] if "obs" in obs else (obs["observation"] if "observation" in obs else next(iter(obs.values())))
+    obs = np.asarray(obs, dtype=np.float32).reshape(-1)
+
+    history_len = max(1, int(history_len))
+    history = deque([obs.copy() for _ in range(history_len)], maxlen=history_len)
 
     done = False
     truncated = False
@@ -221,7 +233,8 @@ def _eval_worker(run, parameters, tariff, actor_cfg, actor_state_dict, episode_l
     steps = 0
 
     while (not done) and (not truncated) and steps < episode_length:
-        obs_t = torch.as_tensor(obs).unsqueeze(0)
+        obs_seq = np.stack(history, axis=0)
+        obs_t = torch.as_tensor(obs_seq, dtype=torch.float32).unsqueeze(0)
         with torch.no_grad():
             if deterministic:
                 _, _, action_t, _ = actor.sample(obs_t)
@@ -235,9 +248,10 @@ def _eval_worker(run, parameters, tariff, actor_cfg, actor_state_dict, episode_l
             next_obs = next_obs[0]
         if isinstance(next_obs, dict):
             next_obs = next_obs["obs"] if "obs" in next_obs else (next_obs["observation"] if "observation" in next_obs else next(iter(next_obs.values())))
+        next_obs = np.asarray(next_obs, dtype=np.float32).reshape(-1)
 
         episode_reward += float(rew)
-        obs = next_obs
+        history.append(next_obs.copy())
         steps += 1
 
     return episode_reward

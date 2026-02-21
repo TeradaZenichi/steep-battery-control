@@ -1,4 +1,5 @@
 from datetime import datetime
+from collections import deque
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import pandas as pd
@@ -10,11 +11,12 @@ from tqdm import tqdm
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]  # .../steep-battery-control
 MODEL_ROOT   = Path(__file__).resolve().parents[2]  # .../models
-MLP_ROOT     = Path(__file__).resolve().parent.parent   # .../models/MLP
+GRU_ROOT     = Path(__file__).resolve().parents[1]  # .../models/GRU
+ALGO_ROOT    = Path(__file__).resolve().parent      # .../models/GRU/3-FT
 sys.path.insert(0, str(PROJECT_ROOT))
-sys.path.insert(0, str(MLP_ROOT))
+sys.path.insert(0, str(GRU_ROOT))
 sys.path.insert(0, str(MODEL_ROOT))
-sys.path.append(str(Path(__file__).resolve().parent))
+sys.path.append(str(ALGO_ROOT))
 
 from environment import SmartHomeEnv
 from model import load_actor
@@ -233,7 +235,7 @@ def mask_operation_with_ev_conn(operation: pd.DataFrame, raw_df: pd.DataFrame):
     return op
 
 
-def eval_actor_run_parallel(run: dict, tariff: str, par: dict, actor_cfg: dict, actor_state_dict: dict, save_operation_csv: bool, save_breakdown_csv: bool, include_breakdown_summary: bool, folder: Path, show_step_pbar: bool, pbar_position: int):
+def eval_actor_run_parallel(run: dict, tariff: str, par: dict, actor_cfg: dict, actor_state_dict: dict, save_operation_csv: bool, save_breakdown_csv: bool, include_breakdown_summary: bool, folder: Path, show_step_pbar: bool, history_len: int, pbar_position: int):
     start = datetime.strptime(run["date"], "%Y-%m-%d %H:%M:%S")
     days = run["days"]
     bess_soc = run["soc"]
@@ -252,6 +254,10 @@ def eval_actor_run_parallel(run: dict, tariff: str, par: dict, actor_cfg: dict, 
 
     actor_env = SmartHomeEnv(df, par, start, days, bess_soc, tariff)
     max_steps = int((24 * 60 * float(days)) / float(par["general"]["timestep"]))
+    history_len = max(1, int(history_len))
+
+    state0 = np.asarray(actor_env._get_observation(), dtype=np.float32).reshape(-1)
+    history = deque([state0.copy() for _ in range(history_len)], maxlen=history_len)
 
     done = False
     actor_reward = 0.0
@@ -264,12 +270,14 @@ def eval_actor_run_parallel(run: dict, tariff: str, par: dict, actor_cfg: dict, 
         disable=not show_step_pbar,
     ) as pbar_actor:
         while not done:
-            state = actor_env._get_observation()
-            state_t = torch.as_tensor(state, dtype=torch.float32, device=torch.device("cpu")).unsqueeze(0)
+            state_seq = np.stack(history, axis=0)
+            state_t = torch.as_tensor(state_seq, dtype=torch.float32, device=torch.device("cpu")).unsqueeze(0)
             with torch.no_grad():
                 _, _, action_t, _ = actor.sample(state_t)  # determinístico + projeção
             action = action_t.squeeze(0).detach().cpu().numpy()
-            state, reward, terminated, truncated, info = actor_env.step(action)
+            next_state, reward, terminated, truncated, info = actor_env.step(action)
+            next_state = np.asarray(next_state, dtype=np.float32).reshape(-1)
+            history.append(next_state.copy())
             done = terminated or truncated
             actor_reward += reward
             pbar_actor.update(1)
@@ -302,20 +310,23 @@ def eval_actor_run_parallel(run: dict, tariff: str, par: dict, actor_cfg: dict, 
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-with open("data/parameters.json", encoding="utf-8") as f:
+with open(PROJECT_ROOT / "data" / "parameters.json", encoding="utf-8") as f:
     par = json.load(f)
 
-with open("models/MLP/model.json") as f:
+with open(GRU_ROOT / "model.json", encoding="utf-8") as f:
     model_cfg = json.load(f)
 
-with open("models/MLP/2-RL/config.json") as f:
+with open(ALGO_ROOT / "config.json", encoding="utf-8") as f:
     cfg = json.load(f)
+
+model_cfg["actor"]["parameters"] = str(PROJECT_ROOT / "data" / "parameters.json")
 
 seed = int(cfg["train"]["seed"])
 torch.manual_seed(seed)
 np.random.seed(seed)
 EVAL_WORKERS = int(cfg["train"].get("eval_workers", 1))
 SHOW_ACTOR_STEP_PBAR = bool(cfg["train"].get("show_actor_step_pbar", True))
+HISTORY_LEN = max(1, int(cfg["train"].get("history_len", 1)))
 
 # I/O and breakdown toggles to speed up tests
 SAVE_OPERATION_CSV = True
@@ -325,13 +336,13 @@ INCLUDE_BREAKDOWN_SUMMARY = True
 # for tariff in ["tar_s", "tar_w", "tar_sw", "tar_tou", "tar_flat"]:
 for tariff in tqdm(["tar_s", "tar_w", "tar_sw", "tar_tou", "tar_flat"], desc="Tariffs", position=0, dynamic_ncols=True):
 
-    folder = PROJECT_ROOT / "Results" / "test" / "MLP" / "2-RL" / tariff
+    folder = PROJECT_ROOT / "Results" / "test" / "GRU" / "3-FT" / tariff
     folder.mkdir(parents=True, exist_ok=True)
 
     summary = {}
 
     actor_state_dict = torch.load(
-        f"Results/train/MLP/2-RL/{tariff}/best_actor_eval.pt",
+        PROJECT_ROOT / "Results" / "train" / "GRU" / "3-FT" / tariff / "best_actor_eval.pt",
         map_location=torch.device("cpu"),
     )
 
@@ -352,6 +363,7 @@ for tariff in tqdm(["tar_s", "tar_w", "tar_sw", "tar_tou", "tar_flat"], desc="Ta
                 INCLUDE_BREAKDOWN_SUMMARY,
                 folder,
                 SHOW_ACTOR_STEP_PBAR,
+                HISTORY_LEN,
                 2 + idx,
             ): run["name"]
             for idx, run in enumerate(runs)

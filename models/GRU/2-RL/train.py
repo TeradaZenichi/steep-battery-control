@@ -12,11 +12,12 @@ import sys
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]  # .../steep-battery-control
 MODEL_ROOT   = Path(__file__).resolve().parents[2]  # .../models
-MLP_ROOT     = Path(__file__).resolve().parent.parent   # .../models/MLP
-sys.path.insert(0, str(PROJECT_ROOT))
-sys.path.insert(0, str(MLP_ROOT))
-sys.path.insert(0, str(MODEL_ROOT))
-sys.path.append(str(Path(__file__).resolve().parent))
+GRU_ROOT     = Path(__file__).resolve().parents[1]  # .../models/GRU
+ALGO_ROOT    = Path(__file__).resolve().parent      # .../models/GRU/2-RL
+sys.path.insert(0, str(ALGO_ROOT))
+sys.path.insert(1, str(GRU_ROOT))
+sys.path.insert(2, str(MODEL_ROOT))
+sys.path.insert(3, str(PROJECT_ROOT))
 
 from utils import ReplayBuffer, EpisodeGen, Hyperparameters, Temperature, _eval_worker
 from model import load_actor, load_critic
@@ -29,7 +30,7 @@ class Train:
     def __init__(self, tariff: str):
         self.tariff = tariff
 
-        with open(Path(__file__).resolve().parent.parent / "model.json") as f:
+        with open(GRU_ROOT / "model.json", encoding="utf-8") as f:
             self.model_cfg = json.load(f)
 
         with open(Path(__file__).resolve().parent / "config.json", encoding="utf-8") as f:
@@ -40,6 +41,7 @@ class Train:
 
         self.episodegen = EpisodeGen(self.train_cfg, PROJECT_ROOT / "data")
         self.hp = Hyperparameters(self.train_cfg["train"])
+        self.history_len = max(1, int(self.train_cfg["train"].get("history_len", 1)))
         self.log_every_steps = int(self.train_cfg["train"].get("log_every_steps", 50))
         self.audit_every_episodes = int(self.train_cfg["train"].get("audit_every_episodes", 5))
         self.update_every_steps = int(self.train_cfg["train"].get("update_every_steps", 1))
@@ -75,7 +77,7 @@ class Train:
         torch.manual_seed(self.hp.seed)
         np.random.seed(self.hp.seed)
 
-        self.folder = PROJECT_ROOT / "Results" / "train" / "MLP" / "2-RL" / self.tariff
+        self.folder = PROJECT_ROOT / "Results" / "train" / "GRU" / "2-RL" / self.tariff
         self.folder.mkdir(parents=True, exist_ok=True)
 
         # Arquivos únicos (sobrescrevem)
@@ -93,6 +95,7 @@ class Train:
             obs_dim=self.model_cfg["actor"]["input_dim"],
             act_dim=self.model_cfg["actor"]["output_dim"],
             device=DEVICE,
+            history_len=self.history_len,
         )
 
         # Merge actor architecture (model.json) with RL-specific stochastic settings (config.json).
@@ -293,6 +296,7 @@ class Train:
                         self.actor_cfg,
                         actor_state_cpu,
                         self.episode_length,
+                        self.history_len,
                         deterministic,
                     )
                     for run in runs
@@ -323,18 +327,21 @@ class Train:
         next_obs = batch["next_obs"]
         done = batch["done"]
 
+        obs_critic = obs[:, -1, :] if obs.dim() == 3 else obs
+        next_obs_critic = next_obs[:, -1, :] if next_obs.dim() == 3 else next_obs
+
         with torch.no_grad():
             # Next action sampled from current policy
             next_action, logp_next, _, cost_next = self.actor.sample(next_obs)
 
-            q1_next, q2_next = self.critics_target(next_obs, next_action)
+            q1_next, q2_next = self.critics_target(next_obs_critic, next_action)
             q_next = torch.min(q1_next, q2_next)
 
             alpha = self.temperature.alpha
 
             backup = rew + self.hp.γ * (1.0 - done) * (q_next - alpha * logp_next)
 
-        q1, q2 = self.critics(obs, act)
+        q1, q2 = self.critics(obs_critic, act)
         critic_loss = torch.mean((q1 - backup) ** 2) + torch.mean((q2 - backup) ** 2)
 
         self.opt_critic.zero_grad()
@@ -345,7 +352,7 @@ class Train:
 
         # Actor update
         action_pi, logp_pi, _, cost = self.actor.sample(obs)
-        q1_pi, q2_pi = self.critics(obs, action_pi)
+        q1_pi, q2_pi = self.critics(obs_critic, action_pi)
         q_pi = torch.min(q1_pi, q2_pi)
 
         alpha = self.temperature.alpha.detach()
@@ -413,9 +420,24 @@ class Train:
             env.reset(options={"start": self.episodegen.sample(key), "bess_soc": np.random.uniform(0.1, 0.9)})
 
 
+    @staticmethod
+    def _obs_vector(obs) -> np.ndarray:
+        return np.asarray(obs, dtype=np.float32).reshape(-1)
+
+
+    def _init_histories(self) -> dict:
+        histories = {}
+        for key, env in self.envs.items():
+            obs0 = self._obs_vector(env._get_observation())
+            histories[key] = deque([obs0.copy() for _ in range(self.history_len)], maxlen=self.history_len)
+        return histories
+
+
     def _run_warmup(self):
         print("Starting warmup episodes...")
         for episode in tqdm(range(self.hp.warmup_episodes), desc="Warmup Episodes", position=0, dynamic_ncols=True):
+            self._reset_train_envs()
+            histories = self._init_histories()
             env_dones = {"cy": False, "wy": False}
             steps = 0
 
@@ -425,21 +447,23 @@ class Train:
                         if env_dones[key]:
                             continue
 
-                        obs_np = env._get_observation()
+                        obs_seq = np.stack(histories[key], axis=0)
                         action = env.action_space.sample()
                         next_obs, rew, done, truncated, info = env.step(action)
+                        next_obs_vec = self._obs_vector(next_obs)
+                        histories[key].append(next_obs_vec.copy())
+                        next_obs_seq = np.stack(histories[key], axis=0)
 
-                        self.buffer.add(obs_np, action, rew * self.hp.reward_scale, next_obs, done or truncated)
+                        self.buffer.add(obs_seq, action, rew * self.hp.reward_scale, next_obs_seq, done or truncated)
 
                         env_dones[key] = done or truncated
                         steps += 1
 
                         pbar.update(1)
 
-            self._reset_train_envs()
-
-
     def _collect_training_episode(self, episode: int) -> tuple[float, int]:
+        self._reset_train_envs()
+        histories = self._init_histories()
         env_dones = {"cy": False, "wy": False}
         reward = {"cy": 0.0, "wy": 0.0, "total": 0.0}
 
@@ -453,7 +477,7 @@ class Train:
                 while not all(env_dones.values()) and steps < episode_total_steps:
                     active = [(key, env) for key, env in self.envs.items() if not env_dones[key]]
 
-                    obs_map = {key: env._get_observation() for key, env in active}
+                    obs_map = {key: np.stack(histories[key], axis=0) for key, env in active}
                     obs_batch = np.stack([obs_map[key] for key, _ in active], axis=0)
                     obs_t = torch.as_tensor(obs_batch, device=DEVICE)
 
@@ -475,8 +499,11 @@ class Train:
                         for fut in as_completed(futures)
                     ]
 
-                    for (key, obs_np, action_exec), (next_obs, rew, done, truncated, info) in completed:
-                        self.buffer.add(obs_np, action_exec, rew * self.hp.reward_scale, next_obs, done or truncated)
+                    for (key, obs_seq, action_exec), (next_obs, rew, done, truncated, info) in completed:
+                        next_obs_vec = self._obs_vector(next_obs)
+                        histories[key].append(next_obs_vec.copy())
+                        next_obs_seq = np.stack(histories[key], axis=0)
+                        self.buffer.add(obs_seq, action_exec, rew * self.hp.reward_scale, next_obs_seq, done or truncated)
 
                         reward[key] += rew
                         reward["total"] += rew
@@ -502,7 +529,6 @@ class Train:
                                 self.update()
                                 updates_in_episode += 1
 
-        self._reset_train_envs()
         return float(reward["total"]), int(steps)
 
 

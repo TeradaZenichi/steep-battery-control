@@ -1,10 +1,12 @@
 from datetime import datetime
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import pandas as pd
 import numpy as np
 import torch
 import json
 import sys
+from tqdm import tqdm
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]  # .../steep-battery-control
 MODEL_ROOT   = Path(__file__).resolve().parents[2]  # .../models
@@ -224,6 +226,78 @@ def mask_operation_with_ev_conn(operation: pd.DataFrame, raw_df: pd.DataFrame):
 
     return op
 
+
+def eval_actor_run_parallel(run: dict, tariff: str, par: dict, actor_cfg: dict, actor_state_dict: dict, use_projection: bool, save_operation_csv: bool, save_breakdown_csv: bool, include_breakdown_summary: bool, folder: Path, show_step_pbar: bool, pbar_position: int):
+    start = datetime.strptime(run["date"], "%Y-%m-%d %H:%M:%S")
+    days = run["days"]
+    bess_soc = run["soc"]
+
+    df = pd.read_csv(
+        run["dataset"],
+        sep=";",
+        parse_dates=["timestamp"],
+        dayfirst=True,
+        index_col="timestamp",
+    )
+
+    actor = load_actor(actor_cfg, device=torch.device("cpu"))
+    actor.load_state_dict(actor_state_dict, strict=True)
+    actor.eval()
+
+    actor_env = SmartHomeEnv(df, par, start, days, bess_soc, tariff)
+    max_steps = int((24 * 60 * float(days)) / float(par["general"]["timestep"]))
+
+    done = False
+    actor_reward = 0.0
+    with tqdm(
+        total=max_steps,
+        desc=f"{run['name']} actor",
+        position=pbar_position,
+        dynamic_ncols=True,
+        leave=False,
+        disable=not show_step_pbar,
+    ) as pbar_actor:
+        while not done:
+            state = actor_env._get_observation()
+            state_t = torch.as_tensor(state, dtype=torch.float32, device=torch.device("cpu")).unsqueeze(0)
+            with torch.no_grad():
+                if use_projection:
+                    _, _, action_t, _ = actor.sample(state_t)  # deterministic + projection
+                else:
+                    action_t, _, _, _ = actor.sample(state_t)  # stochastic + projection
+            action = action_t.squeeze(0).detach().cpu().numpy()
+
+            state, reward, terminated, truncated, info = actor_env.step(action)
+            done = terminated or truncated
+            actor_reward += reward
+            pbar_actor.update(1)
+
+    if save_operation_csv:
+        actor_op_masked = mask_operation_with_ev_conn(actor_env.operation, df)
+        actor_op_masked.to_csv(
+            folder / f"{run['name']}_actor_env_operation.csv",
+            index_label="timestamp",
+        )
+
+    actor_totals = None
+    if save_breakdown_csv or include_breakdown_summary:
+        actor_op_break, actor_totals = enrich_operation_with_reward_breakdown(
+            actor_env.operation,
+            df,
+            par,
+        )
+        if save_breakdown_csv:
+            actor_op_break.to_csv(
+                folder / f"{run['name']}_actor_env_operation_breakdown.csv",
+                index_label="timestamp",
+            )
+
+    return {
+        "name": run["name"],
+        "actor_reward": float(actor_reward),
+        "actor_breakdown": actor_totals if include_breakdown_summary else None,
+    }
+
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 with open("data/parameters.json", encoding="utf-8") as f:
@@ -237,6 +311,8 @@ with open("models/MLP/model.json") as f:
 
 torch.manual_seed(test_cfg["seed"])
 np.random.seed(test_cfg["seed"])
+EVAL_WORKERS = int(test_cfg.get("eval_workers", 1))
+SHOW_ACTOR_STEP_PBAR = bool(test_cfg.get("show_actor_step_pbar", True))
 
 # Toggle: in IL evaluation, you may want to run with the same feasibility projection as RL.
 # - False: uses actor.predict(state_t) (no projection)
@@ -248,68 +324,104 @@ SAVE_OPERATION_CSV = True
 SAVE_BREAKDOWN_CSV = True
 INCLUDE_BREAKDOWN_SUMMARY = True
 
-for tariff in ["tar_s", "tar_w", "tar_sw", "tar_tou", "tar_flat"]:
+for tariff in tqdm(["tar_s", "tar_w", "tar_sw", "tar_tou", "tar_flat"], desc="Tariffs", position=0, dynamic_ncols=True):
     folder = PROJECT_ROOT / "Results" / "test" / "MLP" / "1-IL" / tariff
     folder.mkdir(parents=True, exist_ok=True)
 
     summary = {}
 
-    actor = load_actor(
-        model_cfg["actor"],
-        weights_path=f"Results/train/MLP/1-IL/{tariff}/best.pth",
-        device=DEVICE,
+    actor_state_dict = torch.load(
+        f"Results/train/MLP/1-IL/{tariff}/best.pth",
+        map_location=torch.device("cpu"),
     )
 
-    for run in test_cfg["test"]:
+    runs = list(test_cfg["test"])
+    actor_results = {}
+    with ThreadPoolExecutor(max_workers=EVAL_WORKERS) as actor_pool:
+        futures = {
+            actor_pool.submit(
+                eval_actor_run_parallel,
+                run,
+                tariff,
+                par,
+                model_cfg["actor"],
+                actor_state_dict,
+                USE_PROJECTION,
+                SAVE_OPERATION_CSV,
+                SAVE_BREAKDOWN_CSV,
+                INCLUDE_BREAKDOWN_SUMMARY,
+                folder,
+                SHOW_ACTOR_STEP_PBAR,
+                2 + idx,
+            ): run["name"]
+            for idx, run in enumerate(runs)
+        }
+
+        with tqdm(total=len(futures), desc=f"{tariff} actor runs (parallel, w={EVAL_WORKERS})", position=1, dynamic_ncols=True, leave=False) as pbar_actor_runs:
+            for future in as_completed(futures):
+                result = future.result()
+                actor_results[result["name"]] = result
+                pbar_actor_runs.update(1)
+
+    for run in tqdm(runs, desc=f"{tariff} teacher runs (sequential)", position=1, dynamic_ncols=True, leave=False):
         start = datetime.strptime(run["date"], "%Y-%m-%d %H:%M:%S")
         days = run["days"]
         BESS_SoC = run["soc"]
+        max_steps = int((24 * 60 * float(days)) / float(par["general"]["timestep"]))
 
-        # NEW: load a dataset per test dict
-        df = pd.read_csv(
-            run["dataset"],
-            sep=";",
-            parse_dates=["timestamp"],
-            dayfirst=True,
-            index_col="timestamp",
-        )
-
-        teacher = Teacher(df, par, start, days, BESS_SoC, tariff)
-        teacher.build()
-        teacher.solve()
-
-        teacher_operation = teacher.get_operation()
-        if SAVE_OPERATION_CSV:
-            teacher_operation.to_csv(
-                f"Results/test/MLP/1-IL/{tariff}/{run['name']}_teacher_operation.csv",
-                index_label="timestamp",
+        with tqdm(total=4, desc=f"{run['name']} teacher stages", position=2, dynamic_ncols=True, leave=False) as pbar_teacher_stage:
+            pbar_teacher_stage.set_postfix_str("loading data")
+            df = pd.read_csv(
+                run["dataset"],
+                sep=";",
+                parse_dates=["timestamp"],
+                dayfirst=True,
+                index_col="timestamp",
             )
+            pbar_teacher_stage.update(1)
 
-        teacher_env = SmartHomeEnv(df, par, start, days, BESS_SoC, tariff)
-        actor_env = SmartHomeEnv(df, par, start, days, BESS_SoC, tariff)
+            pbar_teacher_stage.set_postfix_str("building MILP")
+            teacher = Teacher(df, par, start, days, BESS_SoC, tariff)
+            teacher.build()
+            pbar_teacher_stage.update(1)
 
-        print("Starting teacher evaluation...")
-        done = False
-        teacher_reward = 0.0
-        while not done:
-            # Normalize actions to match SmartHomeEnv semantics (EV has asymmetric charge/discharge limits)
-            pbess = float(teacher_operation.loc[teacher_env.sim.step, "PBESS"])
-            pev   = float(teacher_operation.loc[teacher_env.sim.step, "PEV"])
-            chi   = float(teacher_operation.loc[teacher_env.sim.step, "χPV"])
+            pbar_teacher_stage.set_postfix_str("solving MILP")
+            teacher.solve()
+            teacher_operation = teacher.get_operation()
+            pbar_teacher_stage.update(1)
 
-            a_bess = float(np.clip(pbess / teacher_env.bess.Pmax, -1.0, 1.0))
-            if pev >= 0.0:
-                a_ev = pev / teacher_env.ev.Pmax_c
-            else:
-                a_ev = pev / teacher_env.ev.Pmax_d
-            a_ev = float(np.clip(a_ev, -1.0, 1.0))
-            chi = float(np.clip(chi, 0.0, 1.0))
+            if SAVE_OPERATION_CSV:
+                teacher_operation.to_csv(
+                    f"Results/test/MLP/1-IL/{tariff}/{run['name']}_teacher_operation.csv",
+                    index_label="timestamp",
+                )
 
-            action = [a_bess, a_ev, chi]
-            state, reward, terminated, truncated, info = teacher_env.step(action)
+            teacher_env = SmartHomeEnv(df, par, start, days, BESS_SoC, tariff)
 
-            done = terminated or truncated
-            teacher_reward += reward
+            done = False
+            teacher_reward = 0.0
+            pbar_teacher_stage.set_postfix_str("env rollout")
+            with tqdm(total=max_steps, desc=f"{run['name']} teacher", position=3, dynamic_ncols=True, leave=False) as pbar_teacher:
+                while not done:
+                    pbess = float(teacher_operation.loc[teacher_env.sim.step, "PBESS"])
+                    pev   = float(teacher_operation.loc[teacher_env.sim.step, "PEV"])
+                    chi   = float(teacher_operation.loc[teacher_env.sim.step, "χPV"])
+
+                    a_bess = float(np.clip(pbess / teacher_env.bess.Pmax, -1.0, 1.0))
+                    if pev >= 0.0:
+                        a_ev = pev / teacher_env.ev.Pmax_c
+                    else:
+                        a_ev = pev / teacher_env.ev.Pmax_d
+                    a_ev = float(np.clip(a_ev, -1.0, 1.0))
+                    chi = float(np.clip(chi, 0.0, 1.0))
+
+                    action = [a_bess, a_ev, chi]
+                    state, reward, terminated, truncated, info = teacher_env.step(action)
+
+                    done = terminated or truncated
+                    teacher_reward += reward
+                    pbar_teacher.update(1)
+            pbar_teacher_stage.update(1)
 
         if SAVE_OPERATION_CSV:
             teacher_op_masked = mask_operation_with_ev_conn(teacher_env.operation, df)
@@ -332,43 +444,9 @@ for tariff in ["tar_s", "tar_w", "tar_sw", "tar_tou", "tar_flat"]:
                     index_label="timestamp",
                 )
 
-        print("Starting actor evaluation...")
-        done = False
-        actor_reward = 0.0
-        while not done:
-            state = actor_env._get_observation()
-
-            if USE_PROJECTION:
-                action = actor.action(state)  # deterministic + projection
-            else:
-                # Minimal device fix: ensure obs is on the same device as the actor
-                state_t = torch.as_tensor(state, dtype=torch.float32, device=DEVICE)
-                action = actor.predict(state_t)  # no projection
-
-            state, reward, terminated, truncated, info = actor_env.step(action)
-            done = terminated or truncated
-            actor_reward += reward
-
-        if SAVE_OPERATION_CSV:
-            actor_op_masked = mask_operation_with_ev_conn(actor_env.operation, df)
-            actor_op_masked.to_csv(
-                f"Results/test/MLP/1-IL/{tariff}/{run['name']}_actor_env_operation.csv",
-                index_label="timestamp",
-            )
-
-        # Reward breakdown (actor executed in env)
-        actor_totals = None
-        if SAVE_BREAKDOWN_CSV or INCLUDE_BREAKDOWN_SUMMARY:
-            actor_op_break, actor_totals = enrich_operation_with_reward_breakdown(
-                actor_env.operation,
-                df,
-                par,
-            )
-            if SAVE_BREAKDOWN_CSV:
-                actor_op_break.to_csv(
-                    f"Results/test/MLP/1-IL/{tariff}/{run['name']}_actor_env_operation_breakdown.csv",
-                    index_label="timestamp",
-                )
+        actor_info = actor_results.get(run["name"], {})
+        actor_reward = float(actor_info.get("actor_reward", np.nan))
+        actor_totals = actor_info.get("actor_breakdown", None)
 
         summary[run["name"]] = {
             "teacher_reward": teacher_reward,
