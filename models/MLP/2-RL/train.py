@@ -48,6 +48,16 @@ class Train:
         self.eval_ma_window = int(self.train_cfg["train"].get("eval_ma_window", 10))
         self.early_stop_patience = int(self.train_cfg["train"].get("early_stop_patience", 120))
         self.min_episodes_before_early_stop = int(self.train_cfg["train"].get("min_episodes_before_early_stop", 150))
+        self.checkpoint_use_combined_score = bool(self.train_cfg["train"].get("checkpoint_use_combined_score", True))
+        self.checkpoint_weight_det = float(self.train_cfg["train"].get("checkpoint_weight_det", 0.5))
+        self.checkpoint_weight_stoch = float(self.train_cfg["train"].get("checkpoint_weight_stoch", 0.5))
+        w_sum = self.checkpoint_weight_det + self.checkpoint_weight_stoch
+        if w_sum <= 0.0:
+            self.checkpoint_weight_det = 0.5
+            self.checkpoint_weight_stoch = 0.5
+            w_sum = 1.0
+        self.checkpoint_weight_det /= w_sum
+        self.checkpoint_weight_stoch /= w_sum
 
         self.env_cy = SmartHomeEnv(
             self.episodegen.df_cy,
@@ -93,6 +103,8 @@ class Train:
             obs_dim=self.model_cfg["actor"]["input_dim"],
             act_dim=self.model_cfg["actor"]["output_dim"],
             device=DEVICE,
+            n_step=self.hp.n_step,
+            gamma=self.hp.γ,
         )
 
         # Merge actor architecture (model.json) with RL-specific stochastic settings (config.json).
@@ -128,6 +140,8 @@ class Train:
         self.best_eval_episode = -1
         self.best_eval_ma = -float("inf")
         self.best_eval_ma_episode = -1
+        self.best_checkpoint_score = -float("inf")
+        self.best_checkpoint_episode = -1
         self.best_train_reward = -float("inf")  # rastrear apenas (não salvar arquivos)
         self.last_improvement_episode = -1
 
@@ -168,9 +182,11 @@ class Train:
             "eval_reward",
             "eval_reward_ma",
             "eval_reward_stoch",
+            "checkpoint_score",
             "best_train_reward",
             "best_eval_reward",
             "best_eval_ma",
+            "best_checkpoint_score",
             "q1_mean",
             "q2_mean",
             "backup_mean",
@@ -222,7 +238,7 @@ class Train:
         torch.save(ckpt, filepath)
 
 
-    def _save_best_eval(self, eval_reward_value: float, episode: int) -> None:
+    def _save_best_eval(self, eval_reward_value: float, episode: int, checkpoint_score: float, eval_reward_stoch: float) -> None:
         """Save ONLY the best model/checkpoint according to eval, using fixed filenames."""
         # 1) Actor weights
         torch.save(self.actor.state_dict(), self.best_actor_path)
@@ -234,6 +250,12 @@ class Train:
         meta = {
             "best_eval_reward": float(eval_reward_value),
             "best_eval_episode": int(episode),
+            "best_eval_reward_stoch": float(eval_reward_stoch),
+            "best_checkpoint_score": float(checkpoint_score),
+            "best_checkpoint_episode": int(episode),
+            "checkpoint_use_combined_score": bool(self.checkpoint_use_combined_score),
+            "checkpoint_weight_det": float(self.checkpoint_weight_det),
+            "checkpoint_weight_stoch": float(self.checkpoint_weight_stoch),
             "tariff": self.tariff
         }
         with open(self.best_meta_path, "w", encoding="utf-8") as f:
@@ -322,6 +344,7 @@ class Train:
         rew = batch["rew"]
         next_obs = batch["next_obs"]
         done = batch["done"]
+        gamma_pow = batch["gamma_pow"]
 
         with torch.no_grad():
             # Next action sampled from current policy
@@ -332,7 +355,7 @@ class Train:
 
             alpha = self.temperature.alpha
 
-            backup = rew + self.hp.γ * (1.0 - done) * (q_next - alpha * logp_next)
+            backup = rew + gamma_pow * (1.0 - done) * (q_next - alpha * logp_next)
 
         q1, q2 = self.critics(obs, act)
         critic_loss = torch.mean((q1 - backup) ** 2) + torch.mean((q2 - backup) ** 2)
@@ -429,7 +452,7 @@ class Train:
                         action = env.action_space.sample()
                         next_obs, rew, done, truncated, info = env.step(action)
 
-                        self.buffer.add(obs_np, action, rew * self.hp.reward_scale, next_obs, done or truncated)
+                        self.buffer.add(obs_np, action, rew * self.hp.reward_scale, next_obs, done or truncated, stream_id=key)
 
                         env_dones[key] = done or truncated
                         steps += 1
@@ -476,7 +499,7 @@ class Train:
                     ]
 
                     for (key, obs_np, action_exec), (next_obs, rew, done, truncated, info) in completed:
-                        self.buffer.add(obs_np, action_exec, rew * self.hp.reward_scale, next_obs, done or truncated)
+                        self.buffer.add(obs_np, action_exec, rew * self.hp.reward_scale, next_obs, done or truncated, stream_id=key)
 
                         reward[key] += rew
                         reward["total"] += rew
@@ -506,10 +529,11 @@ class Train:
         return float(reward["total"]), int(steps)
 
 
-    def _run_eval_and_checkpoint(self, episode: int) -> tuple[float, float, float]:
+    def _run_eval_and_checkpoint(self, episode: int) -> tuple[float, float, float, float, int]:
         eval_reward_value = np.nan
         eval_reward_ma = np.nan
         eval_reward_stoch = np.nan
+        checkpoint_score = np.nan
         improved = False
 
         if episode % self.hp.eval_every == 0:
@@ -520,10 +544,22 @@ class Train:
             eval_reward_ma = float(np.mean(self.eval_window))
             self.eval_ma_rewards.append(eval_reward_ma)
 
+            if self.checkpoint_use_combined_score:
+                checkpoint_score = float(
+                    self.checkpoint_weight_det * eval_reward_value
+                    + self.checkpoint_weight_stoch * eval_reward_stoch
+                )
+            else:
+                checkpoint_score = float(eval_reward_value)
+
             if eval_reward_value > self.best_eval_reward:
                 self.best_eval_reward = eval_reward_value
                 self.best_eval_episode = int(episode)
-                self._save_best_eval(eval_reward_value, episode)
+
+            if checkpoint_score > self.best_checkpoint_score:
+                self.best_checkpoint_score = checkpoint_score
+                self.best_checkpoint_episode = int(episode)
+                self._save_best_eval(eval_reward_value, episode, checkpoint_score, eval_reward_stoch)
                 improved = True
 
             if eval_reward_ma > self.best_eval_ma:
@@ -536,7 +572,7 @@ class Train:
             self.last_improvement_episode = int(episode)
 
         no_improve_episodes = 0 if self.last_improvement_episode < 0 else int(episode - self.last_improvement_episode)
-        return eval_reward_value, eval_reward_ma, eval_reward_stoch, no_improve_episodes
+        return eval_reward_value, eval_reward_ma, eval_reward_stoch, checkpoint_score, no_improve_episodes
 
 
     def _aggregate_episode_update_metrics(self, q_start: int) -> dict:
@@ -585,7 +621,7 @@ class Train:
         }
 
 
-    def _build_audit_row(self, episode: int, train_total: float, eval_reward_value: float, eval_reward_ma: float, eval_reward_stoch: float, metrics: dict, steps: int, no_improve_episodes: int) -> dict:
+    def _build_audit_row(self, episode: int, train_total: float, eval_reward_value: float, eval_reward_ma: float, eval_reward_stoch: float, checkpoint_score: float, metrics: dict, steps: int, no_improve_episodes: int) -> dict:
         alpha_val = float(self.temperature.alpha.detach().cpu())
 
         return {
@@ -594,9 +630,11 @@ class Train:
             "eval_reward": float(eval_reward_value) if not np.isnan(eval_reward_value) else np.nan,
             "eval_reward_ma": float(eval_reward_ma) if not np.isnan(eval_reward_ma) else np.nan,
             "eval_reward_stoch": float(eval_reward_stoch) if not np.isnan(eval_reward_stoch) else np.nan,
+            "checkpoint_score": float(checkpoint_score) if not np.isnan(checkpoint_score) else np.nan,
             "best_train_reward": float(self.best_train_reward),
             "best_eval_reward": float(self.best_eval_reward),
             "best_eval_ma": float(self.best_eval_ma),
+            "best_checkpoint_score": float(self.best_checkpoint_score),
             "q1_mean": float(metrics["q1_mean"]) if not np.isnan(metrics["q1_mean"]) else np.nan,
             "q2_mean": float(metrics["q2_mean"]) if not np.isnan(metrics["q2_mean"]) else np.nan,
             "backup_mean": float(metrics["backup_mean"]) if not np.isnan(metrics["backup_mean"]) else np.nan,
@@ -622,14 +660,16 @@ class Train:
         }
 
 
-    def _update_train_postfix(self, p_outer, train_total: float, eval_reward_value: float, eval_reward_ma: float, eval_reward_stoch: float, metrics: dict, no_improve_episodes: int):
+    def _update_train_postfix(self, p_outer, train_total: float, eval_reward_value: float, eval_reward_ma: float, eval_reward_stoch: float, checkpoint_score: float, metrics: dict, no_improve_episodes: int):
         p_outer.set_postfix({
             "train_total": f"{train_total:.2f}",
             "eval": f"{eval_reward_value:.2f}" if not np.isnan(eval_reward_value) else "-",
             "eval_ma": f"{eval_reward_ma:.2f}" if not np.isnan(eval_reward_ma) else "-",
             "eval_stoch": f"{eval_reward_stoch:.2f}" if not np.isnan(eval_reward_stoch) else "-",
+            "ckpt": f"{checkpoint_score:.2f}" if not np.isnan(checkpoint_score) else "-",
             "best_eval": f"{self.best_eval_reward:.2f}",
             "best_eval_ma": f"{self.best_eval_ma:.2f}",
+            "best_ckpt": f"{self.best_checkpoint_score:.2f}",
             "alpha": f"{float(self.temperature.alpha.detach().cpu()):.3f}",
             "lambda": f"{float(self.lmbda.detach().cpu().item()):.3f}",
             "frac_viol": f"{float(metrics['frac_violation_ep']):.3f}" if not np.isnan(metrics["frac_violation_ep"]) else "nan",
@@ -664,7 +704,7 @@ class Train:
             if train_total > self.best_train_reward:
                 self.best_train_reward = train_total
 
-            eval_reward_value, eval_reward_ma, eval_reward_stoch, no_improve_episodes = self._run_eval_and_checkpoint(episode)
+            eval_reward_value, eval_reward_ma, eval_reward_stoch, checkpoint_score, no_improve_episodes = self._run_eval_and_checkpoint(episode)
             metrics = self._aggregate_episode_update_metrics(q_start)
             row = self._build_audit_row(
                 episode=episode,
@@ -672,6 +712,7 @@ class Train:
                 eval_reward_value=eval_reward_value,
                 eval_reward_ma=eval_reward_ma,
                 eval_reward_stoch=eval_reward_stoch,
+                checkpoint_score=checkpoint_score,
                 metrics=metrics,
                 steps=steps,
                 no_improve_episodes=no_improve_episodes,
@@ -681,7 +722,7 @@ class Train:
             if ((episode + 1) % self.audit_every_episodes == 0) or ((episode + 1) == self.hp.train_episodes):
                 self.audit_df.to_csv(self.audit_csv, index=False)
 
-            self._update_train_postfix(p_outer, train_total, eval_reward_value, eval_reward_ma, eval_reward_stoch, metrics, no_improve_episodes)
+            self._update_train_postfix(p_outer, train_total, eval_reward_value, eval_reward_ma, eval_reward_stoch, checkpoint_score, metrics, no_improve_episodes)
 
             if self._should_early_stop(episode, no_improve_episodes):
                 print(

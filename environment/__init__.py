@@ -187,6 +187,7 @@ class EVEnv():
         self.ev_arrival_arr = df["ev_arrival"].to_numpy(dtype=np.float32)
         self.ev_departure_arr = df["ev_departure"].to_numpy(dtype=np.float32)
         self.grid_tariff = tariff
+        self.grid_tariff_arr = np.asarray(tariff, dtype=np.float32)
 
         self.Pmax_c = parameters["Pmax_c"]
         self.Pmax_d = parameters["Pmax_d"]
@@ -239,8 +240,10 @@ class EVEnv():
         if hasattr(self.sim, "t_idx"):
             idx_t = self.sim.t_idx
             conn_t = int(self.ev_conn_arr[idx_t])
+            tariff_t = float(self.grid_tariff_arr[idx_t])
         else:
             conn_t = int(self.df["ev_conn"].loc[t])
+            tariff_t = float(self.grid_tariff.loc[t])
 
         connected_t = conn_t in (1, 2)
         connected_prev = int(self.prev_conn) in (1, 2)
@@ -278,7 +281,6 @@ class EVEnv():
                 E_leg = self.Emax - Ecrit
                 if E_leg <= 1e-9:
                     # fallback
-                    tariff_t = float(self.grid_tariff.loc[t])
                     deficit = E_trip - E_dep
                     cost += float(self.fast_tariff) * tariff_t * deficit
                     self.E = 0.0
@@ -286,12 +288,18 @@ class EVEnv():
                     E_pre = max(0.0, E_dep - Ecrit)
                     R = E_trip - E_pre  # > 0
                     n_fast = int(np.ceil(R / E_leg))
-                    tariff_t = float(self.grid_tariff.loc[t])
                     cost += float(n_fast) * float(self.fast_tariff) * tariff_t * E_leg
                     rem_last = R - float(n_fast - 1) * E_leg
                     self.E = self.Emax - rem_last
 
             self.E = float(np.clip(self.E, 0.0, self.Emax))
+
+            # Account on arrival how much it would cost to recover up to the minimum target SoC.
+            E_target_arrival = self.Emax * float(self.soc_min)
+            if self.E < E_target_arrival:
+                deficit_arrival = E_target_arrival - self.E
+                cost += float(self.fast_tariff) * tariff_t * deficit_arrival
+
             self.status = "arriving"
 
 
@@ -329,8 +337,9 @@ class EVEnv():
             sat = max(0.0, abs(P - command) - eps)
             cost += sat * self.sat_penalty * self.sim.Δt
 
-        # Teacher-like SoC min shortfall penalty when connected (including departure)
-        if connected_t:
+        # Teacher-like SoC min shortfall penalty only during normal connected control.
+        # Departure is no longer penalized directly; arrival already accounts expected recharge cost.
+        if self.status == "connected":
             sev = max(0.0, self.Emax * self.soc_min - self.E)
             cost += self.penalty * sev * self.sim.Δt
 

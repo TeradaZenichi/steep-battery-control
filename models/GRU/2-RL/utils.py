@@ -20,26 +20,30 @@ from environment import SmartHomeEnv
 from model import load_actor
 
 class ReplayBuffer:
-    def __init__(self, capacity: int, obs_dim: int, act_dim: int, device: torch.device, history_len: int = 1):
+    def __init__(self, capacity: int, obs_dim: int, act_dim: int, device: torch.device, history_len: int = 1, n_step: int = 1, gamma: float = 0.995):
         self.capacity = int(capacity)
         self.obs_dim = int(obs_dim)
         self.act_dim = int(act_dim)
         self.device = device
         self.history_len = max(1, int(history_len))
+        self.n_step = max(1, int(n_step))
+        self.gamma = float(gamma)
 
         self.obs        = np.zeros((self.capacity, self.history_len, self.obs_dim), dtype=np.float32)
         self.next_obs   = np.zeros((self.capacity, self.history_len, self.obs_dim), dtype=np.float32)
         self.acts       = np.zeros((self.capacity, self.act_dim), dtype=np.float32)
         self.rews       = np.zeros((self.capacity, 1), dtype=np.float32)
         self.dones      = np.zeros((self.capacity, 1), dtype=np.float32)
+        self.gamma_pows = np.zeros((self.capacity, 1), dtype=np.float32)
 
         self.ptr = 0
         self.size = 0
+        self.nstep_queues: dict[object, deque] = {}
 
     def __len__(self) -> int:
         return self.size
 
-    def add(self, obs: np.ndarray, act: np.ndarray, rew: float, next_obs: np.ndarray, done: bool) -> None:
+    def _store_transition(self, obs: np.ndarray, act: np.ndarray, rew: float, next_obs: np.ndarray, done: bool, gamma_pow: float) -> None:
         obs = np.asarray(obs, dtype=np.float32)
         next_obs = np.asarray(next_obs, dtype=np.float32)
         act = np.asarray(act, dtype=np.float32).reshape(-1)
@@ -61,9 +65,46 @@ class ReplayBuffer:
         self.acts[self.ptr] = act
         self.rews[self.ptr, 0] = float(rew)
         self.dones[self.ptr, 0] = 1.0 if done else 0.0
+        self.gamma_pows[self.ptr, 0] = float(gamma_pow)
 
         self.ptr = (self.ptr + 1) % self.capacity
         self.size = min(self.size + 1, self.capacity)
+
+    def _aggregate(self, q: deque):
+        ret = 0.0
+        gamma_pow = 1.0
+        next_obs = q[-1][3]
+        done_n = False
+
+        for i, (_, _, rew_i, next_obs_i, done_i) in enumerate(q):
+            ret += (self.gamma ** i) * float(rew_i)
+            next_obs = next_obs_i
+            gamma_pow = self.gamma ** (i + 1)
+            if done_i:
+                done_n = True
+                break
+
+        obs0, act0, _, _, _ = q[0]
+        return obs0, act0, ret, next_obs, done_n, gamma_pow
+
+    def add(self, obs: np.ndarray, act: np.ndarray, rew: float, next_obs: np.ndarray, done: bool, stream_id=0) -> None:
+        key = stream_id
+        if key not in self.nstep_queues:
+            self.nstep_queues[key] = deque()
+        q = self.nstep_queues[key]
+
+        q.append((obs, act, float(rew), next_obs, bool(done)))
+
+        while len(q) >= self.n_step:
+            obs0, act0, ret, next_obs_n, done_n, gamma_pow = self._aggregate(deque(list(q)[:self.n_step]))
+            self._store_transition(obs0, act0, ret, next_obs_n, done_n, gamma_pow)
+            q.popleft()
+
+        if done:
+            while len(q) > 0:
+                obs0, act0, ret, next_obs_n, done_n, gamma_pow = self._aggregate(q)
+                self._store_transition(obs0, act0, ret, next_obs_n, done_n, gamma_pow)
+                q.popleft()
 
     def sample(self, batch_size: int) -> dict[str, torch.Tensor]:
         if self.size == 0:
@@ -76,6 +117,7 @@ class ReplayBuffer:
         rews_t = torch.as_tensor(self.rews[idx], device=self.device)
         next_obs_t = torch.as_tensor(self.next_obs[idx], device=self.device)
         dones_t = torch.as_tensor(self.dones[idx], device=self.device)
+        gamma_pow_t = torch.as_tensor(self.gamma_pows[idx], device=self.device)
 
         batch = {
             "obs": obs_t,
@@ -83,6 +125,7 @@ class ReplayBuffer:
             "rew": rews_t,
             "next_obs": next_obs_t,
             "done": dones_t,
+            "gamma_pow": gamma_pow_t,
             "acts": acts_t,
             "rews": rews_t,
             "dones": dones_t,
@@ -114,6 +157,7 @@ class Hyperparameters:
         self.buffer_size     = config["buffer_size"]
         self.reward_scale    = config["reward_scale"]
         self.target_entropy  = config["target_entropy"]
+        self.n_step          = int(config.get("n_step", 1))
 
 
 class Temperature(torch.nn.Module):
