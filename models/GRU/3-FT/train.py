@@ -1,5 +1,4 @@
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
-import multiprocessing as mp
 from collections import deque
 from pathlib import Path
 from tqdm import tqdm
@@ -8,6 +7,7 @@ import pandas as pd
 import numpy as np
 import torch
 import json
+import random
 import sys
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]  # .../steep-battery-control
@@ -53,6 +53,10 @@ class Train:
         self.checkpoint_use_combined_score = bool(self.train_cfg["train"].get("checkpoint_use_combined_score", True))
         self.checkpoint_weight_det = float(self.train_cfg["train"].get("checkpoint_weight_det", 0.4))
         self.checkpoint_weight_stoch = float(self.train_cfg["train"].get("checkpoint_weight_stoch", 0.6))
+        default_checkpoint_metric = "mean" if self.checkpoint_use_combined_score else "det"
+        self.checkpoint_metric = str(self.train_cfg["train"].get("checkpoint_metric", default_checkpoint_metric)).lower()
+        if self.checkpoint_metric not in {"det", "stoch", "mean"}:
+            self.checkpoint_metric = default_checkpoint_metric
         w_sum = self.checkpoint_weight_det + self.checkpoint_weight_stoch
         if w_sum <= 0.0:
             self.checkpoint_weight_det = 0.5
@@ -87,6 +91,11 @@ class Train:
 
         torch.manual_seed(self.hp.seed)
         np.random.seed(self.hp.seed)
+        random.seed(self.hp.seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(self.hp.seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
 
         self.folder = PROJECT_ROOT / "Results" / "train" / "GRU" / "3-FT" / self.tariff
         self.folder.mkdir(parents=True, exist_ok=True)
@@ -115,6 +124,7 @@ class Train:
         self.actor_cfg = dict(self.model_cfg["actor"])
         self.actor_cfg["log_std_min"] = float(self.hp.log_std_min)
         self.actor_cfg["log_std_max"] = float(self.hp.log_std_max)
+        self.actor_cfg["parameters"] = str((PROJECT_ROOT / "data" / "parameters.json").resolve())
 
         self.actor = load_actor(self.actor_cfg, device=DEVICE)
         self.critics = load_critic(self.model_cfg["critic"], device=DEVICE)
@@ -156,6 +166,7 @@ class Train:
         self.cost_limit = float(self.train_cfg["train"].get("cost_limit", 1e-4))  # target cost (0 means no violation)
         self.lmbda_max = float(self.train_cfg["train"].get("lambda_max", 100.0))
         self.lambda_deadzone = float(self.train_cfg["train"].get("lambda_deadzone", 0.0))
+        self.dual_enabled = bool(self.train_cfg["train"].get("dual_enabled", True))
         self.critic_pretrain_steps = int(self.ft_cfg.get("critic_pretrain_steps", 0))
         self.critic_pretrain_batch_size = int(self.ft_cfg.get("critic_pretrain_batch_size", self.hp.batch_size))
         self.warmup_mode = str(self.ft_cfg.get("warmup_mode", "random"))
@@ -210,10 +221,12 @@ class Train:
         self.audit_df = pd.DataFrame(columns=[
             "episode",
             "train_reward_total",
+            "eval_reward_det",
             "eval_reward",
             "eval_reward_ma",
             "eval_reward_stoch",
             "checkpoint_score",
+            "checkpoint_metric",
             "best_train_reward",
             "best_eval_reward",
             "best_eval_ma",
@@ -232,6 +245,7 @@ class Train:
             "alpha",
             # --- CHANGE (Lagrangian): log lambda value for audit ---
             "lambda",
+            "dual_enabled",
             # --- END CHANGE ---
             # --- CHANGE (Projection/Loss audit): aggregated per-episode from per-update values ---
             "cost_mean",
@@ -286,6 +300,7 @@ class Train:
             "best_eval_reward_stoch": float(eval_reward_stoch),
             "best_checkpoint_score": float(checkpoint_score),
             "best_checkpoint_episode": int(episode),
+            "checkpoint_metric": str(self.checkpoint_metric),
             "checkpoint_use_combined_score": bool(self.checkpoint_use_combined_score),
             "checkpoint_weight_det": float(self.checkpoint_weight_det),
             "checkpoint_weight_stoch": float(self.checkpoint_weight_stoch),
@@ -314,31 +329,15 @@ class Train:
             json.dump(meta, f, indent=2)
 
 
-    def create_eval_envs(self):
-        self.eval_envs = []
-        for val in self.train_cfg["val"]:
-            df = self.episodegen.load(val["dataset"])
-            start = pd.to_datetime(val["date"])
-            env = SmartHomeEnv(
-                df,
-                self.parameters,
-                start=start,
-                days=val["days"],
-                BESS_SoC=val["soc"],
-                tariff=self.tariff,
-                track_operation=False,
-            )
-            self.eval_envs.append(env)
-
-
     def eval(self, deterministic: bool = True) -> float:
         """Evaluate current policy over the configured validation scenarios."""
         eval_desc = "Eval Det" if deterministic else "Eval Stoch"
         runs = self.train_cfg["val"]
+        eval_workers = max(1, min(self.eval_workers, len(runs)))
         actor_state_cpu = {k: v.detach().cpu() for k, v in self.actor.state_dict().items()}
         rewards = []
         with tqdm(total=len(runs), desc=eval_desc, position=2, dynamic_ncols=True, leave=False) as p_eval:
-            with ProcessPoolExecutor(max_workers=self.eval_workers) as executor:
+            with ProcessPoolExecutor(max_workers=eval_workers) as executor:
                 futures = [
                     executor.submit(
                         _eval_worker,
@@ -357,14 +356,14 @@ class Train:
                 for idx, fut in enumerate(as_completed(futures), start=1):
                     total_reward = float(fut.result())
                     rewards.append(total_reward)
-                running_mean = float(np.mean(rewards))
-                p_eval.set_postfix({
-                    "scenario": f"{idx}/{len(runs)}",
-                    "reward": f"{total_reward:.2f}",
-                    "avg": f"{running_mean:.2f}",
-                    "w": int(self.eval_workers),
-                })
-                p_eval.update(1)
+                    running_mean = float(np.mean(rewards))
+                    p_eval.set_postfix({
+                        "scenario": f"{idx}/{len(runs)}",
+                        "reward": f"{total_reward:.2f}",
+                        "avg": f"{running_mean:.2f}",
+                        "w": int(eval_workers),
+                    })
+                    p_eval.update(1)
 
         return float(np.mean(rewards))
 
@@ -413,7 +412,7 @@ class Train:
 
         actor_term_entropy = alpha * logp_pi
         actor_term_q = -q_pi
-        actor_term_dual = self.lmbda * cost
+        actor_term_dual = self.lmbda * cost if self.dual_enabled else torch.zeros_like(cost)
         actor_term_il_reg = torch.zeros_like(actor_term_q)
         actor_loss = torch.mean(actor_term_entropy + actor_term_q + actor_term_dual)
 
@@ -452,11 +451,14 @@ class Train:
         # lambda <- max(0, min(lambda_max, lambda + lr*(E[cost] - cost_limit)))
         if update_actor:
             with torch.no_grad():
-                target = cost.new_tensor(self.cost_limit)
-                grad = torch.mean(cost) - target
-                if abs(float(grad.detach().cpu())) > self.lambda_deadzone:
-                    self.lmbda += self.lmbda_lr * grad
-                self.lmbda = torch.clamp(self.lmbda, min=0.0, max=self.lmbda_max)
+                if self.dual_enabled and self.lmbda_lr > 0.0:
+                    target = cost.new_tensor(self.cost_limit)
+                    grad = torch.mean(cost) - target
+                    if abs(float(grad.detach().cpu())) > self.lambda_deadzone:
+                        self.lmbda += self.lmbda_lr * grad
+                    self.lmbda = torch.clamp(self.lmbda, min=0.0, max=self.lmbda_max)
+                else:
+                    self.lmbda.zero_()
         # --- END CHANGE ---
 
         # Logging for audit
@@ -506,7 +508,7 @@ class Train:
     def _init_histories(self) -> dict:
         histories = {}
         for key, env in self.envs.items():
-            obs0 = self._obs_vector(env._get_observation())
+            obs0 = self._obs_vector(env.state)
             histories[key] = deque([obs0.copy() for _ in range(self.history_len)], maxlen=self.history_len)
         return histories
 
@@ -608,7 +610,7 @@ class Train:
         steps = 0
         updates_in_episode = 0
         episode_total_steps = self.episode_length * len(self.envs)
-        env_workers = self.train_env_workers
+        env_workers = max(1, min(self.train_env_workers, len(self.envs)))
 
         with ThreadPoolExecutor(max_workers=env_workers) as step_executor:
             with tqdm(total=episode_total_steps, desc=f"Ep {episode + 1}/{self.hp.train_episodes} Steps", position=1, dynamic_ncols=True, leave=False) as pbar:
@@ -674,36 +676,42 @@ class Train:
 
 
     def _run_eval_and_checkpoint(self, episode: int) -> tuple[float, float, float, float, int]:
-        eval_reward_value = np.nan
+        eval_reward_det = np.nan
         eval_reward_ma = np.nan
         eval_reward_stoch = np.nan
         checkpoint_score = np.nan
         improved = False
 
         if episode % self.hp.eval_every == 0:
-            eval_reward_value = float(self.eval(deterministic=True))
+            eval_reward_det = float(self.eval(deterministic=True))
             eval_reward_stoch = float(self.eval(deterministic=False))
-            self.eval_rewards.append(eval_reward_value)
-            self.eval_window.append(eval_reward_value)
+            self.eval_rewards.append(eval_reward_det)
+            self.eval_window.append(eval_reward_det)
             eval_reward_ma = float(np.mean(self.eval_window))
             self.eval_ma_rewards.append(eval_reward_ma)
 
-            if self.checkpoint_use_combined_score:
+            if self.checkpoint_metric == "det":
+                checkpoint_score = float(eval_reward_det)
+            elif self.checkpoint_metric == "stoch":
+                checkpoint_score = float(eval_reward_stoch)
+            elif self.checkpoint_metric == "mean":
+                checkpoint_score = float(0.5 * (eval_reward_det + eval_reward_stoch))
+            elif self.checkpoint_use_combined_score:
                 checkpoint_score = float(
-                    self.checkpoint_weight_det * eval_reward_value
+                    self.checkpoint_weight_det * eval_reward_det
                     + self.checkpoint_weight_stoch * eval_reward_stoch
                 )
             else:
-                checkpoint_score = float(eval_reward_value)
+                checkpoint_score = float(eval_reward_det)
 
-            if eval_reward_value > self.best_eval_reward:
-                self.best_eval_reward = eval_reward_value
+            if eval_reward_det > self.best_eval_reward:
+                self.best_eval_reward = eval_reward_det
                 self.best_eval_episode = int(episode)
 
             if checkpoint_score > self.best_checkpoint_score:
                 self.best_checkpoint_score = checkpoint_score
                 self.best_checkpoint_episode = int(episode)
-                self._save_best_eval(eval_reward_value, episode, checkpoint_score, eval_reward_stoch)
+                self._save_best_eval(eval_reward_det, episode, checkpoint_score, eval_reward_stoch)
                 improved = True
 
             if eval_reward_ma > self.best_eval_ma:
@@ -716,7 +724,7 @@ class Train:
             self.last_improvement_episode = int(episode)
 
         no_improve_episodes = 0 if self.last_improvement_episode < 0 else int(episode - self.last_improvement_episode)
-        return eval_reward_value, eval_reward_ma, eval_reward_stoch, checkpoint_score, no_improve_episodes
+        return eval_reward_det, eval_reward_ma, eval_reward_stoch, checkpoint_score, no_improve_episodes
 
 
     def _aggregate_episode_update_metrics(self, q_start: int) -> dict:
@@ -767,16 +775,18 @@ class Train:
         }
 
 
-    def _build_audit_row(self, episode: int, train_total: float, eval_reward_value: float, eval_reward_ma: float, eval_reward_stoch: float, checkpoint_score: float, metrics: dict, steps: int, no_improve_episodes: int) -> dict:
+    def _build_audit_row(self, episode: int, train_total: float, eval_reward_det: float, eval_reward_ma: float, eval_reward_stoch: float, checkpoint_score: float, metrics: dict, steps: int, no_improve_episodes: int) -> dict:
         alpha_val = float(self.temperature.alpha.detach().cpu())
 
         return {
             "episode": int(episode),
             "train_reward_total": train_total,
-            "eval_reward": float(eval_reward_value) if not np.isnan(eval_reward_value) else np.nan,
+            "eval_reward_det": float(eval_reward_det) if not np.isnan(eval_reward_det) else np.nan,
+            "eval_reward": float(eval_reward_det) if not np.isnan(eval_reward_det) else np.nan,
             "eval_reward_ma": float(eval_reward_ma) if not np.isnan(eval_reward_ma) else np.nan,
             "eval_reward_stoch": float(eval_reward_stoch) if not np.isnan(eval_reward_stoch) else np.nan,
             "checkpoint_score": float(checkpoint_score) if not np.isnan(checkpoint_score) else np.nan,
+            "checkpoint_metric": str(self.checkpoint_metric),
             "best_train_reward": float(self.best_train_reward),
             "best_eval_reward": float(self.best_eval_reward),
             "best_eval_ma": float(self.best_eval_ma),
@@ -794,6 +804,7 @@ class Train:
             "buffer_size": int(self.buffer.size),
             "alpha": alpha_val,
             "lambda": float(self.lmbda.detach().cpu().item()),
+            "dual_enabled": int(self.dual_enabled),
             "cost_mean": float(metrics["cost_mean_ep"]) if not np.isnan(metrics["cost_mean_ep"]) else np.nan,
             "cost_p95": float(metrics["cost_p95_ep"]) if not np.isnan(metrics["cost_p95_ep"]) else np.nan,
             "frac_violation": float(metrics["frac_violation_ep"]) if not np.isnan(metrics["frac_violation_ep"]) else np.nan,
@@ -808,19 +819,21 @@ class Train:
         }
 
 
-    def _update_train_postfix(self, p_outer, train_total: float, eval_reward_value: float, eval_reward_ma: float, eval_reward_stoch: float, checkpoint_score: float, metrics: dict, no_improve_episodes: int):
+    def _update_train_postfix(self, p_outer, train_total: float, eval_reward_det: float, eval_reward_ma: float, eval_reward_stoch: float, checkpoint_score: float, metrics: dict, no_improve_episodes: int):
         reg_coef_now = self._actor_reg_coef_at_episode(self.current_episode)
         p_outer.set_postfix({
             "train_total": f"{train_total:.2f}",
-            "eval": f"{eval_reward_value:.2f}" if not np.isnan(eval_reward_value) else "-",
+            "eval": f"{eval_reward_det:.2f}" if not np.isnan(eval_reward_det) else "-",
             "eval_ma": f"{eval_reward_ma:.2f}" if not np.isnan(eval_reward_ma) else "-",
             "eval_stoch": f"{eval_reward_stoch:.2f}" if not np.isnan(eval_reward_stoch) else "-",
             "ckpt": f"{checkpoint_score:.2f}" if not np.isnan(checkpoint_score) else "-",
+            "ckpt_m": str(self.checkpoint_metric),
             "best_eval": f"{self.best_eval_reward:.2f}",
             "best_eval_ma": f"{self.best_eval_ma:.2f}",
             "best_ckpt": f"{self.best_checkpoint_score:.2f}",
             "alpha": f"{float(self.temperature.alpha.detach().cpu()):.3f}",
             "lambda": f"{float(self.lmbda.detach().cpu().item()):.3f}",
+            "dual": int(self.dual_enabled),
             "reg": f"{reg_coef_now:.4f}",
             "phase": self.phase,
             "frac_viol": f"{float(metrics['frac_violation_ep']):.3f}" if not np.isnan(metrics["frac_violation_ep"]) else "nan",
@@ -846,7 +859,6 @@ class Train:
 
         # Training
         self.phase = "online"
-        self.create_eval_envs()
         print("Starting training episodes...")
         for episode in (p_outer := tqdm(range(self.hp.train_episodes), desc="Training Episodes", position=0, dynamic_ncols=True)):
             self.current_episode = int(episode)
@@ -858,12 +870,12 @@ class Train:
             if train_total > self.best_train_reward:
                 self.best_train_reward = train_total
 
-            eval_reward_value, eval_reward_ma, eval_reward_stoch, checkpoint_score, no_improve_episodes = self._run_eval_and_checkpoint(episode)
+            eval_reward_det, eval_reward_ma, eval_reward_stoch, checkpoint_score, no_improve_episodes = self._run_eval_and_checkpoint(episode)
             metrics = self._aggregate_episode_update_metrics(q_start)
             row = self._build_audit_row(
                 episode=episode,
                 train_total=train_total,
-                eval_reward_value=eval_reward_value,
+                eval_reward_det=eval_reward_det,
                 eval_reward_ma=eval_reward_ma,
                 eval_reward_stoch=eval_reward_stoch,
                 checkpoint_score=checkpoint_score,
@@ -876,7 +888,7 @@ class Train:
             if ((episode + 1) % self.audit_every_episodes == 0) or ((episode + 1) == self.hp.train_episodes):
                 self.audit_df.to_csv(self.audit_csv, index=False)
 
-            self._update_train_postfix(p_outer, train_total, eval_reward_value, eval_reward_ma, eval_reward_stoch, checkpoint_score, metrics, no_improve_episodes)
+            self._update_train_postfix(p_outer, train_total, eval_reward_det, eval_reward_ma, eval_reward_stoch, checkpoint_score, metrics, no_improve_episodes)
 
             if self._should_early_stop(episode, no_improve_episodes):
                 print(

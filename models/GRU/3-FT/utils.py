@@ -19,6 +19,8 @@ sys.path.append(str(ALGO_ROOT))
 from environment import SmartHomeEnv
 from model import load_actor
 
+_EVAL_DF_CACHE = {}
+
 class ReplayBuffer:
     def __init__(self, capacity: int, obs_dim: int, act_dim: int, device: torch.device, history_len: int = 1, n_step: int = 1, gamma: float = 0.995):
         self.capacity = int(capacity)
@@ -239,13 +241,21 @@ def _eval_worker(run, parameters, tariff, actor_cfg, actor_state_dict, episode_l
 
     torch.set_num_threads(1)
 
-    df = pd.read_csv(
-        run["dataset"],
-        sep=";",
-        parse_dates=["timestamp"],
-        dayfirst=True,
-        index_col="timestamp",
-    )
+    dataset_path = Path(run["dataset"])
+    if not dataset_path.is_absolute():
+        dataset_path = PROJECT_ROOT / dataset_path
+    cache_key = str(dataset_path.resolve())
+
+    df = _EVAL_DF_CACHE.get(cache_key)
+    if df is None:
+        df = pd.read_csv(
+            cache_key,
+            sep=";",
+            parse_dates=["timestamp"],
+            dayfirst=True,
+            index_col="timestamp",
+        )
+        _EVAL_DF_CACHE[cache_key] = df
     date = pd.to_datetime(run["date"], format="%Y-%m-%d %H:%M:%S")
 
     env = SmartHomeEnv(

@@ -406,6 +406,7 @@ class SmartHomeEnv(gym.Env):
             shape=obs_sample.shape,
             dtype=np.float32,
         )
+        self.state = obs_sample.copy()
 
     def step(self, action):
         action = np.clip(action, self.action_space.low, self.action_space.high)
@@ -521,26 +522,21 @@ class SmartHomeEnv(gym.Env):
 
         conn_t = int(self.ev.ev_conn_arr[self.sim.t_idx])
         ev_connected = conn_t in (1, 2)
+        is_start_obs = (self.sim.step == self.sim.start)
+        is_arrival_obs = ev_connected and (int(self.ev.prev_conn) == 0) and (not is_start_obs)
+        ev_controllable = ev_connected and (not is_start_obs) and (not is_arrival_obs)
 
-        # Observation masking (Teacher-like): hide SoC at start and arrival step
-        if self.sim.step == self.sim.start:
-            ev_soc_obs = 0.0
+        if ev_controllable:
+            ev_soc_obs = float(self.ev.soc)
         else:
-            is_arrival_obs = ev_connected and (int(self.ev.prev_conn) == 0)
-            if (not ev_connected) or is_arrival_obs:
-                ev_soc_obs = 0.0
-            else:
-                ev_soc_obs = self.ev.soc
-
-        # Yes: also multiply by connected flag (extra safety)
-        ev_soc_obs = float(ev_soc_obs) * int(ev_connected)
+            ev_soc_obs = 0.0
 
         power_obs = [
             (self.load.df[self.sim.t_idx] / 1000) / self.Pnorm,
             (self.pv.df[self.sim.t_idx] / 1000) / self.Pnorm,
             self.bess.soc,
             ev_soc_obs,
-            1.0 if ev_connected else 0.0,
+            1.0 if ev_controllable else 0.0,
         ]
 
         tariff_obs = [self.grid.df[self.sim.t_idx]]
