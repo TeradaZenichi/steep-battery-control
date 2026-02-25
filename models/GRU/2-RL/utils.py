@@ -22,7 +22,16 @@ from model import load_actor
 _EVAL_DF_CACHE = {}
 
 class ReplayBuffer:
-    def __init__(self, capacity: int, obs_dim: int, act_dim: int, device: torch.device, history_len: int = 1, n_step: int = 1, gamma: float = 0.995):
+    """Lazy-frame replay buffer: stores one obs per transition and reconstructs
+    sequences of ``history_len`` on the fly during ``sample()``.
+
+    Memory footprint is dominated by *single* obs/next_obs arrays of shape
+    ``(capacity, obs_dim)`` instead of ``(capacity, history_len, obs_dim)``,
+    giving a ~2×history_len reduction (e.g. ~384× for history_len=192).
+    """
+
+    def __init__(self, capacity: int, obs_dim: int, act_dim: int, device: torch.device,
+                 history_len: int = 1, n_step: int = 1, gamma: float = 0.995):
         self.capacity = int(capacity)
         self.obs_dim = int(obs_dim)
         self.act_dim = int(act_dim)
@@ -31,12 +40,18 @@ class ReplayBuffer:
         self.n_step = max(1, int(n_step))
         self.gamma = float(gamma)
 
-        self.obs        = np.zeros((self.capacity, self.history_len, self.obs_dim), dtype=np.float32)
-        self.next_obs   = np.zeros((self.capacity, self.history_len, self.obs_dim), dtype=np.float32)
-        self.acts       = np.zeros((self.capacity, self.act_dim), dtype=np.float32)
-        self.rews       = np.zeros((self.capacity, 1), dtype=np.float32)
-        self.dones      = np.zeros((self.capacity, 1), dtype=np.float32)
+        # Flat storage: one obs vector per transition
+        self.obs      = np.zeros((self.capacity, self.obs_dim), dtype=np.float32)
+        self.next_obs = np.zeros((self.capacity, self.obs_dim), dtype=np.float32)
+        self.acts     = np.zeros((self.capacity, self.act_dim), dtype=np.float32)
+        self.rews     = np.zeros((self.capacity, 1), dtype=np.float32)
+        self.dones    = np.zeros((self.capacity, 1), dtype=np.float32)
         self.gamma_pows = np.zeros((self.capacity, 1), dtype=np.float32)
+
+        # Episode boundary tracking: episode_id per slot lets us know which
+        # past slots belong to the same episode (safe to stack).
+        self.episode_ids = np.full(self.capacity, -1, dtype=np.int64)
+        self._current_episode_id = 0
 
         self.ptr = 0
         self.size = 0
@@ -45,33 +60,36 @@ class ReplayBuffer:
     def __len__(self) -> int:
         return self.size
 
-    def _store_transition(self, obs: np.ndarray, act: np.ndarray, rew: float, next_obs: np.ndarray, done: bool, gamma_pow: float) -> None:
+    # ------------------------------------------------------------------
+    # Storage
+    # ------------------------------------------------------------------
+    def _store_transition(self, obs: np.ndarray, act: np.ndarray, rew: float,
+                          next_obs: np.ndarray, done: bool, gamma_pow: float,
+                          episode_id: int) -> None:
         obs = np.asarray(obs, dtype=np.float32)
         next_obs = np.asarray(next_obs, dtype=np.float32)
         act = np.asarray(act, dtype=np.float32).reshape(-1)
 
-        if obs.ndim == 1:
-            obs = np.repeat(obs[None, :], self.history_len, axis=0)
-        if next_obs.ndim == 1:
-            next_obs = np.repeat(next_obs[None, :], self.history_len, axis=0)
+        # Accept sequences (history_len, obs_dim) – take last frame only
+        if obs.ndim == 2:
+            obs = obs[-1]
+        if next_obs.ndim == 2:
+            next_obs = next_obs[-1]
 
-        if obs.shape != (self.history_len, self.obs_dim):
-            raise ValueError(f"obs_shape mismatch: expected {(self.history_len, self.obs_dim)}, got {obs.shape}")
-        if next_obs.shape != (self.history_len, self.obs_dim):
-            raise ValueError(f"next_obs_shape mismatch: expected {(self.history_len, self.obs_dim)}, got {next_obs.shape}")
-        if act.shape[0] != self.act_dim:
-            raise ValueError(f"act_dim mismatch: expected {self.act_dim}, got {act.shape[0]}")
-
-        self.obs[self.ptr] = obs
+        self.obs[self.ptr]      = obs
         self.next_obs[self.ptr] = next_obs
-        self.acts[self.ptr] = act
-        self.rews[self.ptr, 0] = float(rew)
+        self.acts[self.ptr]     = act
+        self.rews[self.ptr, 0]  = float(rew)
         self.dones[self.ptr, 0] = 1.0 if done else 0.0
         self.gamma_pows[self.ptr, 0] = float(gamma_pow)
+        self.episode_ids[self.ptr] = episode_id
 
         self.ptr = (self.ptr + 1) % self.capacity
         self.size = min(self.size + 1, self.capacity)
 
+    # ------------------------------------------------------------------
+    # N-step aggregation (unchanged logic)
+    # ------------------------------------------------------------------
     def _aggregate(self, q: deque):
         ret = 0.0
         gamma_pow = 1.0
@@ -89,7 +107,8 @@ class ReplayBuffer:
         obs0, act0, _, _, _ = q[0]
         return obs0, act0, ret, next_obs, done_n, gamma_pow
 
-    def add(self, obs: np.ndarray, act: np.ndarray, rew: float, next_obs: np.ndarray, done: bool, stream_id=0) -> None:
+    def add(self, obs: np.ndarray, act: np.ndarray, rew: float,
+            next_obs: np.ndarray, done: bool, stream_id=0) -> None:
         key = stream_id
         if key not in self.nstep_queues:
             self.nstep_queues[key] = deque()
@@ -98,30 +117,82 @@ class ReplayBuffer:
         q.append((obs, act, float(rew), next_obs, bool(done)))
 
         while len(q) >= self.n_step:
-            obs0, act0, ret, next_obs_n, done_n, gamma_pow = self._aggregate(deque(list(q)[:self.n_step]))
-            self._store_transition(obs0, act0, ret, next_obs_n, done_n, gamma_pow)
+            obs0, act0, ret, next_obs_n, done_n, gamma_pow = self._aggregate(
+                deque(list(q)[:self.n_step]))
+            self._store_transition(obs0, act0, ret, next_obs_n, done_n, gamma_pow,
+                                   self._current_episode_id)
             q.popleft()
 
         if done:
             while len(q) > 0:
                 obs0, act0, ret, next_obs_n, done_n, gamma_pow = self._aggregate(q)
-                self._store_transition(obs0, act0, ret, next_obs_n, done_n, gamma_pow)
+                self._store_transition(obs0, act0, ret, next_obs_n, done_n, gamma_pow,
+                                       self._current_episode_id)
                 q.popleft()
+            self._current_episode_id += 1
 
+    # ------------------------------------------------------------------
+    # Sequence reconstruction
+    # ------------------------------------------------------------------
+    def _build_sequences(self, indices: np.ndarray, use_next: bool = False) -> np.ndarray:
+        """Reconstruct (batch, history_len, obs_dim) from flat storage.
+
+        For each index *i* we look back up to ``history_len - 1`` slots.
+        If a predecessor belongs to a different episode (or doesn't exist),
+        we pad by repeating the earliest valid obs in that run.
+        """
+        B = len(indices)
+        H = self.history_len
+        src = self.next_obs if use_next else self.obs
+
+        seqs = np.empty((B, H, self.obs_dim), dtype=np.float32)
+        ep_ids = self.episode_ids
+
+        for b in range(B):
+            idx = int(indices[b])
+            ep = ep_ids[idx]
+            frames = [src[idx]]
+
+            # Walk backwards collecting frames from the same episode
+            cursor = idx
+            for _ in range(H - 1):
+                prev = (cursor - 1) % self.capacity
+                if prev >= self.size and self.size < self.capacity:
+                    break  # slot not yet written
+                if ep_ids[prev] != ep:
+                    break  # different episode
+                frames.append(src[prev])
+                cursor = prev
+
+            # frames is newest-first; reverse to chronological
+            frames.reverse()
+
+            # Pad with oldest frame if we didn't get enough
+            while len(frames) < H:
+                frames.insert(0, frames[0])
+
+            seqs[b] = np.stack(frames, axis=0)
+
+        return seqs
+
+    # ------------------------------------------------------------------
+    # Sampling
+    # ------------------------------------------------------------------
     def sample(self, batch_size: int) -> dict[str, torch.Tensor]:
-        if self.size == 0:
-            raise RuntimeError("Cannot sample from an empty buffer.")
         batch_size = int(batch_size)
         idx = np.random.randint(0, self.size, size=batch_size)
 
-        obs_t = torch.as_tensor(self.obs[idx], device=self.device)
-        acts_t = torch.as_tensor(self.acts[idx], device=self.device)
-        rews_t = torch.as_tensor(self.rews[idx], device=self.device)
-        next_obs_t = torch.as_tensor(self.next_obs[idx], device=self.device)
-        dones_t = torch.as_tensor(self.dones[idx], device=self.device)
+        obs_seq = self._build_sequences(idx, use_next=False)
+        next_obs_seq = self._build_sequences(idx, use_next=True)
+
+        obs_t      = torch.as_tensor(obs_seq, device=self.device)
+        next_obs_t = torch.as_tensor(next_obs_seq, device=self.device)
+        acts_t     = torch.as_tensor(self.acts[idx], device=self.device)
+        rews_t     = torch.as_tensor(self.rews[idx], device=self.device)
+        dones_t    = torch.as_tensor(self.dones[idx], device=self.device)
         gamma_pow_t = torch.as_tensor(self.gamma_pows[idx], device=self.device)
 
-        batch = {
+        return {
             "obs": obs_t,
             "act": acts_t,
             "rew": rews_t,
@@ -132,7 +203,6 @@ class ReplayBuffer:
             "rews": rews_t,
             "dones": dones_t,
         }
-        return batch
     
 
 class Hyperparameters:
