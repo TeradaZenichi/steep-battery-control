@@ -41,7 +41,7 @@ class Train:
 
         self.episodegen = EpisodeGen(self.train_cfg, PROJECT_ROOT / "data")
         self.hp = Hyperparameters(self.train_cfg["train"])
-        self.history_len = max(1, int(self.train_cfg["train"].get("history_len", 1)))
+        self.history_len = self._resolve_history_len(tariff)
         self.log_every_steps = int(self.train_cfg["train"].get("log_every_steps", 50))
         self.audit_every_episodes = int(self.train_cfg["train"].get("audit_every_episodes", 5))
         self.update_every_steps = int(self.train_cfg["train"].get("update_every_steps", 1))
@@ -666,6 +666,14 @@ class Train:
             "alpha_loss_ep": np.nan,
         }
 
+
+    def _resolve_history_len(self, tariff: str) -> int:
+        """Load history_len from IL HPO results for this tariff."""
+        il_path = PROJECT_ROOT / "Results" / "train" / "GRU" / "1-IL" / tariff / "best_params.json"
+        with open(il_path, encoding="utf-8") as f:
+            hl = int(json.load(f)["history_len"])
+        print(f"[history_len] {tariff} = {hl} (from IL HPO)")
+        return hl
 
     def _build_audit_row(self, episode: int, train_total: float, eval_reward_det: float, eval_reward_ma: float, eval_reward_stoch: float, checkpoint_score: float, metrics: dict, steps: int, no_improve_episodes: int, no_improve_evals: int = 0) -> dict:
         alpha_val = float(self.temperature.alpha.detach().cpu())
