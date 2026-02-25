@@ -48,6 +48,7 @@ class Train:
         self.eval_ma_window = int(self.train_cfg["train"].get("eval_ma_window", 10))
         self.early_stop_patience = int(self.train_cfg["train"].get("early_stop_patience", 120))
         self.min_episodes_before_early_stop = int(self.train_cfg["train"].get("min_episodes_before_early_stop", 150))
+        self.checkpoint_min_delta = float(self.train_cfg["train"].get("checkpoint_min_delta", 0.0))
         self.checkpoint_use_combined_score = bool(self.train_cfg["train"].get("checkpoint_use_combined_score", True))
         self.checkpoint_weight_det = float(self.train_cfg["train"].get("checkpoint_weight_det", 0.5))
         self.checkpoint_weight_stoch = float(self.train_cfg["train"].get("checkpoint_weight_stoch", 0.5))
@@ -155,6 +156,8 @@ class Train:
         self.best_checkpoint_episode = -1
         self.best_train_reward = -float("inf")  # rastrear apenas (não salvar arquivos)
         self.last_improvement_episode = -1
+        self.last_improvement_eval_count = -1
+        self.eval_count = 0
 
         # tracking lists
         self.eval_rewards = []
@@ -226,6 +229,7 @@ class Train:
             "actor_term_dual",
             "alpha_loss",
             "no_improve_episodes",
+            "no_improve_evals",
             # --- END CHANGE ---
         ])
         self.audit_csv = self.folder / "audit_training.csv"
@@ -542,33 +546,40 @@ class Train:
             eval_reward_det = float(self.eval(deterministic=True))
             eval_reward_stoch = float(self.eval(deterministic=False))
             self.eval_rewards.append(eval_reward_det)
-            self.eval_window.append(eval_reward_det)
-            eval_reward_ma = float(np.mean(self.eval_window))
-            self.eval_ma_rewards.append(eval_reward_ma)
 
             if self.checkpoint_metric == "det":
                 checkpoint_score = float(eval_reward_det)
             elif self.checkpoint_metric == "stoch":
                 checkpoint_score = float(eval_reward_stoch)
             elif self.checkpoint_metric == "mean":
-                checkpoint_score = float(0.5 * (eval_reward_det + eval_reward_stoch))
+                checkpoint_score = float(
+                    self.checkpoint_weight_det * eval_reward_det
+                    + self.checkpoint_weight_stoch * eval_reward_stoch
+                )
             else:
                 checkpoint_score = float(
                     self.checkpoint_weight_det * eval_reward_det
                     + self.checkpoint_weight_stoch * eval_reward_stoch
                 )
 
+            self.eval_count += 1
+
             if eval_reward_det > self.best_eval_reward:
                 self.best_eval_reward = eval_reward_det
                 self.best_eval_episode = int(episode)
 
-            if checkpoint_score > self.best_checkpoint_score:
+            if checkpoint_score > self.best_checkpoint_score + self.checkpoint_min_delta:
                 self.best_checkpoint_score = checkpoint_score
                 self.best_checkpoint_episode = int(episode)
                 self._save_best_eval(eval_reward_det, episode, checkpoint_score, eval_reward_stoch)
                 improved = True
 
-            if eval_reward_ma > self.best_eval_ma:
+            # --- R3: feed MA window with checkpoint_score instead of only det ---
+            self.eval_window.append(checkpoint_score)
+            eval_reward_ma = float(np.mean(self.eval_window))
+            self.eval_ma_rewards.append(eval_reward_ma)
+
+            if eval_reward_ma > self.best_eval_ma + self.checkpoint_min_delta:
                 self.best_eval_ma = eval_reward_ma
                 self.best_eval_ma_episode = int(episode)
                 self._save_best_eval_ma(eval_reward_ma, episode)
@@ -576,9 +587,12 @@ class Train:
 
         if improved:
             self.last_improvement_episode = int(episode)
+            self.last_improvement_eval_count = int(self.eval_count)
 
+        # --- R1: count patience in evaluations, not episodes ---
+        no_improve_evals = 0 if self.last_improvement_eval_count < 0 else int(self.eval_count - self.last_improvement_eval_count)
         no_improve_episodes = 0 if self.last_improvement_episode < 0 else int(episode - self.last_improvement_episode)
-        return eval_reward_det, eval_reward_ma, eval_reward_stoch, checkpoint_score, no_improve_episodes
+        return eval_reward_det, eval_reward_ma, eval_reward_stoch, checkpoint_score, no_improve_episodes, no_improve_evals
 
 
     def _aggregate_episode_update_metrics(self, q_start: int) -> dict:
@@ -627,7 +641,7 @@ class Train:
         }
 
 
-    def _build_audit_row(self, episode: int, train_total: float, eval_reward_det: float, eval_reward_ma: float, eval_reward_stoch: float, checkpoint_score: float, metrics: dict, steps: int, no_improve_episodes: int) -> dict:
+    def _build_audit_row(self, episode: int, train_total: float, eval_reward_det: float, eval_reward_ma: float, eval_reward_stoch: float, checkpoint_score: float, metrics: dict, steps: int, no_improve_episodes: int, no_improve_evals: int = 0) -> dict:
         alpha_val = float(self.temperature.alpha.detach().cpu())
 
         return {
@@ -666,10 +680,11 @@ class Train:
             "actor_term_dual": float(metrics["actor_term_dual_ep"]) if not np.isnan(metrics["actor_term_dual_ep"]) else np.nan,
             "alpha_loss": float(metrics["alpha_loss_ep"]) if not np.isnan(metrics["alpha_loss_ep"]) else np.nan,
             "no_improve_episodes": int(no_improve_episodes),
+            "no_improve_evals": int(no_improve_evals),
         }
 
 
-    def _update_train_postfix(self, p_outer, train_total: float, eval_reward_det: float, eval_reward_ma: float, eval_reward_stoch: float, checkpoint_score: float, metrics: dict, no_improve_episodes: int):
+    def _update_train_postfix(self, p_outer, train_total: float, eval_reward_det: float, eval_reward_ma: float, eval_reward_stoch: float, checkpoint_score: float, metrics: dict, no_improve_episodes: int, no_improve_evals: int = 0):
         p_outer.set_postfix({
             "train_total": f"{train_total:.2f}",
             "eval": f"{eval_reward_det:.2f}" if not np.isnan(eval_reward_det) else "-",
@@ -684,16 +699,17 @@ class Train:
             "lambda": f"{float(self.lmbda.detach().cpu().item()):.3f}",
             "dual": int(self.dual_enabled),
             "frac_viol": f"{float(metrics['frac_violation_ep']):.3f}" if not np.isnan(metrics["frac_violation_ep"]) else "nan",
-            "no_imp": int(no_improve_episodes),
+            "no_imp_ep": int(no_improve_episodes),
+            "no_imp_ev": int(no_improve_evals),
         })
 
 
-    def _should_early_stop(self, episode: int, no_improve_episodes: int) -> bool:
+    def _should_early_stop(self, episode: int, no_improve_evals: int) -> bool:
         return (
             self.early_stop_patience > 0
             and episode >= self.min_episodes_before_early_stop
-            and self.last_improvement_episode >= 0
-            and no_improve_episodes >= self.early_stop_patience
+            and self.last_improvement_eval_count >= 0
+            and no_improve_evals >= self.early_stop_patience
         )
 
 
@@ -714,7 +730,7 @@ class Train:
             if train_total > self.best_train_reward:
                 self.best_train_reward = train_total
 
-            eval_reward_det, eval_reward_ma, eval_reward_stoch, checkpoint_score, no_improve_episodes = self._run_eval_and_checkpoint(episode)
+            eval_reward_det, eval_reward_ma, eval_reward_stoch, checkpoint_score, no_improve_episodes, no_improve_evals = self._run_eval_and_checkpoint(episode)
             metrics = self._aggregate_episode_update_metrics(q_start)
             row = self._build_audit_row(
                 episode=episode,
@@ -726,17 +742,18 @@ class Train:
                 metrics=metrics,
                 steps=steps,
                 no_improve_episodes=no_improve_episodes,
+                no_improve_evals=no_improve_evals,
             )
 
             self.audit_df.loc[len(self.audit_df)] = row
             if ((episode + 1) % self.audit_every_episodes == 0) or ((episode + 1) == self.hp.train_episodes):
                 self.audit_df.to_csv(self.audit_csv, index=False)
 
-            self._update_train_postfix(p_outer, train_total, eval_reward_det, eval_reward_ma, eval_reward_stoch, checkpoint_score, metrics, no_improve_episodes)
+            self._update_train_postfix(p_outer, train_total, eval_reward_det, eval_reward_ma, eval_reward_stoch, checkpoint_score, metrics, no_improve_episodes, no_improve_evals)
 
-            if self._should_early_stop(episode, no_improve_episodes):
+            if self._should_early_stop(episode, no_improve_evals):
                 print(
-                    f"Early stopping at episode {episode}: no improvement for {no_improve_episodes} episodes "
+                    f"Early stopping at episode {episode}: no improvement for {no_improve_evals} evals "
                     f"(patience={self.early_stop_patience}, min_start={self.min_episodes_before_early_stop})."
                 )
                 self.audit_df.to_csv(self.audit_csv, index=False)

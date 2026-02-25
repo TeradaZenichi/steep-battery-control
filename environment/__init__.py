@@ -204,9 +204,6 @@ class EVEnv():
         self.soc_critical = parameters["soc_critical"]
         self.fast_tariff = parameters["fast_tariff"] # this a tariff multiplier to grid tariff during fast charging 
 
-        # Soft departure penalty coefficient (for shortfall to ev_departure)
-        self.departure_penalty = parameters["departure_penalty"]
-
         self.sat_penalty = parameters["sat_penalty"]
         self.soc_power = parameters["soc_power_curve_pu"]
 

@@ -19,6 +19,7 @@
         "checkpoint_use_combined_score": true,
         "checkpoint_weight_det": 0.4,
         "checkpoint_weight_stoch": 0.6,
+        "checkpoint_min_delta": 0.0,
         "policy_delay": 1,
         "actor_lr": 1e-4,
         "critic_lr": 1e-4,

@@ -141,7 +141,6 @@ class Hyperparameters:
         self.α_lr           = config["α_lr"]
         self.auto_α         = config["auto_entropy"]
         self.auto_entropy   = config["auto_entropy"]
-        self.policy_delay   = config["policy_delay"]
         self.grad_clip      = config["grad_clip"]
         self.log_std_min    = config["log_std_min"]
         self.log_std_max    = config["log_std_max"]

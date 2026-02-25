@@ -29,7 +29,7 @@ sys.path.append(str(Path(__file__).resolve().parent))
 MODEL_NAME = Path(__file__).resolve().parent.name     # e.g., "1-IL"
 SPLIT = "test"                                       # "test", "run", ...
 
-TARIFFS = ["tar_s"] #, "tar_w", "tar_sw", "tar_tou", "tar_flat"]
+TARIFFS = ["tar_s", "tar_w", "tar_sw", "tar_tou", "tar_flat"]
 
 
 CONFIG_JSON = Path(__file__).resolve().parent / "config.json"
