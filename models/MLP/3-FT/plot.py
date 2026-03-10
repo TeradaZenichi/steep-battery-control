@@ -9,6 +9,7 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib import dates as mdates
+from matplotlib import font_manager
 
 
 # =============================================================================
@@ -21,6 +22,22 @@ sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(MLP_ROOT))
 sys.path.insert(0, str(MODEL_ROOT))
 sys.path.append(str(Path(__file__).resolve().parent))
+
+# -- Gulliver font ----------------------------------------------------------
+_font_path = str(PROJECT_ROOT / "data" / "Gulliver.otf")
+font_manager.fontManager.addfont(_font_path)
+_prop = font_manager.FontProperties(fname=_font_path)
+plt.rcParams['font.family'] = 'Gulliver'
+plt.rcParams['font.sans-serif'] = _prop.get_name()
+plt.rcParams.update({
+    "font.size": 10,
+    "axes.labelsize": 10,
+    "axes.titlesize": 10,
+    "xtick.labelsize": 10,
+    "ytick.labelsize": 10,
+    "legend.fontsize": 10,
+})
+plt.rcParams["axes.unicode_minus"] = False
 
 
 # =============================================================================
@@ -188,7 +205,7 @@ def _plot_actor(df: pd.DataFrame, title: str, out_path: Path) -> None:
 
     ax0.axhline(0.0, linewidth=1.0)
     ax0.set_ylabel("Power (kW)")
-    ax0.set_ylim(-2.5, 6.0)
+    ax0.set_ylim(-6.0, 13.0)
     ax0.grid(True, alpha=0.3)
     ax0.legend(loc="best")
 
@@ -197,7 +214,7 @@ def _plot_actor(df: pd.DataFrame, title: str, out_path: Path) -> None:
         ax1.plot(df.index, df[c].astype(float).values, label=c)
 
     ax1.set_ylabel("SoC")
-    ax1.set_ylim(0.0, 1.1)
+    ax1.set_ylim(-0.05, 1.05)
     ax1.set_xlabel("Time")
     ax1.grid(True, alpha=0.3)
     ax1.legend(loc="best")
@@ -266,7 +283,7 @@ def _plot_teacher(df: pd.DataFrame, title: str, out_path: Path) -> None:
 
     ax0.axhline(0.0, linewidth=1.0)
     ax0.set_ylabel("Power (kW)")
-    ax0.set_ylim(-2.5, 6.0)
+    ax0.set_ylim(-6.0, 13.0)
     ax0.grid(True, alpha=0.3)
     ax0.legend(loc="best")
 
@@ -275,7 +292,7 @@ def _plot_teacher(df: pd.DataFrame, title: str, out_path: Path) -> None:
         ax1.plot(df.index, df[c].astype(float).values, label=c)
 
     ax1.set_ylabel("SoC")
-    ax1.set_ylim(0.0, 1.1)
+    ax1.set_ylim(-0.05, 1.05)
     ax1.set_xlabel("Time")
     ax1.grid(True, alpha=0.3)
     ax1.legend(loc="best")
