@@ -1,0 +1,146 @@
+{
+  "description": "Larger sanity timing benchmark for v2 families (train/update path only, eval disabled).",
+  "timestamp_epoch": 1776176224.694163,
+  "results": [
+    {
+      "family": "ATTv2",
+      "sanity": {
+        "tariff": "tar_s",
+        "warmup_episodes": 1,
+        "train_episodes": 3,
+        "episode_length": 480,
+        "total_wall_sec": 176.3638273999677,
+        "warmup_sec": 1.2153888000175357,
+        "train_sec_sum_iteration": 175.13426040002378,
+        "total_steps": 2880,
+        "updates_logged": 2880,
+        "steps_per_sec": 16.444526578761906,
+        "updates_per_sec": 16.444526578761906
+      },
+      "defaults": {
+        "train_episodes": 500,
+        "warmup_episodes": 10,
+        "eval_every": 2
+      },
+      "projection_no_eval": {
+        "single_tariff_sec": 29201.19728800414,
+        "single_tariff_hours": 8.11144369111226,
+        "all_5_tariffs_sec": 146005.9864400207,
+        "all_5_tariffs_hours": 40.557218455561305
+      },
+      "output_dir": "C:\\Users\\Lucas\\Code\\steep-battery-control\\Results\\train\\_sanity_v2_timing\\ATTv2\\2-RL\\tar_s"
+    },
+    {
+      "family": "ATT_MEMv2",
+      "sanity": {
+        "tariff": "tar_s",
+        "warmup_episodes": 1,
+        "train_episodes": 3,
+        "episode_length": 480,
+        "total_wall_sec": 113.81301770004211,
+        "warmup_sec": 0.5620812000124715,
+        "train_sec_sum_iteration": 113.243660200038,
+        "total_steps": 2880,
+        "updates_logged": 2880,
+        "steps_per_sec": 25.431887267796327,
+        "updates_per_sec": 25.431887267796327
+      },
+      "defaults": {
+        "train_episodes": 500,
+        "warmup_episodes": 10,
+        "eval_every": 2
+      },
+      "projection_no_eval": {
+        "single_tariff_sec": 18879.564178673125,
+        "single_tariff_hours": 5.244323382964757,
+        "all_5_tariffs_sec": 94397.82089336563,
+        "all_5_tariffs_hours": 26.221616914823784
+      },
+      "output_dir": "C:\\Users\\Lucas\\Code\\steep-battery-control\\Results\\train\\_sanity_v2_timing\\ATT_MEMv2\\2-RL\\tar_s"
+    },
+    {
+      "family": "GRUv2",
+      "sanity": {
+        "tariff": "tar_s",
+        "warmup_episodes": 1,
+        "train_episodes": 3,
+        "episode_length": 480,
+        "total_wall_sec": 88.24688460002653,
+        "warmup_sec": 0.5445825000060722,
+        "train_sec_sum_iteration": 87.69470810005441,
+        "total_steps": 2880,
+        "updates_logged": 2880,
+        "steps_per_sec": 32.841206298492864,
+        "updates_per_sec": 32.841206298492864
+      },
+      "defaults": {
+        "train_episodes": 500,
+        "warmup_episodes": 10,
+        "eval_every": 2
+      },
+      "projection_no_eval": {
+        "single_tariff_sec": 14621.230508342464,
+        "single_tariff_hours": 4.061452918984018,
+        "all_5_tariffs_sec": 73106.15254171232,
+        "all_5_tariffs_hours": 20.30726459492009
+      },
+      "output_dir": "C:\\Users\\Lucas\\Code\\steep-battery-control\\Results\\train\\_sanity_v2_timing\\GRUv2\\2-RL\\tar_s"
+    },
+    {
+      "family": "TCNv2",
+      "sanity": {
+        "tariff": "tar_s",
+        "warmup_episodes": 1,
+        "train_episodes": 3,
+        "episode_length": 480,
+        "total_wall_sec": 175.94584970001597,
+        "warmup_sec": 0.47259220003616065,
+        "train_sec_sum_iteration": 175.46589330001734,
+        "total_steps": 2880,
+        "updates_logged": 2880,
+        "steps_per_sec": 16.41344620219544,
+        "updates_per_sec": 16.41344620219544
+      },
+      "defaults": {
+        "train_episodes": 500,
+        "warmup_episodes": 10,
+        "eval_every": 2
+      },
+      "projection_no_eval": {
+        "single_tariff_sec": 29249.041472003253,
+        "single_tariff_hours": 8.124733742223126,
+        "all_5_tariffs_sec": 146245.20736001627,
+        "all_5_tariffs_hours": 40.62366871111563
+      },
+      "output_dir": "C:\\Users\\Lucas\\Code\\steep-battery-control\\Results\\train\\_sanity_v2_timing\\TCNv2\\2-RL\\tar_s"
+    },
+    {
+      "family": "MLPv2",
+      "sanity": {
+        "tariff": "tar_s",
+        "warmup_episodes": 1,
+        "train_episodes": 3,
+        "episode_length": 480,
+        "total_wall_sec": 102.73285799997393,
+        "warmup_sec": 0.40197329997317865,
+        "train_sec_sum_iteration": 102.32144940004218,
+        "total_steps": 2880,
+        "updates_logged": 2880,
+        "steps_per_sec": 28.146591129101154,
+        "updates_per_sec": 28.146591129101154
+      },
+      "defaults": {
+        "train_episodes": 500,
+        "warmup_episodes": 10,
+        "eval_every": 2
+      },
+      "projection_no_eval": {
+        "single_tariff_sec": 17057.594633006764,
+        "single_tariff_hours": 4.738220731390768,
+        "all_5_tariffs_sec": 85287.97316503382,
+        "all_5_tariffs_hours": 23.69110365695384
+      },
+      "output_dir": "C:\\Users\\Lucas\\Code\\steep-battery-control\\Results\\train\\_sanity_v2_timing\\MLPv2\\2-RL\\tar_s"
+    }
+  ]
+}

@@ -1,4 +1,4 @@
-﻿from datetime import datetime
+from datetime import datetime
 from collections import deque
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -21,7 +21,13 @@ sys.path.append(str(ALGO_ROOT))
 
 from environment import SmartHomeEnv
 from model import load_actor, load_actor_state_dict_compat
-from opt import Teacher
+from test_utils.teacher_eval import load_teacher_summary
+from test_utils.variant_outputs import (
+    actor_operation_breakdown_filename,
+    actor_operation_filename,
+    update_variant_comparison_csv,
+    write_variant_summary,
+)
 
 # ------------------------------------------------------------
 # Reward breakdown helper
@@ -173,7 +179,7 @@ def mask_operation_with_ev_conn(operation: pd.DataFrame, raw_df: pd.DataFrame):
 def eval_actor_run_parallel(run, tariff, par, actor_cfg, actor_state_dict,
                             save_operation_csv, save_breakdown_csv,
                             include_breakdown_summary, folder, show_step_pbar,
-                            history_len, pbar_position):
+                            history_len, pbar_position, actor_variant):
     start = datetime.strptime(run["date"], "%Y-%m-%d %H:%M:%S")
     days = run["days"]
     bess_soc = run["soc"]
@@ -210,13 +216,13 @@ def eval_actor_run_parallel(run, tariff, par, actor_cfg, actor_state_dict,
 
     if save_operation_csv:
         actor_op_masked = mask_operation_with_ev_conn(actor_env.operation, df)
-        actor_op_masked.to_csv(folder / f"{run['name']}_actor_env_operation.csv", index_label="timestamp")
+        actor_op_masked.to_csv(folder / actor_operation_filename(run["name"], actor_variant), index_label="timestamp")
 
     actor_totals = None
     if save_breakdown_csv or include_breakdown_summary:
         actor_op_break, actor_totals = enrich_operation_with_reward_breakdown(actor_env.operation, df, par)
         if save_breakdown_csv:
-            actor_op_break.to_csv(folder / f"{run['name']}_actor_env_operation_breakdown.csv", index_label="timestamp")
+            actor_op_break.to_csv(folder / actor_operation_breakdown_filename(run["name"], actor_variant), index_label="timestamp")
 
     return {
         "name": run["name"],
@@ -286,6 +292,7 @@ for tariff in tqdm(["tar_s", "tar_w", "tar_sw", "tar_tou", "tar_flat"], desc="Ta
                 eval_actor_run_parallel, run, tariff, par, model_cfg["actor"],
                 actor_state_dict, SAVE_OPERATION_CSV, SAVE_BREAKDOWN_CSV,
                 INCLUDE_BREAKDOWN_SUMMARY, folder, SHOW_ACTOR_STEP_PBAR, HISTORY_LEN, 2 + idx,
+                ACTOR_VARIANT,
             ): run["name"]
             for idx, run in enumerate(runs)
         }
@@ -296,57 +303,18 @@ for tariff in tqdm(["tar_s", "tar_w", "tar_sw", "tar_tou", "tar_flat"], desc="Ta
                 actor_results[result["name"]] = result
                 pbar_actor_runs.update(1)
 
-    for run in tqdm(runs, desc=f"{tariff} teacher runs (sequential)", position=1, dynamic_ncols=True, leave=False):
-        start = datetime.strptime(run["date"], "%Y-%m-%d %H:%M:%S")
-        days = run["days"]
-        BESS_SoC = run["soc"]
-        max_steps = int((24 * 60 * float(days)) / float(par["general"]["timestep"]))
-
-        with tqdm(total=4, desc=f"{run['name']} teacher stages", position=2, dynamic_ncols=True, leave=False) as pbar_teacher_stage:
-            pbar_teacher_stage.set_postfix_str("loading data")
-            df = pd.read_csv(run["dataset"], sep=";", parse_dates=["timestamp"], dayfirst=True, index_col="timestamp")
-            pbar_teacher_stage.update(1)
-
-            pbar_teacher_stage.set_postfix_str("building MILP")
-            teacher = Teacher(df, par, start, days, BESS_SoC, tariff)
-            teacher.build()
-            pbar_teacher_stage.update(1)
-
-            pbar_teacher_stage.set_postfix_str("solving MILP")
-            teacher.solve()
-            teacher_operation = teacher.get_operation()
-            pbar_teacher_stage.update(1)
-
-            if SAVE_OPERATION_CSV:
-                teacher_operation.to_csv(folder / f"{run['name']}_teacher_operation.csv", index_label="timestamp")
-
-            teacher_env = SmartHomeEnv(df, par, start, days, BESS_SoC, tariff)
-
-            done = False
-            teacher_reward = 0.0
-            pbar_teacher_stage.set_postfix_str("env rollout")
-            with tqdm(total=max_steps, desc=f"{run['name']} teacher", position=3, dynamic_ncols=True, leave=False) as pbar_teacher:
-                while not done:
-                    ts = teacher_env.sim.step
-                    if ts not in teacher_operation.index:
-                        raise KeyError(f"Timestamp {ts} not found in teacher operation index.")
-                    action = teacher.get_actions(ts)
-
-                    state, reward, terminated, truncated, info = teacher_env.step(action)
-                    done = terminated or truncated
-                    teacher_reward += reward
-                    pbar_teacher.update(1)
-            pbar_teacher_stage.update(1)
-
-        if SAVE_OPERATION_CSV:
-            teacher_op_masked = mask_operation_with_ev_conn(teacher_env.operation, df)
-            teacher_op_masked.to_csv(folder / f"{run['name']}_env_operation.csv", index_label="timestamp")
-
-        teacher_totals = None
-        if SAVE_BREAKDOWN_CSV or INCLUDE_BREAKDOWN_SUMMARY:
-            teacher_op_break, teacher_totals = enrich_operation_with_reward_breakdown(teacher_env.operation, df, par)
-            if SAVE_BREAKDOWN_CSV:
-                teacher_op_break.to_csv(folder / f"{run['name']}_env_operation_breakdown.csv", index_label="timestamp")
+    teacher_summary = load_teacher_summary(folder)
+    missing_teacher_runs = [run["name"] for run in runs if run["name"] not in teacher_summary]
+    if missing_teacher_runs:
+        preview = ", ".join(missing_teacher_runs[:5])
+        raise RuntimeError(
+            f"Teacher summary mismatch for {tariff}: missing {len(missing_teacher_runs)} of {len(runs)} runs ({preview}). "
+            "Run generate_teacher_test_baseline.py so teacher uses all tariffs and the same test set."
+        )
+    for run in runs:
+        teacher_info = teacher_summary[run["name"]]
+        teacher_reward = float(teacher_info["teacher_reward"])
+        teacher_totals = teacher_info.get("teacher_breakdown", None)
 
         actor_info = actor_results.get(run["name"], {})
         actor_reward = float(actor_info.get("actor_reward", np.nan))
@@ -356,6 +324,8 @@ for tariff in tqdm(["tar_s", "tar_w", "tar_sw", "tar_tou", "tar_flat"], desc="Ta
             "teacher_reward": float(teacher_reward),
             "actor_reward": float(actor_reward),
             "reward_diff": float(actor_reward - teacher_reward),
+            "actor_variant": ACTOR_VARIANT,
+            "actor_checkpoint": ACTOR_FILENAME,
             "teacher_breakdown": teacher_totals if INCLUDE_BREAKDOWN_SUMMARY else None,
             "actor_breakdown": actor_totals if INCLUDE_BREAKDOWN_SUMMARY else None,
             "dataset": run["dataset"],
@@ -364,7 +334,13 @@ for tariff in tqdm(["tar_s", "tar_w", "tar_sw", "tar_tou", "tar_flat"], desc="Ta
             "soc": run["soc"],
         }
 
-    with open(folder / "summary.json", "w", encoding="utf-8") as f:
-        json.dump(summary, f, indent=4)
+    write_variant_summary(
+        folder=folder,
+        summary=summary,
+        actor_variant=ACTOR_VARIANT,
+        write_legacy_summary_for_combo=True,
+    )
+
+    update_variant_comparison_csv(folder.parent)
 
 

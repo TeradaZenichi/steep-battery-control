@@ -592,7 +592,7 @@ class Train:
         no_improve_evals_det = int(self.eval_count if self.last_improvement_eval_count_det < 0 else self.eval_count - self.last_improvement_eval_count_det)
         no_improve_evals_stoch = int(self.eval_count if self.last_improvement_eval_count_stoch < 0 else self.eval_count - self.last_improvement_eval_count_stoch)
         no_improve_evals_combo = int(self.eval_count if self.last_improvement_eval_count_combo < 0 else self.eval_count - self.last_improvement_eval_count_combo)
-        no_improve_evals = int(max(no_improve_evals_det, no_improve_evals_stoch, no_improve_evals_combo))
+        no_improve_evals = int(min(no_improve_evals_det, no_improve_evals_stoch, no_improve_evals_combo))
 
         no_improve_episodes_det = int((episode + 1) if self.last_improvement_episode_det < 0 else episode - self.last_improvement_episode_det)
         no_improve_episodes_stoch = int((episode + 1) if self.last_improvement_episode_stoch < 0 else episode - self.last_improvement_episode_stoch)

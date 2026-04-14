@@ -254,25 +254,79 @@ class GRUActor(nn.Module):
         return action_proj, logp, mu_action_proj, cost, hT
 
 
-class Critic(nn.Module):
-    def __init__(self, input_dim: int, hidden_dims: list[int], head_dim: int):
+class GRUQNet(nn.Module):
+    def __init__(
+        self,
+        state_dim: int,
+        action_dim: int,
+        hidden_dims: list[int],
+        head_dim: int,
+        hidden_dim: int = 256,
+        num_layers: int = 1,
+    ):
         super().__init__()
+        self.gru = nn.GRU(
+            input_size=state_dim,
+            hidden_size=hidden_dim,
+            num_layers=num_layers,
+            batch_first=True,
+        )
 
-        def build():
-            layers = []
-            prev = input_dim
-            for dim in hidden_dims:
-                layers += [nn.Linear(prev, dim), nn.ReLU()]
-                prev = dim
-            layers += [nn.Linear(prev, head_dim), nn.ReLU(), nn.Linear(head_dim, 1)]
-            return nn.Sequential(*layers)
+        layers = []
+        prev = hidden_dim + action_dim
+        for dim in hidden_dims:
+            layers += [nn.Linear(prev, dim), nn.ReLU()]
+            prev = dim
+        layers += [nn.Linear(prev, head_dim), nn.ReLU(), nn.Linear(head_dim, 1)]
+        self.q_head = nn.Sequential(*layers)
 
-        self.q1 = build()
-        self.q2 = build()
+    @staticmethod
+    def _to_seq(x: torch.Tensor) -> tuple[torch.Tensor, bool]:
+        if x.dim() == 2:
+            return x.unsqueeze(1), True
+        if x.dim() == 3:
+            return x, False
+        raise ValueError(f"Expected x with 2 or 3 dims, got {x.dim()}")
 
     def forward(self, obs: torch.Tensor, act: torch.Tensor):
-        x = torch.cat([obs, act], dim=-1)
-        return self.q1(x), self.q2(x)
+        x_seq, _ = self._to_seq(obs)
+        out, _ = self.gru(x_seq)
+        summary = out[:, -1, :]
+        q_input = torch.cat([summary, act], dim=-1)
+        return self.q_head(q_input)
+
+
+class Critic(nn.Module):
+    def __init__(
+        self,
+        state_dim: int,
+        action_dim: int,
+        hidden_dims: list[int],
+        head_dim: int,
+        hidden_dim: int = 256,
+        num_layers: int = 1,
+    ):
+        super().__init__()
+
+        self.q1 = GRUQNet(
+            state_dim=state_dim,
+            action_dim=action_dim,
+            hidden_dims=hidden_dims,
+            head_dim=head_dim,
+            hidden_dim=hidden_dim,
+            num_layers=num_layers,
+        )
+        self.q2 = GRUQNet(
+            state_dim=state_dim,
+            action_dim=action_dim,
+            hidden_dims=hidden_dims,
+            head_dim=head_dim,
+            hidden_dim=hidden_dim,
+            num_layers=num_layers,
+        )
+
+    def forward(self, obs: torch.Tensor, act: torch.Tensor):
+        return self.q1(obs, act), self.q2(obs, act)
 
 
 def load_actor(actor_cfg: dict, device=None):
@@ -292,13 +346,15 @@ def load_actor(actor_cfg: dict, device=None):
 
 
 def load_critic(critic_cfg: dict, device=None):
-    input_dim = critic_cfg.get("input_dim")
-    if input_dim is None:
-        state_dim = critic_cfg.get("state_dim")
-        action_dim = critic_cfg.get("action_dim")
-        if state_dim is None or action_dim is None:
-            raise KeyError("critic config must provide either 'input_dim' or both 'state_dim' and 'action_dim'")
-        input_dim = int(state_dim) + int(action_dim)
+    state_dim = critic_cfg.get("state_dim")
+    action_dim = int(critic_cfg.get("action_dim", 3))
+    if state_dim is None:
+        input_dim = critic_cfg.get("input_dim")
+        if input_dim is None:
+            raise KeyError("critic config must provide either 'state_dim' or 'input_dim'")
+        state_dim = int(input_dim) - action_dim
+        if state_dim <= 0:
+            raise ValueError("critic input_dim must be greater than action_dim")
 
     head_dim = critic_cfg.get("head_dim")
     if head_dim is None:
@@ -308,9 +364,12 @@ def load_critic(critic_cfg: dict, device=None):
         head_dim = int(hidden_dims[-1])
 
     critics = Critic(
-        input_dim=input_dim,
+        state_dim=int(state_dim),
+        action_dim=action_dim,
         hidden_dims=critic_cfg["hidden_dims"],
         head_dim=head_dim,
+        hidden_dim=critic_cfg.get("hidden_dim", 256),
+        num_layers=critic_cfg.get("num_layers", 1),
     )
     if device is not None:
         critics = critics.to(device)

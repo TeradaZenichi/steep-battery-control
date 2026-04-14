@@ -133,7 +133,13 @@ class Train:
 
         self.actor = load_actor(self.actor_cfg, device=DEVICE)
         self.critic_cfg = dict(self.model_cfg["critic"])
-        self.critic_cfg["input_dim"] = int(self.model_cfg["actor"]["input_dim"]) * int(self.history_len) + int(self.model_cfg["actor"]["output_dim"])
+        self.critic_cfg.setdefault("state_dim", int(self.model_cfg["actor"]["input_dim"]))
+        self.critic_cfg.setdefault("action_dim", int(self.model_cfg["actor"]["output_dim"]))
+        self.critic_cfg.setdefault("d_model", int(self.model_cfg["actor"].get("d_model", 64)))
+        self.critic_cfg.setdefault("nhead", int(self.model_cfg["actor"].get("nhead", 4)))
+        self.critic_cfg.setdefault("num_layers", int(self.model_cfg["actor"].get("num_layers", 2)))
+        self.critic_cfg.setdefault("d_ff", int(self.model_cfg["actor"].get("d_ff", 128)))
+        self.critic_cfg.setdefault("max_seq_len", int(self.model_cfg["actor"].get("max_seq_len", 288)))
         self.critics = load_critic(self.critic_cfg, device=DEVICE)
         self.critics_target = load_critic(self.critic_cfg, device=DEVICE)
         self.critics_target.load_state_dict(self.critics.state_dict(), strict=True)
@@ -354,8 +360,8 @@ class Train:
         done = batch["done"]
         gamma_pow = batch["gamma_pow"]
 
-        obs_critic = obs.reshape(obs.shape[0], -1) if obs.dim() == 3 else obs
-        next_obs_critic = next_obs.reshape(next_obs.shape[0], -1) if next_obs.dim() == 3 else next_obs
+        obs_critic = obs
+        next_obs_critic = next_obs
 
         with torch.no_grad():
             next_action, logp_next, _, cost_next = self.actor.sample(next_obs)
@@ -589,7 +595,7 @@ class Train:
         no_improve_evals_det = int(self.eval_count if self.last_improvement_eval_count_det < 0 else self.eval_count - self.last_improvement_eval_count_det)
         no_improve_evals_stoch = int(self.eval_count if self.last_improvement_eval_count_stoch < 0 else self.eval_count - self.last_improvement_eval_count_stoch)
         no_improve_evals_combo = int(self.eval_count if self.last_improvement_eval_count_combo < 0 else self.eval_count - self.last_improvement_eval_count_combo)
-        no_improve_evals = int(max(no_improve_evals_det, no_improve_evals_stoch, no_improve_evals_combo))
+        no_improve_evals = int(min(no_improve_evals_det, no_improve_evals_stoch, no_improve_evals_combo))
 
         no_improve_episodes_det = int((episode + 1) if self.last_improvement_episode_det < 0 else episode - self.last_improvement_episode_det)
         no_improve_episodes_stoch = int((episode + 1) if self.last_improvement_episode_stoch < 0 else episode - self.last_improvement_episode_stoch)

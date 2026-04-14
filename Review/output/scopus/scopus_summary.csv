@@ -1,0 +1,9 @@
+query_id,description,records,output_csv
+Q1_hems_der_tariffs,HEMS with PV+BESS+EV under dynamic tariffs,17,Review\output\scopus\Q1_hems_der_tariffs.csv
+Q2_milp_mpc_online,Classical optimization baselines,22,Review\output\scopus\Q2_milp_mpc_online.csv
+Q3_rl_energy,RL for energy management,243,Review\output\scopus\Q3_rl_energy.csv
+Q4_offpolicy_vs_onpolicy,SAC and other RL families,300,Review\output\scopus\Q4_offpolicy_vs_onpolicy.csv
+Q5_safe_rl_constraints,Safe/Constrained RL and action projection,89,Review\output\scopus\Q5_safe_rl_constraints.csv
+Q6_pomdp_temporal_models,Partial observability and temporal architectures,158,Review\output\scopus\Q6_pomdp_temporal_models.csv
+Q7_il_plus_rl,Imitation learning + RL hybrid pipelines,4,Review\output\scopus\Q7_il_plus_rl.csv
+Q8_multi_tariff_generalization,Tariff-aware robustness/generalization,55,Review\output\scopus\Q8_multi_tariff_generalization.csv

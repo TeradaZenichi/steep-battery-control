@@ -11,6 +11,20 @@ The split keeps one heavy TCN family on each side and balances medium models.
 
 ## 1) Run training jobs on each machine
 
+Quick wrappers (shell scripts):
+
+```bash
+# Machine A (defaults to --stage all)
+./scripts/distributed/run_machine_A.sh
+
+# Machine B (defaults to --stage all)
+./scripts/distributed/run_machine_B.sh
+
+# Example with options passthrough
+./scripts/distributed/run_machine_A.sh --stage rl --stop-on-error
+./scripts/distributed/run_machine_B.sh --stage il --no-live-output
+```
+
 From project root:
 
 ```powershell
@@ -32,6 +46,16 @@ Optional stage filters:
 ```
 
 Outputs are written under `Results/analysis/distributed/`.
+
+By default, the runner streams each child `train.py` output to the console
+(so `tqdm` progress bars are visible) and also saves the same output to per-job
+log files.
+
+If you prefer silent execution (logs only):
+
+```powershell
+.\.venv\Scripts\python.exe .\scripts\distributed\run_split_training.py --machine A --stage all --no-live-output
+```
 
 ## 2) Package results from remote machine
 

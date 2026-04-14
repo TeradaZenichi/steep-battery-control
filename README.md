@@ -25,3 +25,11 @@ Distributed training helpers:
 .\.venv\Scripts\python.exe .\scripts\distributed\run_split_training.py --machine A --stage all
 .\.venv\Scripts\python.exe .\scripts\distributed\run_split_training.py --machine B --stage all
 ```
+
+Teacher-only test baseline (always runs all tariffs and the same `test` set from each `config.json`; teacher results are cached with readable run-based file names and reused across architectures, then `teacher_summary.json` is written per suite/tariff):
+
+```powershell
+.\.venv\Scripts\python.exe .\generate_teacher_test_baseline.py --family all --stage all
+```
+
+Then run model `test.py` scripts to evaluate only actor checkpoints against saved teacher summaries.

@@ -133,8 +133,11 @@ class Train:
         self.actor_cfg["parameters"] = str((PROJECT_ROOT / "data" / "parameters.json").resolve())
 
         self.actor = load_actor(self.actor_cfg, device=DEVICE)
-        self.critics = load_critic(self.model_cfg["critic"], device=DEVICE)
-        self.critics_target = load_critic(self.model_cfg["critic"], device=DEVICE)
+        self.critic_cfg = dict(self.model_cfg["critic"])
+        self.critic_cfg.setdefault("state_dim", int(self.model_cfg["actor"]["input_dim"]))
+        self.critic_cfg.setdefault("action_dim", int(self.model_cfg["actor"]["output_dim"]))
+        self.critics = load_critic(self.critic_cfg, device=DEVICE)
+        self.critics_target = load_critic(self.critic_cfg, device=DEVICE)
         self.critics_target.load_state_dict(self.critics.state_dict(), strict=True)
 
         self.temperature = Temperature(
@@ -627,7 +630,7 @@ class Train:
         no_improve_evals_det = int(self.eval_count if self.last_improvement_eval_count_det < 0 else self.eval_count - self.last_improvement_eval_count_det)
         no_improve_evals_stoch = int(self.eval_count if self.last_improvement_eval_count_stoch < 0 else self.eval_count - self.last_improvement_eval_count_stoch)
         no_improve_evals_combo = int(self.eval_count if self.last_improvement_eval_count_combo < 0 else self.eval_count - self.last_improvement_eval_count_combo)
-        no_improve_evals = int(max(no_improve_evals_det, no_improve_evals_stoch, no_improve_evals_combo))
+        no_improve_evals = int(min(no_improve_evals_det, no_improve_evals_stoch, no_improve_evals_combo))
 
         no_improve_episodes_det = int((episode + 1) if self.last_improvement_episode_det < 0 else episode - self.last_improvement_episode_det)
         no_improve_episodes_stoch = int((episode + 1) if self.last_improvement_episode_stoch < 0 else episode - self.last_improvement_episode_stoch)

@@ -20,7 +20,7 @@ sys.path.append(str(ALGO_ROOT))
 
 from environment import SmartHomeEnv
 from model import load_actor
-from opt import Teacher
+from test_utils.teacher_eval import load_teacher_summary
 
 # ------------------------------------------------------------
 # Reward breakdown helper
@@ -366,78 +366,18 @@ for tariff in tqdm(["tar_s", "tar_w", "tar_sw", "tar_tou", "tar_flat"], desc="Ta
                 actor_results[result["name"]] = result
                 pbar_actor_runs.update(1)
 
-    for run in tqdm(runs, desc=f"{tariff} teacher runs (sequential)", position=1, dynamic_ncols=True, leave=False):
-        start = datetime.strptime(run["date"], "%Y-%m-%d %H:%M:%S")
-        days = run["days"]
-        BESS_SoC = run["soc"]
-        max_steps = int((24 * 60 * float(days)) / float(par["general"]["timestep"]))
-
-        with tqdm(total=4, desc=f"{run['name']} teacher stages", position=2, dynamic_ncols=True, leave=False) as pbar_teacher_stage:
-            pbar_teacher_stage.set_postfix_str("loading data")
-            df = pd.read_csv(
-                run["dataset"],
-                sep=";",
-                parse_dates=["timestamp"],
-                dayfirst=True,
-                index_col="timestamp",
-            )
-            pbar_teacher_stage.update(1)
-
-            pbar_teacher_stage.set_postfix_str("building MILP")
-            teacher = Teacher(df, par, start, days, BESS_SoC, tariff)
-            teacher.build()
-            pbar_teacher_stage.update(1)
-
-            pbar_teacher_stage.set_postfix_str("solving MILP")
-            teacher.solve()
-            teacher_operation = teacher.get_operation()
-            pbar_teacher_stage.update(1)
-
-            if SAVE_OPERATION_CSV:
-                teacher_operation.to_csv(
-                    folder / f"{run['name']}_teacher_operation.csv",
-                    index_label="timestamp",
-                )
-
-            teacher_env = SmartHomeEnv(df, par, start, days, BESS_SoC, tariff)
-
-            done = False
-            teacher_reward = 0.0
-            pbar_teacher_stage.set_postfix_str("env rollout")
-            with tqdm(total=max_steps, desc=f"{run['name']} teacher", position=3, dynamic_ncols=True, leave=False) as pbar_teacher:
-                while not done:
-                    ts = teacher_env.sim.step
-                    if ts not in teacher_operation.index:
-                        raise KeyError(f"Timestamp {ts} not found in teacher operation index.")
-                    action = teacher.get_actions(ts)
-
-                    state, reward, terminated, truncated, info = teacher_env.step(action)
-
-                    done = terminated or truncated
-                    teacher_reward += reward
-                    pbar_teacher.update(1)
-            pbar_teacher_stage.update(1)
-
-        if SAVE_OPERATION_CSV:
-            teacher_op_masked = mask_operation_with_ev_conn(teacher_env.operation, df)
-            teacher_op_masked.to_csv(
-                folder / f"{run['name']}_env_operation.csv",
-                index_label="timestamp",
-            )
-
-        # Reward breakdown (teacher executed in env)
-        teacher_totals = None
-        if SAVE_BREAKDOWN_CSV or INCLUDE_BREAKDOWN_SUMMARY:
-            teacher_op_break, teacher_totals = enrich_operation_with_reward_breakdown(
-                teacher_env.operation,
-                df,
-                par,
-            )
-            if SAVE_BREAKDOWN_CSV:
-                teacher_op_break.to_csv(
-                    folder / f"{run['name']}_env_operation_breakdown.csv",
-                    index_label="timestamp",
-                )
+    teacher_summary = load_teacher_summary(folder)
+    missing_teacher_runs = [run["name"] for run in runs if run["name"] not in teacher_summary]
+    if missing_teacher_runs:
+        preview = ", ".join(missing_teacher_runs[:5])
+        raise RuntimeError(
+            f"Teacher summary mismatch for {tariff}: missing {len(missing_teacher_runs)} of {len(runs)} runs ({preview}). "
+            "Run generate_teacher_test_baseline.py so teacher uses all tariffs and the same test set."
+        )
+    for run in runs:
+        teacher_info = teacher_summary[run["name"]]
+        teacher_reward = float(teacher_info["teacher_reward"])
+        teacher_totals = teacher_info.get("teacher_breakdown", None)
 
         actor_info = actor_results.get(run["name"], {})
         actor_reward = float(actor_info.get("actor_reward", np.nan))

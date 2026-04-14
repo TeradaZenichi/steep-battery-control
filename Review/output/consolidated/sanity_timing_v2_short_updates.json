@@ -1,0 +1,56 @@
+{
+  "description": "Short sanity timing benchmark for v2 families with forced short-run updates (n_step=1 for benchmark only, eval disabled).",
+  "timestamp_epoch": 1776188794.3038917,
+  "results": [
+    {
+      "family": "ATTv2",
+      "wall_sec": 20.57322739996016,
+      "train_sec": 20.56481619999977,
+      "steps": 240,
+      "updates_logged": 237,
+      "proj_single_tariff_with_warmup_noeval_h": 2.913348961666634,
+      "proj_all_5_tariffs_with_warmup_noeval_h": 14.56674480833317,
+      "output_dir": "C:\\Users\\Lucas\\Code\\steep-battery-control\\Results\\train\\_sanity_v2_timing_short_updates\\ATTv2\\2-RL\\tar_s"
+    },
+    {
+      "family": "ATT_MEMv2",
+      "wall_sec": 20.502975000010338,
+      "train_sec": 20.49770179996267,
+      "steps": 240,
+      "updates_logged": 237,
+      "proj_single_tariff_with_warmup_noeval_h": 2.9038410883280448,
+      "proj_all_5_tariffs_with_warmup_noeval_h": 14.519205441640224,
+      "output_dir": "C:\\Users\\Lucas\\Code\\steep-battery-control\\Results\\train\\_sanity_v2_timing_short_updates\\ATT_MEMv2\\2-RL\\tar_s"
+    },
+    {
+      "family": "GRUv2",
+      "wall_sec": 15.953589600045234,
+      "train_sec": 15.947171999956481,
+      "steps": 240,
+      "updates_logged": 237,
+      "proj_single_tariff_with_warmup_noeval_h": 2.259182699993835,
+      "proj_all_5_tariffs_with_warmup_noeval_h": 11.295913499969174,
+      "output_dir": "C:\\Users\\Lucas\\Code\\steep-battery-control\\Results\\train\\_sanity_v2_timing_short_updates\\GRUv2\\2-RL\\tar_s"
+    },
+    {
+      "family": "TCNv2",
+      "wall_sec": 20.587842800014187,
+      "train_sec": 20.583169499994256,
+      "steps": 240,
+      "updates_logged": 237,
+      "proj_single_tariff_with_warmup_noeval_h": 2.915949012499186,
+      "proj_all_5_tariffs_with_warmup_noeval_h": 14.579745062495931,
+      "output_dir": "C:\\Users\\Lucas\\Code\\steep-battery-control\\Results\\train\\_sanity_v2_timing_short_updates\\TCNv2\\2-RL\\tar_s"
+    },
+    {
+      "family": "MLPv2",
+      "wall_sec": 19.064597600023262,
+      "train_sec": 19.056591400003526,
+      "steps": 240,
+      "updates_logged": 237,
+      "proj_single_tariff_with_warmup_noeval_h": 2.6996837816671664,
+      "proj_all_5_tariffs_with_warmup_noeval_h": 13.498418908335832,
+      "output_dir": "C:\\Users\\Lucas\\Code\\steep-battery-control\\Results\\train\\_sanity_v2_timing_short_updates\\MLPv2\\2-RL\\tar_s"
+    }
+  ]
+}

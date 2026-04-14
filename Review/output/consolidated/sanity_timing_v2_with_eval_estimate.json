@@ -1,0 +1,45 @@
+{
+  "base_noeval_hours_5tar": {
+    "ATTv2": 14.57,
+    "ATT_MEMv2": 14.52,
+    "GRUv2": 11.3,
+    "TCNv2": 14.58,
+    "MLPv2": 13.5
+  },
+  "factors": {
+    "ratio_min": 1.096,
+    "ratio_mean": 1.1725,
+    "ratio_max": 1.249
+  },
+  "projected_with_eval_hours_5tar": {
+    "ATTv2": {
+      "hours_min_factor_1p096": 15.968720000000001,
+      "hours_mean_factor_1p1725": 17.083325000000002,
+      "hours_max_factor_1p249": 18.197930000000003
+    },
+    "ATT_MEMv2": {
+      "hours_min_factor_1p096": 15.913920000000001,
+      "hours_mean_factor_1p1725": 17.0247,
+      "hours_max_factor_1p249": 18.13548
+    },
+    "GRUv2": {
+      "hours_min_factor_1p096": 12.384800000000002,
+      "hours_mean_factor_1p1725": 13.249250000000002,
+      "hours_max_factor_1p249": 14.113700000000001
+    },
+    "TCNv2": {
+      "hours_min_factor_1p096": 15.979680000000002,
+      "hours_mean_factor_1p1725": 17.09505,
+      "hours_max_factor_1p249": 18.210420000000003
+    },
+    "MLPv2": {
+      "hours_min_factor_1p096": 14.796000000000001,
+      "hours_mean_factor_1p1725": 15.828750000000001,
+      "hours_max_factor_1p249": 16.861500000000003
+    }
+  },
+  "notes": [
+    "Ratios are calibrated from short runs with updates enabled.",
+    "GRUv2 and TCNv2 evaluation path raised runtime errors in subprocess actor loading during calibration."
+  ]
+}
