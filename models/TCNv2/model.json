@@ -1,0 +1,17 @@
+{
+    "actor": {
+        "input_dim": 23,
+        "num_channels": [128, 128, 128],
+        "kernel_size": 3,
+        "dropout": 0.0,
+        "head_dim": 128,
+        "output_dim": 3,
+        "parameters": "data/parameters.json"
+    },
+    "critic": {
+        "state_dim": 23,
+        "action_dim": 3,
+        "hidden_dims": [256, 256],
+        "head_dim": 256
+    }
+}

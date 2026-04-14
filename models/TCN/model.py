@@ -364,6 +364,79 @@ def load_actor(actor_cfg: dict, device=None):
     return actor
 
 
+def _extract_actor_state_dict(checkpoint: dict) -> dict:
+    if not isinstance(checkpoint, dict):
+        raise TypeError("checkpoint must be a dict")
+
+    if any(isinstance(v, torch.Tensor) for v in checkpoint.values()):
+        return checkpoint
+
+    for key in ("actor_state_dict", "state_dict", "model_state_dict"):
+        nested = checkpoint.get(key)
+        if isinstance(nested, dict):
+            return nested
+
+    return checkpoint
+
+
+def _strip_module_prefix(state_dict: dict) -> dict:
+    if not any(k.startswith("module.") for k in state_dict.keys()):
+        return state_dict
+
+    out = {}
+    for key, value in state_dict.items():
+        if key.startswith("module."):
+            out[key[len("module."):]] = value
+        else:
+            out[key] = value
+    return out
+
+
+def _is_legacy_tcn_actor_state_dict(state_dict: dict) -> bool:
+    has_legacy_norm = any(".norm1." in k or ".norm2." in k for k in state_dict.keys())
+    has_legacy_conv_weight = any(
+        ("tcn.network." in k) and k.endswith(".conv.weight") and (".parametrizations.weight." not in k)
+        for k in state_dict.keys()
+    )
+    return has_legacy_norm or has_legacy_conv_weight
+
+
+def _convert_legacy_tcn_actor_state_dict(state_dict: dict) -> dict:
+    converted = {}
+    for key, value in state_dict.items():
+        if ".norm1." in key or ".norm2." in key:
+            continue
+
+        if ("tcn.network." in key) and key.endswith(".conv.weight") and (".parametrizations.weight." not in key):
+            prefix = key[:-len("weight")]
+            converted[prefix + "parametrizations.weight.original1"] = value
+            if isinstance(value, torch.Tensor) and value.dim() > 1:
+                dims = tuple(range(1, value.dim()))
+                converted[prefix + "parametrizations.weight.original0"] = torch.linalg.vector_norm(
+                    value,
+                    ord=2,
+                    dim=dims,
+                    keepdim=True,
+                )
+            else:
+                converted[prefix + "parametrizations.weight.original0"] = value.abs()
+            continue
+
+        converted[key] = value
+
+    return converted
+
+
+def load_actor_state_dict_compat(actor: nn.Module, checkpoint: dict, strict: bool = True):
+    state_dict = _extract_actor_state_dict(checkpoint)
+    state_dict = _strip_module_prefix(state_dict)
+
+    if _is_legacy_tcn_actor_state_dict(state_dict):
+        state_dict = _convert_legacy_tcn_actor_state_dict(state_dict)
+
+    return actor.load_state_dict(state_dict, strict=strict)
+
+
 def load_critic(critic_cfg: dict, device=None):
     input_dim = critic_cfg.get("input_dim")
     if input_dim is None:

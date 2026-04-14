@@ -140,7 +140,6 @@ class BatteryEnv():
         self.soc = SoC
         self.E = self.soc * self.Emax
         self.ncycles = parameters["ncycles"]
-        self.sat_penalty = parameters["sat_penalty"]
         self.ramp_penalty = parameters["ramp_penalty"]
         self.soc_power = parameters["soc_power_curve_pu"]
         self.history = []   #(command, action, soc, energy)
@@ -168,14 +167,10 @@ class BatteryEnv():
             P = max(P, (Emin - self.E) * self.η / self.sim.Δt)
             self.E = max(self.E + P * self.sim.Δt / self.η, Emin)
 
-        eps = 1e-3
-        sat = max(0.0, abs(P - Pcmd) - eps)
-        sat_penalty = sat * self.sat_penalty * self.sim.Δt
-
         self.soc = np.clip(self.E / self.Emax, 0.0, 1.0)
         self.history.append((Pcmd, P, self.soc, self.E))
 
-        cost = (self.capex / (self.Emax * self.ncycles)) * abs(P) * self.sim.Δt + sat_penalty
+        cost = (self.capex / (self.Emax * self.ncycles)) * abs(P) * self.sim.Δt
         return P, cost
 
 
@@ -204,7 +199,6 @@ class EVEnv():
         self.soc_critical = parameters["soc_critical"]
         self.fast_tariff = parameters["fast_tariff"] # this a tariff multiplier to grid tariff during fast charging 
 
-        self.sat_penalty = parameters["sat_penalty"]
         self.soc_power = parameters["soc_power_curve_pu"]
 
         self.prev_conn = 0
@@ -327,12 +321,6 @@ class EVEnv():
             self.status = "connected"
 
         self.soc = float(np.clip(self.E / self.Emax, 0.0, 1.0))
-
-        # Saturation penalty only when controllable (connected)
-        if self.status == "connected":
-            eps = 1e-3
-            sat = max(0.0, abs(P - command) - eps)
-            cost += sat * self.sat_penalty * self.sim.Δt
 
         # Teacher-like SoC min shortfall penalty only during normal connected control.
         # Departure is no longer penalized directly; arrival already accounts expected recharge cost.

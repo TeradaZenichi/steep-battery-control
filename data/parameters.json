@@ -32,7 +32,6 @@
     "soc_max": 0.9,
     "capex": 987,
     "ncycles": 6000,
-    "sat_penalty": 1.0,
     "ramp_penalty": 0.05,
     "soc_power_curve_pu": {
       "soc": [0.10, 0.20, 0.40, 0.60, 0.80, 0.90],
@@ -61,7 +60,6 @@
     "column": "ev_status",
     "capex": 370,
     "ncycles": 671,
-    "sat_penalty": 0.0001,
     "ramp_penalty": 0.0001,
     "soc_critical": 0.2,
     "fast_tariff": 3.0,

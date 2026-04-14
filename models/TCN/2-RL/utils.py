@@ -17,7 +17,7 @@ sys.path.append(str(ALGO_ROOT))
 
 
 from environment import SmartHomeEnv
-from model import load_actor
+from model import load_actor, load_actor_state_dict_compat
 
 _EVAL_DF_CACHE = {}
 
@@ -325,7 +325,7 @@ def _eval_worker(run, parameters, tariff, actor_cfg, actor_state_dict, episode_l
     )
 
     actor = load_actor(actor_cfg, device=torch.device("cpu"))
-    actor.load_state_dict(actor_state_dict, strict=True)
+    load_actor_state_dict_compat(actor, actor_state_dict, strict=True)
     actor.eval()
 
     obs = env.reset()

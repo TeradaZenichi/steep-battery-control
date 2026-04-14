@@ -1,4 +1,4 @@
-from datetime import datetime
+﻿from datetime import datetime
 from collections import deque
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -6,6 +6,7 @@ import pandas as pd
 import numpy as np
 import torch
 import json
+import argparse
 import sys
 from tqdm import tqdm
 
@@ -60,13 +61,8 @@ def enrich_operation_with_reward_breakdown(operation: pd.DataFrame, raw_df: pd.D
 
     Pcmd_b = op["bess_cmd"].astype(float) * Pmax_b
     P_b = op["PBESS"].astype(float)
-    eps = 1e-3
-    sat_b = (P_b - Pcmd_b).abs()
-    sat_b = (sat_b - eps).clip(lower=0.0)
-
     op["bess_wear_cost"] = wear_coeff_b * P_b.abs() * dt
-    op["bess_sat_cost"]  = sat_b * float(bess["sat_penalty"]) * dt
-    op["bess_cost_recon"] = op["bess_wear_cost"] + op["bess_sat_cost"]
+    op["bess_cost_recon"] = op["bess_wear_cost"]
     op["bess_cost_err"] = op["bess_cost"].astype(float) - op["bess_cost_recon"]
 
     ev = par["EV"]
@@ -78,13 +74,7 @@ def enrich_operation_with_reward_breakdown(operation: pd.DataFrame, raw_df: pd.D
     cmd_ev = np.where(a_ev >= 0.0, a_ev * Pmax_c, a_ev * Pmax_d)
     cmd_ev = pd.Series(cmd_ev, index=op.index)
     P_ev = op["PEV"].astype(float)
-
-    sat_ev = (P_ev - cmd_ev).abs()
-    sat_ev = (sat_ev - eps).clip(lower=0.0)
-
     op["ev_wear_cost"] = wear_coeff_e * P_ev.abs() * dt
-    op["ev_sat_cost"]  = sat_ev * float(ev["sat_penalty"]) * dt * connected_mask
-
     Emax_e = float(ev["Emax"])
     soc_min = float(ev["soc_min"])
     sev = (Emax_e * soc_min - op["EEV"].astype(float)).clip(lower=0.0)
@@ -115,7 +105,7 @@ def enrich_operation_with_reward_breakdown(operation: pd.DataFrame, raw_df: pd.D
         op["ev_arrival_fast_cost"] = 0.0
 
     op["ev_cost_recon"] = (
-        op["ev_wear_cost"] + op["ev_sat_cost"] + op["ev_soc_min_cost"] + op["ev_arrival_fast_cost"]
+        op["ev_wear_cost"] + op["ev_soc_min_cost"] + op["ev_arrival_fast_cost"]
     )
     op["ev_cost_err"] = op["ev_cost"].astype(float) - op["ev_cost_recon"]
 
@@ -126,13 +116,13 @@ def enrich_operation_with_reward_breakdown(operation: pd.DataFrame, raw_df: pd.D
         totals[k] = float(op[k].astype(float).sum())
     for k in ["energy_cost_load", "energy_cost_bess", "energy_cost_ev", "energy_cost_pv"]:
         totals[k] = float(op[k].astype(float).sum())
-    for k in ["bess_wear_cost", "bess_sat_cost"]:
+    for k in ["bess_wear_cost"]:
         totals[k] = float(op[k].astype(float).sum())
-    for k in ["ev_wear_cost", "ev_sat_cost", "ev_soc_min_cost", "ev_arrival_fast_cost"]:
+    for k in ["ev_wear_cost", "ev_soc_min_cost", "ev_arrival_fast_cost"]:
         totals[k] = float(op[k].astype(float).sum())
 
     totals["total_penalties"] = float(
-        totals["grid_penalty"] + totals["bess_sat_cost"] + totals["ev_sat_cost"]
+        totals["grid_penalty"]
         + totals["ev_soc_min_cost"] + totals["ev_arrival_fast_cost"]
     )
     totals["reward_components"] = {
@@ -258,6 +248,23 @@ SAVE_OPERATION_CSV = True
 SAVE_BREAKDOWN_CSV = True
 INCLUDE_BREAKDOWN_SUMMARY = True
 
+parser = argparse.ArgumentParser(description="Evaluate RL actor checkpoint variant")
+parser.add_argument(
+    "--actor-variant",
+    choices=["combo", "det", "stoch"],
+    default="combo",
+    help="Actor checkpoint variant: combo=0.5*det+0.5*stoch, det, or stoch.",
+)
+args, _ = parser.parse_known_args()
+ACTOR_VARIANT = str(args.actor_variant).lower()
+ACTOR_FILE_BY_VARIANT = {
+    "combo": "best_actor_eval.pt",
+    "det": "best_actor_eval_det.pt",
+    "stoch": "best_actor_eval_stoch.pt",
+}
+ACTOR_FILENAME = ACTOR_FILE_BY_VARIANT[ACTOR_VARIANT]
+print(f"[test] actor_variant={ACTOR_VARIANT} checkpoint={ACTOR_FILENAME}")
+
 for tariff in tqdm(["tar_s", "tar_w", "tar_sw", "tar_tou", "tar_flat"], desc="Tariffs", position=0, dynamic_ncols=True):
 
     folder = PROJECT_ROOT / "Results" / "test" / "ATT_MEM" / "2-RL" / tariff
@@ -266,7 +273,7 @@ for tariff in tqdm(["tar_s", "tar_w", "tar_sw", "tar_tou", "tar_flat"], desc="Ta
     summary = {}
 
     actor_state_dict = torch.load(
-        PROJECT_ROOT / "Results" / "train" / "ATT_MEM" / "2-RL" / tariff / "best_actor_eval.pt",
+        PROJECT_ROOT / "Results" / "train" / "ATT_MEM" / "2-RL" / tariff / ACTOR_FILENAME,
         map_location=torch.device("cpu"),
     )
 
@@ -320,19 +327,11 @@ for tariff in tqdm(["tar_s", "tar_w", "tar_sw", "tar_tou", "tar_flat"], desc="Ta
             pbar_teacher_stage.set_postfix_str("env rollout")
             with tqdm(total=max_steps, desc=f"{run['name']} teacher", position=3, dynamic_ncols=True, leave=False) as pbar_teacher:
                 while not done:
-                    pbess = float(teacher_operation.loc[teacher_env.sim.step, "PBESS"])
-                    pev   = float(teacher_operation.loc[teacher_env.sim.step, "PEV"])
-                    chi   = float(teacher_operation.loc[teacher_env.sim.step, "χPV"])
+                    ts = teacher_env.sim.step
+                    if ts not in teacher_operation.index:
+                        raise KeyError(f"Timestamp {ts} not found in teacher operation index.")
+                    action = teacher.get_actions(ts)
 
-                    a_bess = float(np.clip(pbess / teacher_env.bess.Pmax, -1.0, 1.0))
-                    if pev >= 0.0:
-                        a_ev = pev / teacher_env.ev.Pmax_c
-                    else:
-                        a_ev = pev / teacher_env.ev.Pmax_d
-                    a_ev = float(np.clip(a_ev, -1.0, 1.0))
-                    chi = float(np.clip(chi, 0.0, 1.0))
-
-                    action = [a_bess, a_ev, chi]
                     state, reward, terminated, truncated, info = teacher_env.step(action)
                     done = terminated or truncated
                     teacher_reward += reward
@@ -367,3 +366,5 @@ for tariff in tqdm(["tar_s", "tar_w", "tar_sw", "tar_tou", "tar_flat"], desc="Ta
 
     with open(folder / "summary.json", "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=4)
+
+

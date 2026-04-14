@@ -1,4 +1,4 @@
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+﻿from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from collections import deque
 from pathlib import Path
 from tqdm import tqdm
@@ -8,6 +8,7 @@ import numpy as np
 import torch
 import json
 import random
+import time
 import sys
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]  # .../steep-battery-control
@@ -47,7 +48,6 @@ class Train:
         self.update_every_steps = int(self.train_cfg["train"].get("update_every_steps", 1))
         self.eval_workers = int(self.train_cfg["train"].get("eval_workers", 1))
         self.train_env_workers = int(self.train_cfg["train"].get("train_env_workers", 1))
-        self.eval_ma_window = int(self.train_cfg["train"].get("eval_ma_window", 10))
         self.early_stop_patience = int(self.train_cfg["train"].get("early_stop_patience", 120))
         self.min_episodes_before_early_stop = int(self.train_cfg["train"].get("min_episodes_before_early_stop", 150))
         self.checkpoint_min_delta = float(self.train_cfg["train"].get("checkpoint_min_delta", 0.0))
@@ -66,6 +66,9 @@ class Train:
         self.checkpoint_weight_det /= w_sum
         self.checkpoint_weight_stoch /= w_sum
 
+        self.checkpoint_weight_det = 0.5
+        self.checkpoint_weight_stoch = 0.5
+        self.checkpoint_metric = "mean_0p5"
         self.env_cy = SmartHomeEnv(
             self.episodegen.df_cy,
             self.parameters,
@@ -103,9 +106,13 @@ class Train:
         self.best_ckpt_path  = self.folder / "best_checkpoint_eval.pt"
         self.best_meta_path  = self.folder / "best_eval_meta.json"
 
-        self.best_actor_ma_path = self.folder / "best_actor_eval_ma.pt"
-        self.best_ckpt_ma_path  = self.folder / "best_checkpoint_eval_ma.pt"
-        self.best_meta_ma_path  = self.folder / "best_eval_ma_meta.json"
+
+        self.best_actor_det_path = self.folder / "best_actor_eval_det.pt"
+        self.best_ckpt_det_path  = self.folder / "best_checkpoint_eval_det.pt"
+        self.best_meta_det_path  = self.folder / "best_eval_det_meta.json"
+        self.best_actor_stoch_path = self.folder / "best_actor_eval_stoch.pt"
+        self.best_ckpt_stoch_path  = self.folder / "best_checkpoint_eval_stoch.pt"
+        self.best_meta_stoch_path  = self.folder / "best_eval_stoch_meta.json"
 
         self.buffer = ReplayBuffer(
             capacity=self.hp.buffer_size,
@@ -145,18 +152,25 @@ class Train:
 
         self.best_eval_reward  = -float("inf")
         self.best_eval_episode = -1
-        self.best_eval_ma = -float("inf")
-        self.best_eval_ma_episode = -1
+        self.best_eval_reward_stoch = -float("inf")
+        self.best_eval_episode_stoch = -1
         self.best_checkpoint_score = -float("inf")
         self.best_checkpoint_episode = -1
         self.best_train_reward = -float("inf")
+        self.last_improvement_episode_det = -1
+        self.last_improvement_episode_stoch = -1
+        self.last_improvement_episode_combo = -1
         self.last_improvement_episode = -1
+        self.last_improvement_eval_count_det = -1
+        self.last_improvement_eval_count_stoch = -1
+        self.last_improvement_eval_count_combo = -1
         self.last_improvement_eval_count = -1
         self.eval_count = 0
+        self.no_improve_evals_det = 0
+        self.no_improve_evals_stoch = 0
+        self.no_improve_evals_combo = 0
 
         self.eval_rewards = []
-        self.eval_ma_rewards = []
-        self.eval_window = deque(maxlen=max(1, self.eval_ma_window))
         self.train_rewards = []
         self.q1_values = []
         self.q2_values = []
@@ -184,13 +198,13 @@ class Train:
             "train_reward_total",
             "eval_reward_det",
             "eval_reward",
-            "eval_reward_ma",
             "eval_reward_stoch",
             "checkpoint_score",
             "checkpoint_metric",
             "best_train_reward",
             "best_eval_reward",
-            "best_eval_ma",
+            "best_eval_reward_stoch",
+            "best_eval_reward_combo",
             "best_checkpoint_score",
             "q1_mean",
             "q2_mean",
@@ -216,6 +230,10 @@ class Train:
             "alpha_loss",
             "no_improve_episodes",
             "no_improve_evals",
+            "no_improve_evals_det",
+            "no_improve_evals_stoch",
+            "no_improve_evals_combo",
+            "iteration_time_sec",
         ])
         self.audit_csv = self.folder / "audit_training.csv"
 
@@ -238,17 +256,15 @@ class Train:
         torch.save(ckpt, filepath)
 
 
-    def _save_best_eval(self, eval_reward_value: float, episode: int, checkpoint_score: float, eval_reward_stoch: float) -> None:
+    def _save_best_eval(self, eval_reward_det: float, episode: int, checkpoint_score: float, eval_reward_stoch: float) -> None:
         torch.save(self.actor.state_dict(), self.best_actor_path)
         self.save_checkpoint(self.best_ckpt_path)
         meta = {
-            "best_eval_reward": float(eval_reward_value),
-            "best_eval_episode": int(episode),
-            "best_eval_reward_stoch": float(eval_reward_stoch),
             "best_checkpoint_score": float(checkpoint_score),
             "best_checkpoint_episode": int(episode),
-            "checkpoint_metric": str(self.checkpoint_metric),
-            "checkpoint_use_combined_score": bool(self.checkpoint_use_combined_score),
+            "eval_reward_det": float(eval_reward_det),
+            "eval_reward_stoch": float(eval_reward_stoch),
+            "checkpoint_metric": "mean_0p5",
             "checkpoint_weight_det": float(self.checkpoint_weight_det),
             "checkpoint_weight_stoch": float(self.checkpoint_weight_stoch),
             "tariff": self.tariff
@@ -257,18 +273,34 @@ class Train:
             json.dump(meta, f, indent=2)
 
 
-    def _save_best_eval_ma(self, eval_reward_ma: float, episode: int) -> None:
-        torch.save(self.actor.state_dict(), self.best_actor_ma_path)
-        self.save_checkpoint(self.best_ckpt_ma_path)
+    def _save_best_eval_det(self, eval_reward_det: float, episode: int, checkpoint_score: float, eval_reward_stoch: float) -> None:
+        torch.save(self.actor.state_dict(), self.best_actor_det_path)
+        self.save_checkpoint(self.best_ckpt_det_path)
         meta = {
-            "best_eval_ma": float(eval_reward_ma),
-            "best_eval_ma_episode": int(episode),
-            "eval_ma_window": int(self.eval_ma_window),
+            "best_eval_reward": float(eval_reward_det),
+            "best_eval_episode": int(episode),
+            "checkpoint_score_at_best_det": float(checkpoint_score),
+            "eval_reward_stoch_at_best_det": float(eval_reward_stoch),
+            "checkpoint_weight_det": float(self.checkpoint_weight_det),
+            "checkpoint_weight_stoch": float(self.checkpoint_weight_stoch),
             "tariff": self.tariff
         }
-        with open(self.best_meta_ma_path, "w", encoding="utf-8") as f:
+        with open(self.best_meta_det_path, "w", encoding="utf-8") as f:
             json.dump(meta, f, indent=2)
 
+    def _save_best_eval_stoch(self, eval_reward_stoch: float, episode: int, checkpoint_score: float, eval_reward_det: float) -> None:
+        torch.save(self.actor.state_dict(), self.best_actor_stoch_path)
+        self.save_checkpoint(self.best_ckpt_stoch_path)
+        meta = {
+            "best_eval_reward_stoch": float(eval_reward_stoch),
+            "best_eval_episode_stoch": int(episode),
+            "checkpoint_score_at_best_stoch": float(checkpoint_score),
+            "eval_reward_det_at_best_stoch": float(eval_reward_det),
+            "checkpoint_metric": "mean_0p5",
+            "tariff": self.tariff
+        }
+        with open(self.best_meta_stoch_path, "w", encoding="utf-8") as f:
+            json.dump(meta, f, indent=2)
 
     def eval(self, deterministic: bool = True) -> float:
         eval_desc = "Eval Det" if deterministic else "Eval Stoch"
@@ -516,63 +548,58 @@ class Train:
         return float(reward["total"]), int(steps)
 
 
-    def _run_eval_and_checkpoint(self, episode: int) -> tuple[float, float, float, float, int, int]:
+    def _run_eval_and_checkpoint(self, episode: int) -> tuple[float, float, float, int, int]:
         eval_reward_det = np.nan
-        eval_reward_ma = np.nan
         eval_reward_stoch = np.nan
         checkpoint_score = np.nan
-        improved = False
 
         if episode % self.hp.eval_every == 0:
             eval_reward_det = float(self.eval(deterministic=True))
             eval_reward_stoch = float(self.eval(deterministic=False))
             self.eval_rewards.append(eval_reward_det)
 
-            if self.checkpoint_metric == "det":
-                checkpoint_score = float(eval_reward_det)
-            elif self.checkpoint_metric == "stoch":
-                checkpoint_score = float(eval_reward_stoch)
-            elif self.checkpoint_metric == "mean":
-                checkpoint_score = float(
-                    self.checkpoint_weight_det * eval_reward_det
-                    + self.checkpoint_weight_stoch * eval_reward_stoch
-                )
-            else:
-                checkpoint_score = float(
-                    self.checkpoint_weight_det * eval_reward_det
-                    + self.checkpoint_weight_stoch * eval_reward_stoch
-                )
+            checkpoint_score = float(0.5 * eval_reward_det + 0.5 * eval_reward_stoch)
 
             self.eval_count += 1
 
-            if eval_reward_det > self.best_eval_reward:
+            if eval_reward_det > self.best_eval_reward + self.checkpoint_min_delta:
                 self.best_eval_reward = eval_reward_det
                 self.best_eval_episode = int(episode)
+                self._save_best_eval_det(eval_reward_det, episode, checkpoint_score, eval_reward_stoch)
+                self.last_improvement_episode_det = int(episode)
+                self.last_improvement_eval_count_det = int(self.eval_count)
+
+            if eval_reward_stoch > self.best_eval_reward_stoch + self.checkpoint_min_delta:
+                self.best_eval_reward_stoch = eval_reward_stoch
+                self.best_eval_episode_stoch = int(episode)
+                self._save_best_eval_stoch(eval_reward_stoch, episode, checkpoint_score, eval_reward_det)
+                self.last_improvement_episode_stoch = int(episode)
+                self.last_improvement_eval_count_stoch = int(self.eval_count)
 
             if checkpoint_score > self.best_checkpoint_score + self.checkpoint_min_delta:
                 self.best_checkpoint_score = checkpoint_score
                 self.best_checkpoint_episode = int(episode)
                 self._save_best_eval(eval_reward_det, episode, checkpoint_score, eval_reward_stoch)
-                improved = True
+                self.last_improvement_episode_combo = int(episode)
+                self.last_improvement_eval_count_combo = int(self.eval_count)
 
-            self.eval_window.append(checkpoint_score)
-            eval_reward_ma = float(np.mean(self.eval_window))
-            self.eval_ma_rewards.append(eval_reward_ma)
+        no_improve_evals_det = int(self.eval_count if self.last_improvement_eval_count_det < 0 else self.eval_count - self.last_improvement_eval_count_det)
+        no_improve_evals_stoch = int(self.eval_count if self.last_improvement_eval_count_stoch < 0 else self.eval_count - self.last_improvement_eval_count_stoch)
+        no_improve_evals_combo = int(self.eval_count if self.last_improvement_eval_count_combo < 0 else self.eval_count - self.last_improvement_eval_count_combo)
+        no_improve_evals = int(max(no_improve_evals_det, no_improve_evals_stoch, no_improve_evals_combo))
 
-            if eval_reward_ma > self.best_eval_ma + self.checkpoint_min_delta:
-                self.best_eval_ma = eval_reward_ma
-                self.best_eval_ma_episode = int(episode)
-                self._save_best_eval_ma(eval_reward_ma, episode)
-                improved = True
+        no_improve_episodes_det = int((episode + 1) if self.last_improvement_episode_det < 0 else episode - self.last_improvement_episode_det)
+        no_improve_episodes_stoch = int((episode + 1) if self.last_improvement_episode_stoch < 0 else episode - self.last_improvement_episode_stoch)
+        no_improve_episodes_combo = int((episode + 1) if self.last_improvement_episode_combo < 0 else episode - self.last_improvement_episode_combo)
+        no_improve_episodes = int(max(no_improve_episodes_det, no_improve_episodes_stoch, no_improve_episodes_combo))
 
-        if improved:
-            self.last_improvement_episode = int(episode)
-            self.last_improvement_eval_count = int(self.eval_count)
+        self.no_improve_evals_det = no_improve_evals_det
+        self.no_improve_evals_stoch = no_improve_evals_stoch
+        self.no_improve_evals_combo = no_improve_evals_combo
+        self.last_improvement_episode = max(self.last_improvement_episode_det, self.last_improvement_episode_stoch, self.last_improvement_episode_combo)
+        self.last_improvement_eval_count = max(self.last_improvement_eval_count_det, self.last_improvement_eval_count_stoch, self.last_improvement_eval_count_combo)
 
-        no_improve_evals = 0 if self.last_improvement_eval_count < 0 else int(self.eval_count - self.last_improvement_eval_count)
-        no_improve_episodes = 0 if self.last_improvement_episode < 0 else int(episode - self.last_improvement_episode)
-        return eval_reward_det, eval_reward_ma, eval_reward_stoch, checkpoint_score, no_improve_episodes, no_improve_evals
-
+        return eval_reward_det, eval_reward_stoch, checkpoint_score, no_improve_episodes, no_improve_evals
 
     def _aggregate_episode_update_metrics(self, q_start: int) -> dict:
         q_end = len(self.q1_values)
@@ -628,7 +655,7 @@ class Train:
         print(f"[history_len] {tariff} = {hl} (from IL HPO)")
         return hl
 
-    def _build_audit_row(self, episode: int, train_total: float, eval_reward_det: float, eval_reward_ma: float, eval_reward_stoch: float, checkpoint_score: float, metrics: dict, steps: int, no_improve_episodes: int, no_improve_evals: int = 0) -> dict:
+    def _build_audit_row(self, episode: int, train_total: float, eval_reward_det: float, eval_reward_stoch: float, checkpoint_score: float, metrics: dict, steps: int, iteration_time_sec: float, no_improve_episodes: int, no_improve_evals: int = 0) -> dict:
         alpha_val = float(self.temperature.alpha.detach().cpu())
 
         return {
@@ -636,13 +663,14 @@ class Train:
             "train_reward_total": train_total,
             "eval_reward_det": float(eval_reward_det) if not np.isnan(eval_reward_det) else np.nan,
             "eval_reward": float(eval_reward_det) if not np.isnan(eval_reward_det) else np.nan,
-            "eval_reward_ma": float(eval_reward_ma) if not np.isnan(eval_reward_ma) else np.nan,
             "eval_reward_stoch": float(eval_reward_stoch) if not np.isnan(eval_reward_stoch) else np.nan,
             "checkpoint_score": float(checkpoint_score) if not np.isnan(checkpoint_score) else np.nan,
             "checkpoint_metric": str(self.checkpoint_metric),
             "best_train_reward": float(self.best_train_reward),
             "best_eval_reward": float(self.best_eval_reward),
-            "best_eval_ma": float(self.best_eval_ma),
+            "best_eval_reward_det": float(self.best_eval_reward),
+            "best_eval_reward_stoch": float(self.best_eval_reward_stoch),
+            "best_eval_reward_combo": float(self.best_checkpoint_score),
             "best_checkpoint_score": float(self.best_checkpoint_score),
             "q1_mean": float(metrics["q1_mean"]) if not np.isnan(metrics["q1_mean"]) else np.nan,
             "q2_mean": float(metrics["q2_mean"]) if not np.isnan(metrics["q2_mean"]) else np.nan,
@@ -668,20 +696,23 @@ class Train:
             "alpha_loss": float(metrics["alpha_loss_ep"]) if not np.isnan(metrics["alpha_loss_ep"]) else np.nan,
             "no_improve_episodes": int(no_improve_episodes),
             "no_improve_evals": int(no_improve_evals),
+            "no_improve_evals_det": int(self.no_improve_evals_det),
+            "no_improve_evals_stoch": int(self.no_improve_evals_stoch),
+            "no_improve_evals_combo": int(self.no_improve_evals_combo),
+            "iteration_time_sec": float(iteration_time_sec),
         }
 
 
-    def _update_train_postfix(self, p_outer, train_total: float, eval_reward_det: float, eval_reward_ma: float, eval_reward_stoch: float, checkpoint_score: float, metrics: dict, no_improve_episodes: int, no_improve_evals: int = 0):
+    def _update_train_postfix(self, p_outer, train_total: float, eval_reward_det: float, eval_reward_stoch: float, checkpoint_score: float, metrics: dict, no_improve_episodes: int, no_improve_evals: int = 0):
         p_outer.set_postfix({
             "train_total": f"{train_total:.2f}",
             "eval": f"{eval_reward_det:.2f}" if not np.isnan(eval_reward_det) else "-",
-            "eval_ma": f"{eval_reward_ma:.2f}" if not np.isnan(eval_reward_ma) else "-",
             "eval_stoch": f"{eval_reward_stoch:.2f}" if not np.isnan(eval_reward_stoch) else "-",
             "ckpt": f"{checkpoint_score:.2f}" if not np.isnan(checkpoint_score) else "-",
             "ckpt_m": str(self.checkpoint_metric),
-            "best_eval": f"{self.best_eval_reward:.2f}",
-            "best_eval_ma": f"{self.best_eval_ma:.2f}",
-            "best_ckpt": f"{self.best_checkpoint_score:.2f}",
+            "best_det": f"{self.best_eval_reward:.2f}",
+            "best_stoch": f"{self.best_eval_reward_stoch:.2f}",
+            "best_combo": f"{self.best_checkpoint_score:.2f}",
             "alpha": f"{float(self.temperature.alpha.detach().cpu()):.3f}",
             "lambda": f"{float(self.lmbda.detach().cpu().item()):.3f}",
             "dual": int(self.dual_enabled),
@@ -695,7 +726,6 @@ class Train:
         return (
             self.early_stop_patience > 0
             and episode >= self.min_episodes_before_early_stop
-            and self.last_improvement_eval_count >= 0
             and no_improve_evals >= self.early_stop_patience
         )
 
@@ -708,6 +738,7 @@ class Train:
 
         print("Starting training episodes...")
         for episode in (p_outer := tqdm(range(self.hp.train_episodes), desc="Training Episodes", position=0, dynamic_ncols=True)):
+            episode_start_time = time.perf_counter()
             q_start = len(self.q1_values)
             train_total, steps = self._collect_training_episode(episode)
             self.train_rewards.append(train_total)
@@ -716,17 +747,18 @@ class Train:
             if train_total > self.best_train_reward:
                 self.best_train_reward = train_total
 
-            eval_reward_det, eval_reward_ma, eval_reward_stoch, checkpoint_score, no_improve_episodes, no_improve_evals = self._run_eval_and_checkpoint(episode)
+            eval_reward_det, eval_reward_stoch, checkpoint_score, no_improve_episodes, no_improve_evals = self._run_eval_and_checkpoint(episode)
             metrics = self._aggregate_episode_update_metrics(q_start)
+            iteration_time_sec = float(time.perf_counter() - episode_start_time)
             row = self._build_audit_row(
                 episode=episode,
                 train_total=train_total,
                 eval_reward_det=eval_reward_det,
-                eval_reward_ma=eval_reward_ma,
                 eval_reward_stoch=eval_reward_stoch,
                 checkpoint_score=checkpoint_score,
                 metrics=metrics,
                 steps=steps,
+                iteration_time_sec=iteration_time_sec,
                 no_improve_episodes=no_improve_episodes,
                 no_improve_evals=no_improve_evals,
             )
@@ -735,7 +767,7 @@ class Train:
             if ((episode + 1) % self.audit_every_episodes == 0) or ((episode + 1) == self.hp.train_episodes):
                 self.audit_df.to_csv(self.audit_csv, index=False)
 
-            self._update_train_postfix(p_outer, train_total, eval_reward_det, eval_reward_ma, eval_reward_stoch, checkpoint_score, metrics, no_improve_episodes, no_improve_evals)
+            self._update_train_postfix(p_outer, train_total, eval_reward_det, eval_reward_stoch, checkpoint_score, metrics, no_improve_episodes, no_improve_evals)
 
             if self._should_early_stop(episode, no_improve_evals):
                 print(
@@ -754,3 +786,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+
+

@@ -47,7 +47,7 @@ plt.rcParams["axes.unicode_minus"] = False
 MODEL_NAME = Path(__file__).resolve().parent.name     # e.g., "GRU"
 SPLIT = "test"                                       # "test", "run", ...
 
-TARIFFS = ["tar_s"] #, "tar_w", "tar_sw", "tar_tou", "tar_flat"]
+TARIFFS = ["tar_s", "tar_w", "tar_sw", "tar_tou", "tar_flat"]
 
 
 CONFIG_JSON = Path(__file__).resolve().parent / "config.json"
