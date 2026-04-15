@@ -13,10 +13,10 @@ import sys
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]  # .../steep-battery-control
 MODEL_ROOT   = Path(__file__).resolve().parents[2]  # .../models
-GRU_ROOT     = Path(__file__).resolve().parents[1]  # .../models/GRU
-ALGO_ROOT    = Path(__file__).resolve().parent      # .../models/GRU/2-RL
+GRUv2_ROOT   = Path(__file__).resolve().parents[1]  # .../models/GRUv2
+ALGO_ROOT    = Path(__file__).resolve().parent      # .../models/GRUv2/2-RL
 sys.path.insert(0, str(ALGO_ROOT))
-sys.path.insert(1, str(GRU_ROOT))
+sys.path.insert(1, str(GRUv2_ROOT))
 sys.path.insert(2, str(MODEL_ROOT))
 sys.path.insert(3, str(PROJECT_ROOT))
 
@@ -31,7 +31,7 @@ class Train:
     def __init__(self, tariff: str):
         self.tariff = tariff
 
-        with open(GRU_ROOT / "model.json", encoding="utf-8") as f:
+        with open(GRUv2_ROOT / "model.json", encoding="utf-8") as f:
             self.model_cfg = json.load(f)
 
         with open(Path(__file__).resolve().parent / "config.json", encoding="utf-8") as f:
@@ -370,6 +370,12 @@ class Train:
         return float(np.mean(rewards))
 
 
+    @staticmethod
+    def _ensure_finite(name: str, tensor: torch.Tensor) -> None:
+        if not torch.isfinite(tensor).all():
+            raise RuntimeError(f"Non-finite tensor detected in update(): {name}")
+
+
     def update(self):
         """Single SAC update step."""
         batch = self.buffer.sample(self.hp.batch_size)
@@ -394,9 +400,15 @@ class Train:
             alpha = self.temperature.alpha
 
             backup = rew + gamma_pow * (1.0 - done) * (q_next - alpha * logp_next)
+            self._ensure_finite("q_next", q_next)
+            self._ensure_finite("logp_next", logp_next)
+            self._ensure_finite("backup", backup)
 
         q1, q2 = self.critics(obs_critic, act)
         critic_loss = torch.mean((q1 - backup) ** 2) + torch.mean((q2 - backup) ** 2)
+        self._ensure_finite("q1", q1)
+        self._ensure_finite("q2", q2)
+        self._ensure_finite("critic_loss", critic_loss)
 
         self.opt_critic.zero_grad()
         critic_loss.backward()
@@ -415,6 +427,10 @@ class Train:
         actor_term_q = -q_pi
         actor_term_dual = self.lmbda * cost if self.dual_enabled else torch.zeros_like(cost)
         actor_loss = torch.mean(actor_term_entropy + actor_term_q + actor_term_dual)
+        self._ensure_finite("logp_pi", logp_pi)
+        self._ensure_finite("q_pi", q_pi)
+        self._ensure_finite("cost", cost)
+        self._ensure_finite("actor_loss", actor_loss)
 
         self.opt_actor.zero_grad()
         actor_loss.backward()
@@ -430,6 +446,8 @@ class Train:
             self.opt_alpha.step()
         else:
             alpha_loss = torch.tensor(0.0, device=DEVICE)
+
+        self._ensure_finite("alpha_loss", alpha_loss)
 
         # Target critics soft update
         for param, target_param in zip(self.critics.parameters(), self.critics_target.parameters()):
@@ -689,7 +707,7 @@ class Train:
 
 
     def _load_il_hpo(self, tariff: str) -> dict:
-        il_path = PROJECT_ROOT / "Results" / "train" / "GRU" / "1-IL" / tariff / "best_params.json"
+        il_path = PROJECT_ROOT / "Results" / "train" / "GRUv2" / "1-IL" / tariff / "best_params.json"
         if not il_path.exists():
             return {}
         try:

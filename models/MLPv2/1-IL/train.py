@@ -11,9 +11,9 @@ import sys
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]  # .../steep-battery-control
 MODEL_ROOT   = Path(__file__).resolve().parents[2]  # .../models
-MLP_ROOT     = Path(__file__).resolve().parent.parent   # .../models/MLP
+MLPv2_ROOT   = Path(__file__).resolve().parent.parent   # .../models/MLPv2
 sys.path.insert(0, str(PROJECT_ROOT))
-sys.path.insert(0, str(MLP_ROOT))
+sys.path.insert(0, str(MLPv2_ROOT))
 sys.path.insert(0, str(MODEL_ROOT))
 sys.path.append(str(Path(__file__).resolve().parent))
 
@@ -40,7 +40,7 @@ def _chronological_split(x_i: np.ndarray, y_i: np.ndarray, eval_frac: float):
 
 
 def main():
-    with open(Path(__file__).resolve().parent.parent / "model.json") as f:
+    with open(MLPv2_ROOT / "model.json", encoding="utf-8") as f:
         model_cfg = json.load(f)
 
     with open(Path(__file__).resolve().parent / "config.json") as f:
@@ -53,9 +53,10 @@ def main():
     np.random.seed(train_cfg["seed"])
 
     eval_frac = float(train_cfg["training"]["eval"])
+    grad_clip_norm = float(train_cfg["training"].get("grad_clip_norm", 1.0))
 
     for tariff in ["tar_s", "tar_w", "tar_sw", "tar_tou", "tar_flat"]:
-        folder = PROJECT_ROOT / "Results" / "train" / "MLP" / "1-IL" / tariff
+        folder = PROJECT_ROOT / "Results" / "train" / "MLPv2" / "1-IL" / tariff
         folder.mkdir(parents=True, exist_ok=True)
 
         # HPO must use the SAME split logic (see hpo.py below)
@@ -119,18 +120,26 @@ def main():
             dynamic_ncols=True
         )):
             model.train()
-            for xb, yb in (p_inner := tqdm(
+            for step_idx, (xb, yb) in enumerate((p_inner := tqdm(
                 train_loader,
                 desc="  Training",
                 position=1,
                 leave=False,
                 dynamic_ncols=True
-            )):
+            )), start=1):
                 xb, yb = xb.to(DEVICE), yb.to(DEVICE)
                 optimizer.zero_grad()
                 # BC with forward(): do NOT use projection here (as you requested)
                 loss = criterion(model(xb), yb)
+
+                if not torch.isfinite(loss):
+                    raise RuntimeError(
+                        f"Non-finite train loss detected at tariff={tariff}, epoch={epoch}, step={step_idx}."
+                    )
+
                 loss.backward()
+                if grad_clip_norm > 0.0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip_norm)
                 optimizer.step()
 
                 p_inner.set_postfix({"train_loss": f"{loss.item():.4f}"})
@@ -143,6 +152,9 @@ def main():
                         xb, yb = xb.to(DEVICE), yb.to(DEVICE)
                         val_loss += criterion(model(xb), yb).item()
                 val_loss /= len(val_loader)
+
+            if not np.isfinite(val_loss):
+                raise RuntimeError(f"Non-finite val_loss detected at tariff={tariff}, epoch={epoch}.")
 
             p_outer.set_postfix({"val_loss": f"{val_loss:.4f}"})
 
@@ -163,6 +175,9 @@ def main():
                 patience += 1
                 if patience >= train_cfg["training"]["patience"]:
                     break
+
+        if not (folder / "best.pth").exists():
+            raise RuntimeError(f"Training finished without best checkpoint for tariff={tariff}.")
 
 
 if __name__ == "__main__":
