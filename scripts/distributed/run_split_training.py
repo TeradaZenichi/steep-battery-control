@@ -27,6 +27,58 @@ STAGE_MAP = {
 }
 
 
+def job_key(job: dict) -> tuple[str, str]:
+    return job["model"], job["stage"]
+
+
+def checkpoint_path(machine: str, stage_mode: str) -> Path:
+    return ANALYSIS_DIR / f"train_split_machine_{machine}_{stage_mode}_latest.json"
+
+
+def load_checkpoint(path: Path, machine: str, stage_mode: str, jobs: list[dict]) -> dict | None:
+    if not path.exists():
+        return None
+
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+    if data.get("machine") != machine or data.get("stage") != stage_mode:
+        return None
+
+    plan = data.get("jobs_plan") or []
+    current_plan = [{"model": j["model"], "stage": j["stage"]} for j in jobs]
+    if plan != current_plan:
+        return None
+
+    if not isinstance(data.get("results"), list):
+        return None
+
+    return data
+
+
+def save_checkpoint(
+    path: Path,
+    machine: str,
+    stage_mode: str,
+    python_exe: str,
+    jobs: list[dict],
+    results: list[dict],
+    finished: bool,
+) -> None:
+    payload = {
+        "machine": machine,
+        "stage": stage_mode,
+        "python": python_exe,
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+        "finished": finished,
+        "jobs_plan": [{"model": j["model"], "stage": j["stage"]} for j in jobs],
+        "results": results,
+    }
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
 def build_jobs(machine: str, stage_mode: str) -> list[dict]:
     jobs = []
     models = ASSIGNMENTS[machine]
@@ -149,6 +201,18 @@ def main() -> None:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--stop-on-error", action="store_true")
     parser.add_argument(
+        "--resume",
+        dest="resume",
+        action="store_true",
+        help="Resume from latest incomplete run for the selected machine/stage (default).",
+    )
+    parser.add_argument(
+        "--no-resume",
+        dest="resume",
+        action="store_false",
+        help="Ignore latest checkpoint and run all jobs from scratch.",
+    )
+    parser.add_argument(
         "--live-output",
         dest="live_output",
         action="store_true",
@@ -160,7 +224,7 @@ def main() -> None:
         action="store_false",
         help="Disable live child output and write only to log files.",
     )
-    parser.set_defaults(live_output=True)
+    parser.set_defaults(live_output=True, resume=True)
     args = parser.parse_args()
 
     run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -173,23 +237,68 @@ def main() -> None:
         print("No jobs found for selection.")
         return
 
+    ckpt_path = checkpoint_path(args.machine, args.stage)
+    prior_state = load_checkpoint(ckpt_path, args.machine, args.stage, jobs) if args.resume else None
+
+    completed_results: list[dict] = []
+    completed_keys: set[tuple[str, str]] = set()
+    resumed_count = 0
+
+    if prior_state:
+        for row in prior_state["results"]:
+            if row.get("status") in {"ok", "dry-run"}:
+                key = (row.get("model"), row.get("stage"))
+                if key not in completed_keys:
+                    completed_keys.add(key)
+                    completed_results.append(row)
+        resumed_count = len(completed_results)
+
+    pending_jobs = [job for job in jobs if job_key(job) not in completed_keys]
+
     print(
         f"Machine {args.machine} | stage={args.stage} | jobs={len(jobs)} "
-        f"| live_output={args.live_output}"
+        f"| live_output={args.live_output} | resume={args.resume}"
     )
     for idx, job in enumerate(jobs, start=1):
         print(f"[{idx}/{len(jobs)}] {job['model']} {job['stage']} -> {job['train_path']}")
 
-    results: list[dict] = []
+    if resumed_count:
+        print(f"[RESUME] Loaded {resumed_count} completed job(s) from {ckpt_path}")
+    if not pending_jobs:
+        print("All jobs for this selection are already complete in latest checkpoint.")
+        print("Use --no-resume to run all jobs again from scratch.")
+        return
+
+    results: list[dict] = list(completed_results)
+    save_checkpoint(
+        ckpt_path,
+        args.machine,
+        args.stage,
+        args.python,
+        jobs,
+        results,
+        finished=False,
+    )
+
     t0 = time.perf_counter()
 
-    for idx, job in enumerate(jobs, start=1):
-        print(f"[RUN {idx}/{len(jobs)}] {job['model']} {job['stage']}")
+    for idx, job in enumerate(pending_jobs, start=1):
+        print(f"[RUN {idx}/{len(pending_jobs)}] {job['model']} {job['stage']}")
         out = run_job(job, args.python, log_dir, args.dry_run, args.live_output)
         results.append(out)
         print(
             f"[DONE] {job['model']} {job['stage']} status={out['status']} "
             f"elapsed={out['elapsed_sec']:.1f}s rc={out['returncode']}"
+        )
+
+        save_checkpoint(
+            ckpt_path,
+            args.machine,
+            args.stage,
+            args.python,
+            jobs,
+            results,
+            finished=False,
         )
 
         if args.stop_on_error and out["status"] == "error":
@@ -203,6 +312,7 @@ def main() -> None:
         "stage": args.stage,
         "python": args.python,
         "run_id": run_id,
+        "resumed_completed_count": resumed_count,
         "total_elapsed_sec": float(total_elapsed),
         "total_elapsed_min": float(total_elapsed / 60.0),
         "ok_count": int(sum(1 for r in results if r["status"] in {"ok", "dry-run"})),
@@ -214,6 +324,17 @@ def main() -> None:
     csv_path = ANALYSIS_DIR / f"train_split_machine_{args.machine}_{args.stage}_{run_id}.csv"
     json_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
     write_csv(csv_path, results)
+
+    all_complete = all(job_key(job) in {(r.get("model"), r.get("stage")) for r in results if r.get("status") in {"ok", "dry-run"}} for job in jobs)
+    save_checkpoint(
+        ckpt_path,
+        args.machine,
+        args.stage,
+        args.python,
+        jobs,
+        results,
+        finished=all_complete,
+    )
 
     print(f"[SAVED] {json_path}")
     print(f"[SAVED] {csv_path}")
