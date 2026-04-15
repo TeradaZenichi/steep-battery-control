@@ -84,7 +84,7 @@ def main():
 
     eval_frac = float(train_cfg["training"]["eval"])
 
-    for tariff in ["tar_tou", "tar_flat"]:
+    for tariff in ["tar_s", "tar_w", "tar_sw", "tar_tou", "tar_flat"]:
         folder = PROJECT_ROOT / "Results" / "train" / "ATT_MEM" / "1-IL" / tariff
         folder.mkdir(parents=True, exist_ok=True)
 

@@ -13,6 +13,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]  # .../steep-battery-control
 MODEL_ROOT   = Path(__file__).resolve().parents[2]  # .../models
 TCN_ROOT     = Path(__file__).resolve().parents[1]  # .../models/TCN
 ALGO_ROOT    = Path(__file__).resolve().parent      # .../models/TCN/1-IL
+STATE_PATH   = PROJECT_ROOT / "Results" / "train" / "TCN" / "1-IL" / "train_state.json"
 sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(TCN_ROOT))
 sys.path.insert(0, str(MODEL_ROOT))
@@ -23,6 +24,7 @@ from opt import Teacher
 from model import load_actor
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+TARIFFS = ["tar_s", "tar_w", "tar_sw", "tar_tou", "tar_flat"]
 
 
 def _chronological_split(x_i: np.ndarray, y_i: np.ndarray, eval_frac: float):
@@ -67,6 +69,67 @@ def _actor_output(actor: torch.nn.Module, xb: torch.Tensor) -> torch.Tensor:
     return out
 
 
+def _load_state() -> dict:
+    if not STATE_PATH.exists():
+        return {
+            "completed_tariffs": [],
+            "current_tariff": None,
+        }
+
+    try:
+        with open(STATE_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return {
+            "completed_tariffs": [],
+            "current_tariff": None,
+        }
+
+    completed_tariffs = data.get("completed_tariffs", [])
+    if not isinstance(completed_tariffs, list):
+        completed_tariffs = []
+
+    current_tariff = data.get("current_tariff")
+    if current_tariff not in TARIFFS:
+        current_tariff = None
+
+    completed_tariffs = [tariff for tariff in completed_tariffs if tariff in TARIFFS]
+
+    return {
+        "completed_tariffs": completed_tariffs,
+        "current_tariff": current_tariff,
+    }
+
+
+def _save_state(completed_tariffs: list[str], current_tariff: str | None) -> None:
+    STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "completed_tariffs": completed_tariffs,
+        "current_tariff": current_tariff,
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    with open(STATE_PATH, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+
+
+def _next_tariffs(state: dict) -> list[str]:
+    completed = set(state.get("completed_tariffs", []))
+    current_tariff = state.get("current_tariff")
+
+    if current_tariff in TARIFFS and current_tariff not in completed:
+        start_idx = TARIFFS.index(current_tariff)
+    else:
+        start_idx = 0
+        for idx, tariff in enumerate(TARIFFS):
+            if tariff not in completed:
+                start_idx = idx
+                break
+        else:
+            start_idx = len(TARIFFS)
+
+    return [tariff for tariff in TARIFFS[start_idx:] if tariff not in completed]
+
+
 def main():
     with open(TCN_ROOT / "model.json", encoding="utf-8") as f:
         model_cfg = json.load(f)
@@ -84,7 +147,18 @@ def main():
 
     eval_frac = float(train_cfg["training"]["eval"])
 
-    for tariff in ["tar_s", "tar_w", "tar_sw", "tar_tou", "tar_flat"]:
+    state = _load_state()
+    pending_tariffs = _next_tariffs(state)
+
+    if state["completed_tariffs"]:
+        print(f"Resuming TCN/1-IL from completed tariffs: {state['completed_tariffs']}")
+    if not pending_tariffs:
+        print("All tariffs are already complete. Nothing to do.")
+        return
+
+    for tariff in pending_tariffs:
+        _save_state(state["completed_tariffs"], tariff)
+
         folder = PROJECT_ROOT / "Results" / "train" / "TCN" / "1-IL" / tariff
         folder.mkdir(parents=True, exist_ok=True)
 
@@ -202,6 +276,10 @@ def main():
                 patience += 1
                 if patience >= train_cfg["training"]["patience"]:
                     break
+
+        state["completed_tariffs"].append(tariff)
+        state["current_tariff"] = None
+        _save_state(state["completed_tariffs"], None)
 
 
 if __name__ == "__main__":
