@@ -127,15 +127,18 @@ class EV:
 # Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ TCN building blocks Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 class CausalConv1d(nn.Module):
-    """Weight-normed Conv1d with left-side causal padding (no future leakage)."""
+    """Conv1d with left-side causal padding (no future leakage)."""
 
     def __init__(self, in_channels: int, out_channels: int, kernel_size: int,
-                 dilation: int = 1):
+                 dilation: int = 1, use_weight_norm: bool = False):
         super().__init__()
         self.padding = (kernel_size - 1) * dilation
         conv = nn.Conv1d(in_channels, out_channels, kernel_size,
                          dilation=dilation)
-        self.conv = nn.utils.parametrizations.weight_norm(conv)
+        if use_weight_norm:
+            self.conv = nn.utils.parametrizations.weight_norm(conv)
+        else:
+            self.conv = conv
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # x: (B, C, T)
@@ -144,13 +147,13 @@ class CausalConv1d(nn.Module):
 
 
 class TemporalBlock(nn.Module):
-    """Residual block: two weight-normed causal convolutions + skip connection."""
+    """Residual block: two causal convolutions + skip connection."""
 
     def __init__(self, in_ch: int, out_ch: int, kernel_size: int,
-                 dilation: int, dropout: float = 0.0):
+                 dilation: int, dropout: float = 0.0, use_weight_norm: bool = False):
         super().__init__()
-        self.conv1 = CausalConv1d(in_ch, out_ch, kernel_size, dilation)
-        self.conv2 = CausalConv1d(out_ch, out_ch, kernel_size, dilation)
+        self.conv1 = CausalConv1d(in_ch, out_ch, kernel_size, dilation, use_weight_norm=use_weight_norm)
+        self.conv2 = CausalConv1d(out_ch, out_ch, kernel_size, dilation, use_weight_norm=use_weight_norm)
         self.drop = nn.Dropout(dropout) if dropout > 0.0 else nn.Identity()
         self.skip = nn.Conv1d(in_ch, out_ch, 1) if in_ch != out_ch else nn.Identity()
 
@@ -171,7 +174,7 @@ class TemporalConvNet(nn.Module):
     """Stack of TemporalBlocks with exponentially increasing dilation."""
 
     def __init__(self, input_dim: int, num_channels: list[int],
-                 kernel_size: int = 3, dropout: float = 0.0):
+                 kernel_size: int = 3, dropout: float = 0.0, use_weight_norm: bool = False):
         super().__init__()
         layers = []
         num_levels = len(num_channels)
@@ -179,7 +182,7 @@ class TemporalConvNet(nn.Module):
             in_ch = input_dim if i == 0 else num_channels[i - 1]
             out_ch = num_channels[i]
             dilation = 2 ** i
-            layers.append(TemporalBlock(in_ch, out_ch, kernel_size, dilation, dropout))
+            layers.append(TemporalBlock(in_ch, out_ch, kernel_size, dilation, dropout, use_weight_norm=use_weight_norm))
         self.network = nn.Sequential(*layers)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -210,6 +213,7 @@ class TCNActor(nn.Module):
         log_std_min: float = -20.0,
         log_std_max: float = 2.0,
         init_log_std_bias: float = -2.0,
+        use_weight_norm: bool = False,
         parameters: str = "data/parameters.json",
     ):
         super().__init__()
@@ -217,7 +221,13 @@ class TCNActor(nn.Module):
         if num_channels is None:
             num_channels = [128, 128, 128]
 
-        self.tcn = TemporalConvNet(input_dim, num_channels, kernel_size, dropout)
+        self.tcn = TemporalConvNet(
+            input_dim,
+            num_channels,
+            kernel_size,
+            dropout,
+            use_weight_norm=use_weight_norm,
+        )
 
         tcn_out_dim = num_channels[-1]
 
@@ -414,6 +424,7 @@ def load_actor(actor_cfg: dict, device=None):
         log_std_min=actor_cfg.get("log_std_min", -20.0),
         log_std_max=actor_cfg.get("log_std_max", 2.0),
         init_log_std_bias=actor_cfg.get("init_log_std_bias", -2.0),
+        use_weight_norm=actor_cfg.get("use_weight_norm", False),
         parameters=actor_cfg.get("parameters", "data/parameters.json"),
     )
     if device is not None:

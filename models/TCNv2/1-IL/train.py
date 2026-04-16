@@ -67,6 +67,27 @@ def _actor_output(actor: torch.nn.Module, xb: torch.Tensor) -> torch.Tensor:
     return out
 
 
+def _build_actor_optimizer(model: torch.nn.Module, lr: float, weight_decay: float) -> torch.optim.Optimizer:
+    decay_params = []
+    no_decay_params = []
+
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        if "parametrizations.weight" in name:
+            no_decay_params.append(param)
+        else:
+            decay_params.append(param)
+
+    param_groups = []
+    if decay_params:
+        param_groups.append({"params": decay_params, "weight_decay": float(weight_decay)})
+    if no_decay_params:
+        param_groups.append({"params": no_decay_params, "weight_decay": 0.0})
+
+    return torch.optim.Adam(param_groups, lr=lr)
+
+
 def main():
     with open(TCNv2_ROOT / "model.json", encoding="utf-8") as f:
         model_cfg = json.load(f)
@@ -166,7 +187,7 @@ def main():
         model = load_actor(model_cfg["actor"], device=DEVICE)
 
         criterion = nn.MSELoss()
-        optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+        optimizer = _build_actor_optimizer(model, lr=lr, weight_decay=weight_decay)
 
         best_val, patience = float("inf"), 0
 

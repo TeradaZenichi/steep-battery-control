@@ -69,6 +69,102 @@ def _actor_output(actor: torch.nn.Module, xb: torch.Tensor) -> torch.Tensor:
     return out
 
 
+def _dump_non_finite_debug(
+    folder: Path,
+    tariff: str,
+    epoch: int,
+    step_idx: int,
+    xb: torch.Tensor,
+    yb: torch.Tensor,
+    pred: torch.Tensor,
+    loss: torch.Tensor,
+    kind: str = "loss",
+    bad_grad_tensors: list[str] | None = None,
+) -> None:
+    debug_dir = folder / "debug"
+    debug_dir.mkdir(parents=True, exist_ok=True)
+
+    xb_np = xb.detach().cpu().numpy()
+    yb_np = yb.detach().cpu().numpy()
+    pred_np = pred.detach().cpu().numpy()
+
+    payload = {
+        "kind": kind,
+        "tariff": tariff,
+        "epoch": int(epoch),
+        "step": int(step_idx),
+        "loss": float(loss.detach().cpu().item()) if torch.isfinite(loss) else None,
+        "xb_shape": list(xb_np.shape),
+        "yb_shape": list(yb_np.shape),
+        "pred_shape": list(pred_np.shape),
+        "xb_nan_count": int(np.isnan(xb_np).sum()),
+        "yb_nan_count": int(np.isnan(yb_np).sum()),
+        "pred_nan_count": int(np.isnan(pred_np).sum()),
+        "xb_inf_count": int(np.isinf(xb_np).sum()),
+        "yb_inf_count": int(np.isinf(yb_np).sum()),
+        "pred_inf_count": int(np.isinf(pred_np).sum()),
+        "xb_max_abs": float(np.nanmax(np.abs(xb_np))) if xb_np.size else 0.0,
+        "yb_max_abs": float(np.nanmax(np.abs(yb_np))) if yb_np.size else 0.0,
+        "pred_max_abs": float(np.nanmax(np.abs(pred_np))) if pred_np.size else 0.0,
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    if bad_grad_tensors:
+        payload["bad_grad_tensors"] = bad_grad_tensors
+
+    json_path = debug_dir / f"non_finite_{kind}_{tariff}_e{epoch}_s{step_idx}.json"
+    npz_path = debug_dir / f"non_finite_{kind}_{tariff}_e{epoch}_s{step_idx}.npz"
+
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+
+    np.savez_compressed(npz_path, xb=xb_np, yb=yb_np, pred=pred_np)
+
+
+def _ensure_array_finite(name: str, arr: np.ndarray, folder: Path, tariff: str) -> None:
+    if np.isfinite(arr).all():
+        return
+
+    debug_dir = folder / "debug"
+    debug_dir.mkdir(parents=True, exist_ok=True)
+
+    report = {
+        "tariff": tariff,
+        "array": name,
+        "shape": list(arr.shape),
+        "nan_count": int(np.isnan(arr).sum()),
+        "inf_count": int(np.isinf(arr).sum()),
+        "max_abs": float(np.nanmax(np.abs(arr))) if arr.size else 0.0,
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    with open(debug_dir / f"non_finite_array_{tariff}_{name}.json", "w", encoding="utf-8") as f:
+        json.dump(report, f, indent=2)
+
+    raise RuntimeError(
+        f"Non-finite values detected in {name} for tariff={tariff}. See {debug_dir}."
+    )
+
+
+def _build_actor_optimizer(model: torch.nn.Module, lr: float, weight_decay: float) -> torch.optim.Optimizer:
+    decay_params = []
+    no_decay_params = []
+
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        if "parametrizations.weight" in name:
+            no_decay_params.append(param)
+        else:
+            decay_params.append(param)
+
+    param_groups = []
+    if decay_params:
+        param_groups.append({"params": decay_params, "weight_decay": float(weight_decay)})
+    if no_decay_params:
+        param_groups.append({"params": no_decay_params, "weight_decay": 0.0})
+
+    return torch.optim.Adam(param_groups, lr=lr)
+
+
 def _load_state() -> dict:
     if not STATE_PATH.exists():
         return {
@@ -227,6 +323,11 @@ def main():
             X_va_seq = np.empty((0, history_len, input_dim), dtype=np.float32)
             y_va_seq = np.empty((0, output_dim), dtype=np.float32)
 
+        _ensure_array_finite("X_tr_seq", X_tr_seq, folder, tariff)
+        _ensure_array_finite("y_tr_seq", y_tr_seq, folder, tariff)
+        _ensure_array_finite("X_va_seq", X_va_seq, folder, tariff)
+        _ensure_array_finite("y_va_seq", y_va_seq, folder, tariff)
+
         print(f"Data loaded: {raw_train_count + raw_val_count} samples (train: {raw_train_count}, val: {raw_val_count})")
 
         train_dataset = TensorDataset(torch.FloatTensor(X_tr_seq), torch.FloatTensor(y_tr_seq))
@@ -240,7 +341,9 @@ def main():
         model = load_actor(model_cfg["actor"], device=DEVICE)
 
         criterion = nn.MSELoss()
-        optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+        optimizer = _build_actor_optimizer(model, lr=lr, weight_decay=weight_decay)
+        grad_non_finite_count = 0
+        max_grad_non_finite = int(train_cfg["training"].get("max_non_finite_grad_steps", 25))
 
         best_val, patience = float("inf"), 0
 
@@ -260,14 +363,51 @@ def main():
             )), start=1):
                 xb, yb = xb.to(DEVICE), yb.to(DEVICE)
                 optimizer.zero_grad()
-                loss = criterion(_actor_output(model, xb), yb)
+                pred = _actor_output(model, xb)
+                loss = criterion(pred, yb)
 
                 if not torch.isfinite(loss):
+                    _dump_non_finite_debug(folder, tariff, epoch, step_idx, xb, yb, pred, loss, kind="loss")
                     raise RuntimeError(
                         f"Non-finite train loss detected at tariff={tariff}, epoch={epoch}, step={step_idx}."
                     )
 
                 loss.backward()
+
+                bad_grad_tensors = []
+                for name, p in model.named_parameters():
+                    if p.grad is None:
+                        continue
+                    if not torch.isfinite(p.grad).all():
+                        bad_grad_tensors.append(name)
+
+                if bad_grad_tensors:
+                    grad_non_finite_count += 1
+                    _dump_non_finite_debug(
+                        folder,
+                        tariff,
+                        epoch,
+                        step_idx,
+                        xb,
+                        yb,
+                        pred,
+                        loss,
+                        kind="gradient",
+                        bad_grad_tensors=bad_grad_tensors,
+                    )
+                    optimizer.zero_grad(set_to_none=True)
+                    if grad_non_finite_count <= 3 or grad_non_finite_count % 10 == 0:
+                        print(
+                            f"Warning: non-finite gradient at tariff={tariff}, epoch={epoch}, step={step_idx}. "
+                            f"Skipping step. count={grad_non_finite_count} first_tensor={bad_grad_tensors[0]}"
+                        )
+                    if grad_non_finite_count >= max_grad_non_finite:
+                        raise RuntimeError(
+                            f"Exceeded max non-finite gradient steps ({max_grad_non_finite}) "
+                            f"at tariff={tariff}, epoch={epoch}, step={step_idx}."
+                        )
+                    continue
+
                 if grad_clip_norm > 0.0:
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip_norm)
                 optimizer.step()
