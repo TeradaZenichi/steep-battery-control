@@ -495,12 +495,67 @@ def _convert_legacy_tcn_actor_state_dict(state_dict: dict) -> dict:
     return converted
 
 
+def _state_dict_uses_weight_norm(state_dict: dict) -> bool:
+    return any(".parametrizations.weight.original" in k for k in state_dict.keys())
+
+
+def _actor_expects_weight_norm(actor: nn.Module) -> bool:
+    actor_state = actor.state_dict()
+    return any(".parametrizations.weight.original" in k for k in actor_state.keys())
+
+
+def _convert_weight_norm_tcn_actor_state_dict_to_plain(state_dict: dict) -> dict:
+    converted = {}
+    consumed = set()
+
+    suffix_v = "parametrizations.weight.original1"
+    suffix_g = "parametrizations.weight.original0"
+
+    for key, value in state_dict.items():
+        if key in consumed:
+            continue
+
+        if key.endswith(suffix_v):
+            prefix = key[:-len(suffix_v)]
+            g_key = prefix + suffix_g
+            v = value
+            g = state_dict.get(g_key)
+
+            if isinstance(v, torch.Tensor) and isinstance(g, torch.Tensor):
+                if v.dim() > 1:
+                    dims = tuple(range(1, v.dim()))
+                    denom = torch.linalg.vector_norm(v, ord=2, dim=dims, keepdim=True).clamp_min(1e-12)
+                else:
+                    denom = v.abs().clamp_min(1e-12)
+                weight = g * (v / denom)
+            else:
+                weight = v
+
+            converted[prefix + "weight"] = weight
+            consumed.add(key)
+            if g_key in state_dict:
+                consumed.add(g_key)
+            continue
+
+        if key.endswith(suffix_g):
+            continue
+
+        converted[key] = value
+
+    return converted
+
+
 def load_actor_state_dict_compat(actor: nn.Module, checkpoint: dict, strict: bool = True):
     state_dict = _extract_actor_state_dict(checkpoint)
     state_dict = _strip_module_prefix(state_dict)
 
-    if _is_legacy_tcn_actor_state_dict(state_dict):
+    expects_weight_norm = _actor_expects_weight_norm(actor)
+    incoming_weight_norm = _state_dict_uses_weight_norm(state_dict)
+
+    if expects_weight_norm and (not incoming_weight_norm) and _is_legacy_tcn_actor_state_dict(state_dict):
         state_dict = _convert_legacy_tcn_actor_state_dict(state_dict)
+    elif (not expects_weight_norm) and incoming_weight_norm:
+        state_dict = _convert_weight_norm_tcn_actor_state_dict_to_plain(state_dict)
 
     return actor.load_state_dict(state_dict, strict=strict)
 

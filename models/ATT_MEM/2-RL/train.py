@@ -42,7 +42,11 @@ class Train:
 
         self.episodegen = EpisodeGen(self.train_cfg, PROJECT_ROOT / "data")
         self.hp = Hyperparameters(self.train_cfg["train"])
-        self.history_len = self._resolve_history_len(tariff)
+        self.actor_weight_decay = float(self.train_cfg["train"].get("actor_weight_decay", 0.0))
+        self.il_hpo = self._load_il_hpo(tariff)
+        self.base_history_len = self._resolve_history_len(tariff)
+        self.history_len = int(self.il_hpo.get("history_len", self.train_cfg["train"].get("history_len", self.base_history_len)))
+        self._apply_il_hpo_overrides()
         self.log_every_steps = int(self.train_cfg["train"].get("log_every_steps", 50))
         self.audit_every_episodes = int(self.train_cfg["train"].get("audit_every_episodes", 5))
         self.update_every_steps = int(self.train_cfg["train"].get("update_every_steps", 1))
@@ -138,7 +142,7 @@ class Train:
         ).to(DEVICE)
 
         self.opt_alpha = torch.optim.Adam([self.temperature.log_alpha], lr=self.hp.α_lr)
-        self.opt_actor = torch.optim.Adam(self.actor.parameters(), lr=self.hp.actor_lr)
+        self.opt_actor = torch.optim.Adam(self.actor.parameters(), lr=self.hp.actor_lr, weight_decay=self.actor_weight_decay)
         self.opt_critic = torch.optim.Adam(self.critics.parameters(), lr=self.hp.critic_lr)
 
         self.lmbda = torch.zeros(1, device=DEVICE)
@@ -660,13 +664,48 @@ class Train:
         }
 
 
+    def _load_il_hpo(self, tariff: str) -> dict:
+        il_path = PROJECT_ROOT / "Results" / "train" / "ATT_MEM" / "1-IL" / tariff / "best_params.json"
+        if not il_path.exists():
+            return {}
+        try:
+            with open(il_path, encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except Exception as exc:
+            print(f"[il_hpo] failed to read {il_path}: {exc}")
+            return {}
+
+
+    def _apply_il_hpo_overrides(self) -> None:
+        if not self.il_hpo:
+            return
+
+        applied = []
+        if "batch_size" in self.il_hpo:
+            self.hp.batch_size = int(self.il_hpo["batch_size"])
+            applied.append(f"batch_size={self.hp.batch_size}")
+        if "lr" in self.il_hpo:
+            self.hp.actor_lr = float(self.il_hpo["lr"])
+            applied.append(f"actor_lr={self.hp.actor_lr}")
+        if "weight_decay" in self.il_hpo:
+            self.actor_weight_decay = float(self.il_hpo["weight_decay"])
+            applied.append(f"actor_weight_decay={self.actor_weight_decay}")
+
+        if applied:
+            print(f"[il_hpo] overrides ({self.tariff}): " + ", ".join(applied))
+
+
     def _resolve_history_len(self, tariff: str) -> int:
         """Load history_len from IL HPO results for this tariff."""
-        il_path = PROJECT_ROOT / "Results" / "train" / "ATT_MEM" / "1-IL" / tariff / "best_params.json"
-        with open(il_path, encoding="utf-8") as f:
-            hl = int(json.load(f)["history_len"])
-        print(f"[history_len] {tariff} = {hl} (from IL HPO)")
-        return hl
+        if "history_len" in self.il_hpo:
+            hl = int(self.il_hpo["history_len"])
+            print(f"[history_len] {tariff} = {hl} (from IL HPO)")
+            return hl
+
+        fallback = int(self.train_cfg["train"].get("history_len", 1))
+        print(f"[history_len] {tariff} = {fallback} (fallback from RL config)")
+        return fallback
 
     def _build_audit_row(self, episode: int, train_total: float, eval_reward_det: float, eval_reward_stoch: float, checkpoint_score: float, metrics: dict, steps: int, iteration_time_sec: float, no_improve_episodes: int, no_improve_evals: int = 0) -> dict:
         alpha_val = float(self.temperature.alpha.detach().cpu())
