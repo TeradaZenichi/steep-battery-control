@@ -1,5 +1,4 @@
 ﻿from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
-from collections import deque
 from pathlib import Path
 from tqdm import tqdm
 import torch.nn as nn
@@ -41,6 +40,13 @@ class Train:
 
         self.episodegen = EpisodeGen(self.train_cfg, PROJECT_ROOT / "data")
         self.hp = Hyperparameters(self.train_cfg["train"])
+        self.actor_weight_decay = float(self.train_cfg["train"].get("actor_weight_decay", 0.0))
+        self.il_inherit_mode = str(self.train_cfg["train"].get("il_inherit_mode", "history")).lower()
+        if self.il_inherit_mode not in {"none", "history", "all"}:
+            print(f"[il_hpo] invalid il_inherit_mode='{self.il_inherit_mode}', using 'history'")
+            self.il_inherit_mode = "history"
+        self.il_hpo = self._load_il_hpo(tariff)
+        self._apply_il_hpo_overrides()
         self.log_every_steps = int(self.train_cfg["train"].get("log_every_steps", 50))
         self.audit_every_episodes = int(self.train_cfg["train"].get("audit_every_episodes", 5))
         self.update_every_steps = int(self.train_cfg["train"].get("update_every_steps", 1))
@@ -64,9 +70,6 @@ class Train:
         self.checkpoint_weight_det /= w_sum
         self.checkpoint_weight_stoch /= w_sum
 
-        self.checkpoint_weight_det = 0.5
-        self.checkpoint_weight_stoch = 0.5
-        self.checkpoint_metric = "mean_0p5"
         self.env_cy = SmartHomeEnv(
             self.episodegen.df_cy,
             self.parameters,
@@ -87,7 +90,7 @@ class Train:
         )
         self.envs = {"cy": self.env_cy, "wy": self.env_wy}
 
-        # Defina o tamanho do episódio (número de steps por episódio)
+        # Defina o tamanho do episdio (nmero de steps por episdio)
         self.episode_length = int(24 * 60 // self.env_cy.sim.timestep * self.hp.days)
 
         torch.manual_seed(self.hp.seed)
@@ -101,7 +104,7 @@ class Train:
         self.folder = PROJECT_ROOT / "Results" / "train" / "MLP" / "2-RL" / self.tariff
         self.folder.mkdir(parents=True, exist_ok=True)
 
-        # Arquivos únicos (sobrescrevem)
+        # Arquivos nicos (sobrescrevem)
         self.best_actor_path = self.folder / "best_actor_eval.pt"
         self.best_ckpt_path  = self.folder / "best_checkpoint_eval.pt"
         self.best_meta_path  = self.folder / "best_eval_meta.json"
@@ -120,7 +123,7 @@ class Train:
             act_dim=self.model_cfg["actor"]["output_dim"],
             device=DEVICE,
             n_step=self.hp.n_step,
-            gamma=self.hp.γ,
+            gamma=getattr(self.hp, "γ"),
         )
 
         # Merge actor architecture (model.json) with RL-specific stochastic settings (config.json).
@@ -139,8 +142,8 @@ class Train:
             target_entropy=self.hp.target_entropy
         ).to(DEVICE)
 
-        self.opt_alpha = torch.optim.Adam([self.temperature.log_alpha], lr=self.hp.α_lr)
-        self.opt_actor = torch.optim.Adam(self.actor.parameters(), lr=self.hp.actor_lr)
+        self.opt_alpha = torch.optim.Adam([self.temperature.log_alpha], lr=self.hp.a_lr)
+        self.opt_actor = torch.optim.Adam(self.actor.parameters(), lr=self.hp.actor_lr, weight_decay=self.actor_weight_decay)
         self.opt_critic = torch.optim.Adam(self.critics.parameters(), lr=self.hp.critic_lr)
 
         # --- CHANGE (Lagrangian): initialize dual variable (lambda) and its hyperparameters ---
@@ -160,7 +163,7 @@ class Train:
         self.best_eval_episode_stoch = -1
         self.best_checkpoint_score = -float("inf")
         self.best_checkpoint_episode = -1
-        self.best_train_reward = -float("inf")  # rastrear apenas (não salvar arquivos)
+        self.best_train_reward = -float("inf")  # rastrear apenas (no salvar arquivos)
         self.last_improvement_episode_det = -1
         self.last_improvement_episode_stoch = -1
         self.last_improvement_episode_combo = -1
@@ -252,6 +255,42 @@ class Train:
         self.audit_csv = self.folder / "audit_training.csv"
 
 
+    def _load_il_hpo(self, tariff: str) -> dict:
+        il_path = PROJECT_ROOT / "Results" / "train" / "MLP" / "1-IL" / tariff / "best_params.json"
+        if not il_path.exists():
+            return {}
+        try:
+            with open(il_path, encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except Exception as exc:
+            print(f"[il_hpo] failed to read {il_path}: {exc}")
+            return {}
+
+
+    def _apply_il_hpo_overrides(self) -> None:
+        if not self.il_hpo or self.il_inherit_mode == "none":
+            return
+
+        if self.il_inherit_mode == "history":
+            return
+
+        applied = []
+        if self.il_inherit_mode == "all":
+            if "batch_size" in self.il_hpo:
+                self.hp.batch_size = int(self.il_hpo["batch_size"])
+                applied.append(f"batch_size={self.hp.batch_size}")
+            if "lr" in self.il_hpo:
+                self.hp.actor_lr = float(self.il_hpo["lr"])
+                applied.append(f"actor_lr={self.hp.actor_lr}")
+            if "weight_decay" in self.il_hpo:
+                self.actor_weight_decay = float(self.il_hpo["weight_decay"])
+                applied.append(f"actor_weight_decay={self.actor_weight_decay}")
+
+        if applied:
+            print(f"[il_hpo] overrides ({self.tariff}, mode={self.il_inherit_mode}): " + ", ".join(applied))
+
+
     def save_checkpoint(self, filepath: Path) -> None:
         """Save a full checkpoint for reproducibility and training resumption."""
         ckpt = {
@@ -281,7 +320,7 @@ class Train:
             "best_checkpoint_episode": int(episode),
             "eval_reward_det": float(eval_reward_det),
             "eval_reward_stoch": float(eval_reward_stoch),
-            "checkpoint_metric": "mean_0p5",
+            "checkpoint_metric": str(self.checkpoint_metric),
             "checkpoint_weight_det": float(self.checkpoint_weight_det),
             "checkpoint_weight_stoch": float(self.checkpoint_weight_stoch),
             "tariff": self.tariff
@@ -313,7 +352,7 @@ class Train:
             "best_eval_episode_stoch": int(episode),
             "checkpoint_score_at_best_stoch": float(checkpoint_score),
             "eval_reward_det_at_best_stoch": float(eval_reward_det),
-            "checkpoint_metric": "mean_0p5",
+            "checkpoint_metric": str(self.checkpoint_metric),
             "tariff": self.tariff
         }
         with open(self.best_meta_stoch_path, "w", encoding="utf-8") as f:
@@ -435,7 +474,7 @@ class Train:
 
         # Target critics soft update
         for param, target_param in zip(self.critics.parameters(), self.critics_target.parameters()):
-            target_param.data.copy_(self.hp.τ * param.data + (1 - self.hp.τ) * target_param.data)
+            target_param.data.copy_(self.hp.t * param.data + (1 - self.hp.t) * target_param.data)
 
         # --- CHANGE (Lagrangian): lambda dual update ---
         # lambda <- max(0, min(lambda_max, lambda + lr*(E[cost] - cost_limit)))

@@ -1,9 +1,6 @@
-import json
 import matplotlib.pyplot as plt
-import numpy as np
 
 from matplotlib import font_manager
-import matplotlib
 
 font_path = 'Gulliver.otf'  # Your font path goes here
 font_manager.fontManager.addfont(font_path)

@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import timedelta
 import pyomo.environ as pyo
 import pandas as pd
 import numpy as np

@@ -26,6 +26,9 @@ STAGE_MAP = {
     "rl": ["2-RL"],
 }
 
+SUCCESS_STATUSES = {"ok", "dry-run"}
+IL_TARIFFS = ("tar_s", "tar_w", "tar_sw", "tar_tou", "tar_flat")
+
 
 def job_key(job: dict) -> tuple[str, str]:
     return job["model"], job["stage"]
@@ -97,6 +100,40 @@ def build_jobs(machine: str, stage_mode: str) -> list[dict]:
                 }
             )
     return jobs
+
+
+def _latest_result(results: list[dict], model: str, stage: str) -> dict | None:
+    for row in reversed(results):
+        if row.get("model") == model and row.get("stage") == stage:
+            return row
+    return None
+
+
+def _has_il_artifacts(model: str) -> bool:
+    base = ROOT / "Results" / "train" / model / "1-IL"
+    for tariff in IL_TARIFFS:
+        folder = base / tariff
+        if not (folder / "best.pth").exists():
+            return False
+        if not (folder / "best_params.json").exists():
+            return False
+    return True
+
+
+def check_il_prerequisite(model: str, stage_mode: str, results: list[dict]) -> tuple[bool, str]:
+    il_row = _latest_result(results, model, "1-IL")
+    if il_row is not None:
+        status = str(il_row.get("status"))
+        if status in SUCCESS_STATUSES:
+            return True, f"1-IL already successful (status={status}) in this plan"
+        return False, f"1-IL exists with non-success status={status}"
+
+    if stage_mode == "rl":
+        if _has_il_artifacts(model):
+            return True, "1-IL artifacts found on disk"
+        return False, "1-IL artifacts not found on disk (best.pth/best_params.json per tariff)"
+
+    return False, "1-IL has not run yet in this plan"
 
 
 def run_job(job: dict, python_exe: str, log_dir: Path, dry_run: bool, live_output: bool) -> dict:
@@ -185,6 +222,7 @@ def write_csv(path: Path, rows: list[dict]) -> None:
         "returncode",
         "elapsed_sec",
         "log_file",
+        "note",
     ]
     with open(path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fields)
@@ -246,7 +284,7 @@ def main() -> None:
 
     if prior_state:
         for row in prior_state["results"]:
-            if row.get("status") in {"ok", "dry-run"}:
+            if row.get("status") in SUCCESS_STATUSES:
                 key = (row.get("model"), row.get("stage"))
                 if key not in completed_keys:
                     completed_keys.add(key)
@@ -284,6 +322,36 @@ def main() -> None:
 
     for idx, job in enumerate(pending_jobs, start=1):
         print(f"[RUN {idx}/{len(pending_jobs)}] {job['model']} {job['stage']}")
+
+        if job["stage"] == "2-RL":
+            il_ok, il_note = check_il_prerequisite(job["model"], args.stage, results)
+            if not il_ok:
+                out = {
+                    "model": job["model"],
+                    "stage": job["stage"],
+                    "status": "blocked-il-prereq",
+                    "returncode": None,
+                    "elapsed_sec": 0.0,
+                    "command": [args.python, str(job["train_path"])],
+                    "log_file": str(log_dir / f"{job['model']}__{job['stage']}__train.log"),
+                    "note": il_note,
+                }
+                results.append(out)
+                print(f"[BLOCKED] {job['model']} {job['stage']} reason={il_note}")
+                save_checkpoint(
+                    ckpt_path,
+                    args.machine,
+                    args.stage,
+                    args.python,
+                    jobs,
+                    results,
+                    finished=False,
+                )
+                if args.stop_on_error:
+                    print("Stopping on first blocked/error result (--stop-on-error).")
+                    break
+                continue
+
         out = run_job(job, args.python, log_dir, args.dry_run, args.live_output)
         results.append(out)
         print(
@@ -301,8 +369,8 @@ def main() -> None:
             finished=False,
         )
 
-        if args.stop_on_error and out["status"] == "error":
-            print("Stopping on first error (--stop-on-error).")
+        if args.stop_on_error and out["status"] not in SUCCESS_STATUSES:
+            print("Stopping on first blocked/error result (--stop-on-error).")
             break
 
     total_elapsed = time.perf_counter() - t0
@@ -315,8 +383,8 @@ def main() -> None:
         "resumed_completed_count": resumed_count,
         "total_elapsed_sec": float(total_elapsed),
         "total_elapsed_min": float(total_elapsed / 60.0),
-        "ok_count": int(sum(1 for r in results if r["status"] in {"ok", "dry-run"})),
-        "error_count": int(sum(1 for r in results if r["status"] == "error")),
+        "ok_count": int(sum(1 for r in results if r["status"] in SUCCESS_STATUSES)),
+        "error_count": int(sum(1 for r in results if r["status"] not in SUCCESS_STATUSES)),
         "jobs": results,
     }
 
@@ -325,7 +393,7 @@ def main() -> None:
     json_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
     write_csv(csv_path, results)
 
-    all_complete = all(job_key(job) in {(r.get("model"), r.get("stage")) for r in results if r.get("status") in {"ok", "dry-run"}} for job in jobs)
+    all_complete = all(job_key(job) in {(r.get("model"), r.get("stage")) for r in results if r.get("status") in SUCCESS_STATUSES} for job in jobs)
     save_checkpoint(
         ckpt_path,
         args.machine,

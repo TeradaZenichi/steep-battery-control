@@ -43,9 +43,13 @@ class Train:
         self.episodegen = EpisodeGen(self.train_cfg, PROJECT_ROOT / "data")
         self.hp = Hyperparameters(self.train_cfg["train"])
         self.actor_weight_decay = float(self.train_cfg["train"].get("actor_weight_decay", 0.0))
+        self.il_inherit_mode = str(self.train_cfg["train"].get("il_inherit_mode", "history")).lower()
+        if self.il_inherit_mode not in {"none", "history", "all"}:
+            print(f"[il_hpo] invalid il_inherit_mode='{self.il_inherit_mode}', using 'history'")
+            self.il_inherit_mode = "history"
         self.il_hpo = self._load_il_hpo(tariff)
         self.base_history_len = self._resolve_history_len(tariff)
-        self.history_len = int(self.il_hpo.get("history_len", self.train_cfg["train"].get("history_len", self.base_history_len)))
+        self.history_len = int(self.base_history_len)
         self._apply_il_hpo_overrides()
         self.log_every_steps = int(self.train_cfg["train"].get("log_every_steps", 50))
         self.audit_every_episodes = int(self.train_cfg["train"].get("audit_every_episodes", 5))
@@ -69,10 +73,6 @@ class Train:
             w_sum = 1.0
         self.checkpoint_weight_det /= w_sum
         self.checkpoint_weight_stoch /= w_sum
-        self.checkpoint_weight_det = 0.5
-        self.checkpoint_weight_stoch = 0.5
-        self.checkpoint_metric = "mean_0p5"
-
         self.env_cy = SmartHomeEnv(
             self.episodegen.df_cy,
             self.parameters,
@@ -265,7 +265,7 @@ class Train:
             "best_checkpoint_episode": int(episode),
             "eval_reward_det": float(eval_reward_det),
             "eval_reward_stoch": float(eval_reward_stoch),
-            "checkpoint_metric": "mean_0p5",
+            "checkpoint_metric": str(self.checkpoint_metric),
             "checkpoint_weight_det": float(self.checkpoint_weight_det),
             "checkpoint_weight_stoch": float(self.checkpoint_weight_stoch),
             "tariff": self.tariff
@@ -297,7 +297,7 @@ class Train:
             "best_eval_episode_stoch": int(episode),
             "checkpoint_score_at_best_stoch": float(checkpoint_score),
             "eval_reward_det_at_best_stoch": float(eval_reward_det),
-            "checkpoint_metric": "mean_0p5",
+            "checkpoint_metric": str(self.checkpoint_metric),
             "tariff": self.tariff
         }
         with open(self.best_meta_stoch_path, "w", encoding="utf-8") as f:
@@ -678,33 +678,33 @@ class Train:
 
 
     def _apply_il_hpo_overrides(self) -> None:
-        if not self.il_hpo:
+        if not self.il_hpo or self.il_inherit_mode == "none":
             return
 
         applied = []
-        if "batch_size" in self.il_hpo:
-            self.hp.batch_size = int(self.il_hpo["batch_size"])
-            applied.append(f"batch_size={self.hp.batch_size}")
-        if "lr" in self.il_hpo:
-            self.hp.actor_lr = float(self.il_hpo["lr"])
-            applied.append(f"actor_lr={self.hp.actor_lr}")
-        if "weight_decay" in self.il_hpo:
-            self.actor_weight_decay = float(self.il_hpo["weight_decay"])
-            applied.append(f"actor_weight_decay={self.actor_weight_decay}")
+
+        if self.il_inherit_mode in {"history", "all"} and "history_len" in self.il_hpo:
+            self.history_len = int(self.il_hpo["history_len"])
+            applied.append(f"history_len={self.history_len}")
+
+        if self.il_inherit_mode == "all":
+            if "batch_size" in self.il_hpo:
+                self.hp.batch_size = int(self.il_hpo["batch_size"])
+                applied.append(f"batch_size={self.hp.batch_size}")
+            if "lr" in self.il_hpo:
+                self.hp.actor_lr = float(self.il_hpo["lr"])
+                applied.append(f"actor_lr={self.hp.actor_lr}")
+            if "weight_decay" in self.il_hpo:
+                self.actor_weight_decay = float(self.il_hpo["weight_decay"])
+                applied.append(f"actor_weight_decay={self.actor_weight_decay}")
 
         if applied:
-            print(f"[il_hpo] overrides ({self.tariff}): " + ", ".join(applied))
+            print(f"[il_hpo] overrides ({self.tariff}, mode={self.il_inherit_mode}): " + ", ".join(applied))
 
 
     def _resolve_history_len(self, tariff: str) -> int:
-        """Load history_len from IL HPO results for this tariff."""
-        if "history_len" in self.il_hpo:
-            hl = int(self.il_hpo["history_len"])
-            print(f"[history_len] {tariff} = {hl} (from IL HPO)")
-            return hl
-
         fallback = int(self.train_cfg["train"].get("history_len", 1))
-        print(f"[history_len] {tariff} = {fallback} (fallback from RL config)")
+        print(f"[history_len] {tariff} = {fallback} (from RL config; mode={self.il_inherit_mode})")
         return fallback
 
     def _build_audit_row(self, episode: int, train_total: float, eval_reward_det: float, eval_reward_stoch: float, checkpoint_score: float, metrics: dict, steps: int, iteration_time_sec: float, no_improve_episodes: int, no_improve_evals: int = 0) -> dict:
