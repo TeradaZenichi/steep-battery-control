@@ -19,16 +19,4 @@ if [[ ! -x "${PYTHON_EXE}" ]]; then
     fi
 fi
 
-ARGS=("$@")
-HAS_STAGE=0
-for ((i=0; i<${#ARGS[@]}; i++)); do
-    if [[ "${ARGS[$i]}" == "--stage" ]]; then
-        HAS_STAGE=1
-        break
-    fi
-done
-if [[ ${HAS_STAGE} -eq 0 ]]; then
-    ARGS+=("--stage" "all")
-fi
-
-exec "${PYTHON_EXE}" "${ROOT_DIR}/scripts/distributed/run_split_training.py" --machine A "${ARGS[@]}"
+exec "${PYTHON_EXE}" "${ROOT_DIR}/scripts/distributed/run_machine_A.py"

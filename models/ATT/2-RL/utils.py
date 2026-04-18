@@ -20,6 +20,7 @@ from environment import SmartHomeEnv
 from model import load_actor
 
 _EVAL_DF_CACHE = {}
+_EVAL_ACTOR_CACHE = {}
 
 class ReplayBuffer:
     """Lazy-frame replay buffer: stores one obs per transition and reconstructs
@@ -292,7 +293,7 @@ class EpisodeGen:
         return self.df_cy if key == "cy" else self.df_wy
 
 
-def _eval_worker(run, parameters, tariff, actor_cfg, actor_state_dict, episode_length, history_len=1, deterministic=True):
+def _eval_worker(run, parameters, tariff, actor_cfg, actor_state_dict, episode_length, history_len=1, deterministic=True, actor_cache_tag=None):
     import torch
     import pandas as pd
 
@@ -324,9 +325,14 @@ def _eval_worker(run, parameters, tariff, actor_cfg, actor_state_dict, episode_l
         tariff=tariff,
     )
 
-    actor = load_actor(actor_cfg, device=torch.device("cpu"))
-    actor.load_state_dict(actor_state_dict, strict=True)
-    actor.eval()
+    cache_tag = int(actor_cache_tag) if actor_cache_tag is not None else -1
+    actor = _EVAL_ACTOR_CACHE.get(cache_tag)
+    if actor is None:
+        actor = load_actor(actor_cfg, device=torch.device("cpu"))
+        actor.load_state_dict(actor_state_dict, strict=True)
+        actor.eval()
+        _EVAL_ACTOR_CACHE.clear()
+        _EVAL_ACTOR_CACHE[cache_tag] = actor
 
     obs = env.reset()
     if isinstance(obs, tuple):
@@ -346,7 +352,7 @@ def _eval_worker(run, parameters, tariff, actor_cfg, actor_state_dict, episode_l
     while (not done) and (not truncated) and steps < episode_length:
         obs_seq = np.stack(history, axis=0)
         obs_t = torch.as_tensor(obs_seq, dtype=torch.float32).unsqueeze(0)
-        with torch.no_grad():
+        with torch.inference_mode():
             if deterministic:
                 _, _, action_t, _ = actor.sample(obs_t)
             else:

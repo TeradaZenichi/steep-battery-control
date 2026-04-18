@@ -19,4 +19,4 @@ if [[ ! -x "${PYTHON_EXE}" ]]; then
     fi
 fi
 
-exec "${PYTHON_EXE}" "${ROOT_DIR}/scripts/distributed/run_machine_B.py"
+exec "${PYTHON_EXE}" "${ROOT_DIR}/scripts/distributed/run_machine_C.py"

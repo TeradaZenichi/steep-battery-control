@@ -1,61 +1,39 @@
-# Two-Machine Training Plan
+# Three-Machine Training Plan
 
-This folder contains an operational workflow to split model training across two machines.
+This folder contains an operational workflow to split model training across three machines, without passing parser arguments in day-to-day execution.
 
 ## Model split
 
-- Machine A models: `TCN`, `ATT_MEM`, `ATT_MEMv2`, `ATTv2`, `MLPv2`
-- Machine B models: `TCNv2`, `ATT`, `GRU`, `MLP`, `GRUv2`
+- Machine A: `MLP`, `MLPv2`, `GRU`, `ATT_MEM`
+- Machine B: `ATT`, `ATTv2`, `GRUv2`
+- Machine C: `ATT_MEMv2`, `TCN`, `TCNv2`
 
-The split keeps one heavy TCN family on each side and balances medium models.
+Each machine runs models from simpler to more complex, and each model runs in-order: `1-IL` then `2-RL`.
 
 ## 1) Run training jobs on each machine
 
-Quick wrappers (shell scripts):
-
-```bash
-# Machine A (defaults to --stage all)
-./scripts/distributed/run_machine_A.sh
-
-# Machine B (defaults to --stage all)
-./scripts/distributed/run_machine_B.sh
-
-# Example with options passthrough
-./scripts/distributed/run_machine_A.sh --stage rl --stop-on-error
-./scripts/distributed/run_machine_B.sh --stage il --no-live-output
-```
-
-From project root:
+From project root (Python scripts, no parser flags required):
 
 ```powershell
 # Machine A
-.\.venv\Scripts\python.exe .\scripts\distributed\run_split_training.py --machine A --stage all
+.\.venv\Scripts\python.exe .\scripts\distributed\run_machine_A.py
 
 # Machine B
-.\.venv\Scripts\python.exe .\scripts\distributed\run_split_training.py --machine B --stage all
+.\.venv\Scripts\python.exe .\scripts\distributed\run_machine_B.py
+
+# Machine C
+.\.venv\Scripts\python.exe .\scripts\distributed\run_machine_C.py
 ```
 
-Optional stage filters:
+Shell wrappers are also available:
 
-```powershell
-# RL only
-.\.venv\Scripts\python.exe .\scripts\distributed\run_split_training.py --machine A --stage rl
-
-# IL only
-.\.venv\Scripts\python.exe .\scripts\distributed\run_split_training.py --machine B --stage il
+```bash
+./scripts/distributed/run_machine_A.sh
+./scripts/distributed/run_machine_B.sh
+./scripts/distributed/run_machine_C.sh
 ```
 
 Outputs are written under `Results/analysis/distributed/`.
-
-By default, the runner streams each child `train.py` output to the console
-(so `tqdm` progress bars are visible) and also saves the same output to per-job
-log files.
-
-If you prefer silent execution (logs only):
-
-```powershell
-.\.venv\Scripts\python.exe .\scripts\distributed\run_split_training.py --machine A --stage all --no-live-output
-```
 
 ## 2) Package results from remote machine
 
@@ -79,9 +57,9 @@ You can also pass an extracted folder containing `Results/`.
 
 ## Suggested safety checklist
 
-- Use the same git commit hash on both machines.
+- Use the same git commit hash on all machines.
 - Use same Python/CUDA/PyTorch versions.
-- Keep `data/` identical in both machines.
-- Do not run same `model/stage/tariff` simultaneously on both machines.
-- Merge only after both runs finish.
-- Keep distributed logs from both machines in `Results/analysis/distributed/`.
+- Keep `data/` identical on all machines.
+- Do not run same `model/stage/tariff` simultaneously on multiple machines.
+- Merge only after all runs finish.
+- Keep distributed logs from all machines in `Results/analysis/distributed/`.

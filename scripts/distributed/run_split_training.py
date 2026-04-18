@@ -16,8 +16,11 @@ ROOT = Path(__file__).resolve().parents[2]
 ANALYSIS_DIR = ROOT / "Results" / "analysis" / "distributed"
 
 ASSIGNMENTS = {
-    "A": ["TCN", "ATT_MEM", "ATT_MEMv2", "ATTv2", "MLPv2"],
-    "B": ["TCNv2", "ATT", "GRU", "MLP", "GRUv2"],
+    # 3-machine split with near-equal total runtime.
+    # Within each machine, models are ordered from simpler to more complex.
+    "A": ["MLP", "MLPv2", "GRU", "ATT_MEM"],
+    "B": ["ATT", "ATTv2", "GRUv2"],
+    "C": ["ATT_MEMv2", "TCN", "TCNv2"],
 }
 
 STAGE_MAP = {
@@ -231,9 +234,171 @@ def write_csv(path: Path, rows: list[dict]) -> None:
             writer.writerow({k: row.get(k) for k in fields})
 
 
+def run_split(
+    machine: str,
+    stage: str = "all",
+    python_exe: str = sys.executable,
+    dry_run: bool = False,
+    stop_on_error: bool = False,
+    resume: bool = True,
+    live_output: bool = True,
+) -> dict | None:
+    if machine not in ASSIGNMENTS:
+        raise ValueError(f"Unknown machine '{machine}'. Expected one of: {sorted(ASSIGNMENTS)}")
+    if stage not in STAGE_MAP:
+        raise ValueError(f"Unknown stage '{stage}'. Expected one of: {sorted(STAGE_MAP)}")
+
+    run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    ANALYSIS_DIR.mkdir(parents=True, exist_ok=True)
+    log_dir = ANALYSIS_DIR / f"logs_machine_{machine}_{run_id}"
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    jobs = build_jobs(machine, stage)
+    if not jobs:
+        print("No jobs found for selection.")
+        return None
+
+    ckpt_path = checkpoint_path(machine, stage)
+    prior_state = load_checkpoint(ckpt_path, machine, stage, jobs) if resume else None
+
+    completed_results: list[dict] = []
+    completed_keys: set[tuple[str, str]] = set()
+    resumed_count = 0
+
+    if prior_state:
+        for row in prior_state["results"]:
+            if row.get("status") in SUCCESS_STATUSES:
+                key = (row.get("model"), row.get("stage"))
+                if key not in completed_keys:
+                    completed_keys.add(key)
+                    completed_results.append(row)
+        resumed_count = len(completed_results)
+
+    pending_jobs = [job for job in jobs if job_key(job) not in completed_keys]
+
+    print(
+        f"Machine {machine} | stage={stage} | jobs={len(jobs)} "
+        f"| live_output={live_output} | resume={resume}"
+    )
+    for idx, job in enumerate(jobs, start=1):
+        print(f"[{idx}/{len(jobs)}] {job['model']} {job['stage']} -> {job['train_path']}")
+
+    if resumed_count:
+        print(f"[RESUME] Loaded {resumed_count} completed job(s) from {ckpt_path}")
+    if not pending_jobs:
+        print("All jobs for this selection are already complete in latest checkpoint.")
+        print("Use --no-resume to run all jobs again from scratch.")
+        return None
+
+    results: list[dict] = list(completed_results)
+    save_checkpoint(
+        ckpt_path,
+        machine,
+        stage,
+        python_exe,
+        jobs,
+        results,
+        finished=False,
+    )
+
+    t0 = time.perf_counter()
+
+    for idx, job in enumerate(pending_jobs, start=1):
+        print(f"[RUN {idx}/{len(pending_jobs)}] {job['model']} {job['stage']}")
+
+        if job["stage"] == "2-RL":
+            il_ok, il_note = check_il_prerequisite(job["model"], stage, results)
+            if not il_ok:
+                out = {
+                    "model": job["model"],
+                    "stage": job["stage"],
+                    "status": "blocked-il-prereq",
+                    "returncode": None,
+                    "elapsed_sec": 0.0,
+                    "command": [python_exe, str(job["train_path"])],
+                    "log_file": str(log_dir / f"{job['model']}__{job['stage']}__train.log"),
+                    "note": il_note,
+                }
+                results.append(out)
+                print(f"[BLOCKED] {job['model']} {job['stage']} reason={il_note}")
+                save_checkpoint(
+                    ckpt_path,
+                    machine,
+                    stage,
+                    python_exe,
+                    jobs,
+                    results,
+                    finished=False,
+                )
+                if stop_on_error:
+                    print("Stopping on first blocked/error result (--stop-on-error).")
+                    break
+                continue
+
+        out = run_job(job, python_exe, log_dir, dry_run, live_output)
+        results.append(out)
+        print(
+            f"[DONE] {job['model']} {job['stage']} status={out['status']} "
+            f"elapsed={out['elapsed_sec']:.1f}s rc={out['returncode']}"
+        )
+
+        save_checkpoint(
+            ckpt_path,
+            machine,
+            stage,
+            python_exe,
+            jobs,
+            results,
+            finished=False,
+        )
+
+        if stop_on_error and out["status"] not in SUCCESS_STATUSES:
+            print("Stopping on first blocked/error result (--stop-on-error).")
+            break
+
+    total_elapsed = time.perf_counter() - t0
+
+    summary = {
+        "machine": machine,
+        "stage": stage,
+        "python": python_exe,
+        "run_id": run_id,
+        "resumed_completed_count": resumed_count,
+        "total_elapsed_sec": float(total_elapsed),
+        "total_elapsed_min": float(total_elapsed / 60.0),
+        "ok_count": int(sum(1 for r in results if r["status"] in SUCCESS_STATUSES)),
+        "error_count": int(sum(1 for r in results if r["status"] not in SUCCESS_STATUSES)),
+        "jobs": results,
+    }
+
+    json_path = ANALYSIS_DIR / f"train_split_machine_{machine}_{stage}_{run_id}.json"
+    csv_path = ANALYSIS_DIR / f"train_split_machine_{machine}_{stage}_{run_id}.csv"
+    json_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
+    write_csv(csv_path, results)
+
+    all_complete = all(job_key(job) in {(r.get("model"), r.get("stage")) for r in results if r.get("status") in SUCCESS_STATUSES} for job in jobs)
+    save_checkpoint(
+        ckpt_path,
+        machine,
+        stage,
+        python_exe,
+        jobs,
+        results,
+        finished=all_complete,
+    )
+
+    print(f"[SAVED] {json_path}")
+    print(f"[SAVED] {csv_path}")
+    print(
+        f"[TOTAL] elapsed={summary['total_elapsed_sec']:.1f}s "
+        f"({summary['total_elapsed_min']:.2f} min) ok={summary['ok_count']} err={summary['error_count']}"
+    )
+    return summary
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run split training jobs for machine A or B")
-    parser.add_argument("--machine", choices=["A", "B"], required=True)
+    parser = argparse.ArgumentParser(description="Run split training jobs for machine A, B, or C")
+    parser.add_argument("--machine", choices=["A", "B", "C"], required=True)
     parser.add_argument("--stage", choices=["all", "il", "rl"], default="all")
     parser.add_argument("--python", default=sys.executable)
     parser.add_argument("--dry-run", action="store_true")
@@ -264,151 +429,14 @@ def main() -> None:
     )
     parser.set_defaults(live_output=True, resume=True)
     args = parser.parse_args()
-
-    run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-    ANALYSIS_DIR.mkdir(parents=True, exist_ok=True)
-    log_dir = ANALYSIS_DIR / f"logs_machine_{args.machine}_{run_id}"
-    log_dir.mkdir(parents=True, exist_ok=True)
-
-    jobs = build_jobs(args.machine, args.stage)
-    if not jobs:
-        print("No jobs found for selection.")
-        return
-
-    ckpt_path = checkpoint_path(args.machine, args.stage)
-    prior_state = load_checkpoint(ckpt_path, args.machine, args.stage, jobs) if args.resume else None
-
-    completed_results: list[dict] = []
-    completed_keys: set[tuple[str, str]] = set()
-    resumed_count = 0
-
-    if prior_state:
-        for row in prior_state["results"]:
-            if row.get("status") in SUCCESS_STATUSES:
-                key = (row.get("model"), row.get("stage"))
-                if key not in completed_keys:
-                    completed_keys.add(key)
-                    completed_results.append(row)
-        resumed_count = len(completed_results)
-
-    pending_jobs = [job for job in jobs if job_key(job) not in completed_keys]
-
-    print(
-        f"Machine {args.machine} | stage={args.stage} | jobs={len(jobs)} "
-        f"| live_output={args.live_output} | resume={args.resume}"
-    )
-    for idx, job in enumerate(jobs, start=1):
-        print(f"[{idx}/{len(jobs)}] {job['model']} {job['stage']} -> {job['train_path']}")
-
-    if resumed_count:
-        print(f"[RESUME] Loaded {resumed_count} completed job(s) from {ckpt_path}")
-    if not pending_jobs:
-        print("All jobs for this selection are already complete in latest checkpoint.")
-        print("Use --no-resume to run all jobs again from scratch.")
-        return
-
-    results: list[dict] = list(completed_results)
-    save_checkpoint(
-        ckpt_path,
-        args.machine,
-        args.stage,
-        args.python,
-        jobs,
-        results,
-        finished=False,
-    )
-
-    t0 = time.perf_counter()
-
-    for idx, job in enumerate(pending_jobs, start=1):
-        print(f"[RUN {idx}/{len(pending_jobs)}] {job['model']} {job['stage']}")
-
-        if job["stage"] == "2-RL":
-            il_ok, il_note = check_il_prerequisite(job["model"], args.stage, results)
-            if not il_ok:
-                out = {
-                    "model": job["model"],
-                    "stage": job["stage"],
-                    "status": "blocked-il-prereq",
-                    "returncode": None,
-                    "elapsed_sec": 0.0,
-                    "command": [args.python, str(job["train_path"])],
-                    "log_file": str(log_dir / f"{job['model']}__{job['stage']}__train.log"),
-                    "note": il_note,
-                }
-                results.append(out)
-                print(f"[BLOCKED] {job['model']} {job['stage']} reason={il_note}")
-                save_checkpoint(
-                    ckpt_path,
-                    args.machine,
-                    args.stage,
-                    args.python,
-                    jobs,
-                    results,
-                    finished=False,
-                )
-                if args.stop_on_error:
-                    print("Stopping on first blocked/error result (--stop-on-error).")
-                    break
-                continue
-
-        out = run_job(job, args.python, log_dir, args.dry_run, args.live_output)
-        results.append(out)
-        print(
-            f"[DONE] {job['model']} {job['stage']} status={out['status']} "
-            f"elapsed={out['elapsed_sec']:.1f}s rc={out['returncode']}"
-        )
-
-        save_checkpoint(
-            ckpt_path,
-            args.machine,
-            args.stage,
-            args.python,
-            jobs,
-            results,
-            finished=False,
-        )
-
-        if args.stop_on_error and out["status"] not in SUCCESS_STATUSES:
-            print("Stopping on first blocked/error result (--stop-on-error).")
-            break
-
-    total_elapsed = time.perf_counter() - t0
-
-    summary = {
-        "machine": args.machine,
-        "stage": args.stage,
-        "python": args.python,
-        "run_id": run_id,
-        "resumed_completed_count": resumed_count,
-        "total_elapsed_sec": float(total_elapsed),
-        "total_elapsed_min": float(total_elapsed / 60.0),
-        "ok_count": int(sum(1 for r in results if r["status"] in SUCCESS_STATUSES)),
-        "error_count": int(sum(1 for r in results if r["status"] not in SUCCESS_STATUSES)),
-        "jobs": results,
-    }
-
-    json_path = ANALYSIS_DIR / f"train_split_machine_{args.machine}_{args.stage}_{run_id}.json"
-    csv_path = ANALYSIS_DIR / f"train_split_machine_{args.machine}_{args.stage}_{run_id}.csv"
-    json_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
-    write_csv(csv_path, results)
-
-    all_complete = all(job_key(job) in {(r.get("model"), r.get("stage")) for r in results if r.get("status") in SUCCESS_STATUSES} for job in jobs)
-    save_checkpoint(
-        ckpt_path,
-        args.machine,
-        args.stage,
-        args.python,
-        jobs,
-        results,
-        finished=all_complete,
-    )
-
-    print(f"[SAVED] {json_path}")
-    print(f"[SAVED] {csv_path}")
-    print(
-        f"[TOTAL] elapsed={summary['total_elapsed_sec']:.1f}s "
-        f"({summary['total_elapsed_min']:.2f} min) ok={summary['ok_count']} err={summary['error_count']}"
+    run_split(
+        machine=args.machine,
+        stage=args.stage,
+        python_exe=args.python,
+        dry_run=args.dry_run,
+        stop_on_error=args.stop_on_error,
+        resume=args.resume,
+        live_output=args.live_output,
     )
 
 

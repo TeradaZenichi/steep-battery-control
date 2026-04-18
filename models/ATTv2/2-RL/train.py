@@ -249,6 +249,18 @@ class Train:
         ])
         self.audit_csv = self.folder / "audit_training.csv"
 
+        self._audit_pending_rows = []
+        self._eval_executor = None
+        self._eval_executor_workers = 0
+        self._eval_parallel_enabled = True
+        self._eval_cache_tag = 0
+        self.eval_train_runs = int(self.train_cfg["train"].get("eval_train_runs", 2))
+        self.eval_full_on_best = bool(self.train_cfg["train"].get("eval_full_on_best", True))
+        self.eval_force_full_last_episode = bool(self.train_cfg["train"].get("eval_force_full_last_episode", True))
+        self.eval_runs_full = list(self.train_cfg["val"])
+        self.eval_runs_train = self._select_eval_runs(self.eval_runs_full, self.eval_train_runs)
+        self.final_full_eval = {}
+
 
     def save_checkpoint(self, filepath: Path) -> None:
         ckpt = {
@@ -313,40 +325,104 @@ class Train:
         with open(self.best_meta_stoch_path, "w", encoding="utf-8") as f:
             json.dump(meta, f, indent=2)
 
-    def eval(self, deterministic: bool = True) -> float:
-        eval_desc = "Eval Det" if deterministic else "Eval Stoch"
-        runs = self.train_cfg["val"]
+
+    @staticmethod
+    def _select_eval_runs(runs: list, max_runs: int) -> list:
+        if not runs:
+            return []
+        max_runs = max(1, int(max_runs))
+        if max_runs >= len(runs):
+            return list(runs)
+        idx = np.linspace(0, len(runs) - 1, num=max_runs, dtype=int)
+        unique_idx = sorted(set(int(i) for i in idx))
+        return [runs[i] for i in unique_idx]
+
+
+    def _next_eval_cache_tag(self) -> int:
+        tag = int(self._eval_cache_tag)
+        self._eval_cache_tag += 1
+        return tag
+
+
+    def _close_eval_executor(self) -> None:
+        if self._eval_executor is not None:
+            self._eval_executor.shutdown(wait=True, cancel_futures=False)
+            self._eval_executor = None
+            self._eval_executor_workers = 0
+
+
+    def _get_eval_executor(self, eval_workers: int) -> ProcessPoolExecutor:
+        if self._eval_executor is None or self._eval_executor_workers != int(eval_workers):
+            self._close_eval_executor()
+            self._eval_executor = ProcessPoolExecutor(max_workers=int(eval_workers))
+            self._eval_executor_workers = int(eval_workers)
+        return self._eval_executor
+
+    def eval(self, deterministic: bool = True, runs: list | None = None, eval_desc: str | None = None) -> float:
+        runs = self.eval_runs_full if runs is None else list(runs)
+        if not runs:
+            return float("nan")
+
+        eval_desc = eval_desc or ("Eval Det" if deterministic else "Eval Stoch")
         eval_workers = max(1, min(self.eval_workers, len(runs)))
         actor_state_cpu = {k: v.detach().cpu() for k, v in self.actor.state_dict().items()}
+        eval_cache_tag = self._next_eval_cache_tag()
+        worker_args_suffix = []
+        history_len = getattr(self, "history_len", None)
+        if history_len is not None:
+            worker_args_suffix.append(history_len)
+        worker_args_suffix.extend([deterministic, eval_cache_tag])
+
         rewards = []
         with tqdm(total=len(runs), desc=eval_desc, position=2, dynamic_ncols=True, leave=False) as p_eval:
-            with ProcessPoolExecutor(max_workers=eval_workers) as executor:
-                futures = [
-                    executor.submit(
-                        _eval_worker,
-                        run,
-                        self.parameters,
-                        self.tariff,
-                        self.actor_cfg,
-                        actor_state_cpu,
-                        self.episode_length,
-                        self.history_len,
-                        deterministic,
-                    )
-                    for run in runs
-                ]
+            futures = None
+            if eval_workers > 1 and self._eval_parallel_enabled:
+                try:
+                    executor = self._get_eval_executor(eval_workers)
+                    futures = [
+                        executor.submit(
+                            _eval_worker,
+                            run,
+                            self.parameters,
+                            self.tariff,
+                            self.actor_cfg,
+                            actor_state_cpu,
+                            self.episode_length,
+                            *worker_args_suffix,
+                        )
+                        for run in runs
+                    ]
+                except (PermissionError, OSError) as exc:
+                    print(f"[eval] process pool unavailable ({exc}); falling back to sequential evaluation.")
+                    self._eval_parallel_enabled = False
+                    self._close_eval_executor()
 
-                for idx, fut in enumerate(as_completed(futures), start=1):
-                    total_reward = float(fut.result())
-                    rewards.append(total_reward)
-                    running_mean = float(np.mean(rewards))
-                    p_eval.set_postfix({
-                        "scenario": f"{idx}/{len(runs)}",
-                        "reward": f"{total_reward:.2f}",
-                        "avg": f"{running_mean:.2f}",
-                        "w": int(eval_workers),
-                    })
-                    p_eval.update(1)
+            iterator = as_completed(futures) if futures is not None else runs
+            for idx, item in enumerate(iterator, start=1):
+                total_reward = (
+                    float(item.result())
+                    if futures is not None
+                    else float(
+                        _eval_worker(
+                            item,
+                            self.parameters,
+                            self.tariff,
+                            self.actor_cfg,
+                            actor_state_cpu,
+                            self.episode_length,
+                            *worker_args_suffix,
+                        )
+                    )
+                )
+                rewards.append(total_reward)
+                running_mean = float(np.mean(rewards))
+                p_eval.set_postfix({
+                    "scenario": f"{idx}/{len(runs)}",
+                    "reward": f"{total_reward:.2f}",
+                    "avg": f"{running_mean:.2f}",
+                    "w": int(eval_workers) if futures is not None else 1,
+                })
+                p_eval.update(1)
 
         return float(np.mean(rewards))
 
@@ -370,7 +446,7 @@ class Train:
         obs_critic = obs
         next_obs_critic = next_obs
 
-        with torch.no_grad():
+        with torch.inference_mode():
             next_action, logp_next, _, cost_next = self.actor.sample(next_obs)
 
             q1_next, q2_next = self.critics_target(next_obs_critic, next_action)
@@ -389,7 +465,7 @@ class Train:
         self._ensure_finite("q2", q2)
         self._ensure_finite("critic_loss", critic_loss)
 
-        self.opt_critic.zero_grad()
+        self.opt_critic.zero_grad(set_to_none=True)
         critic_loss.backward()
         if self.hp.grad_clip:
             nn.utils.clip_grad_norm_(self.critics.parameters(), max_norm=1.0)
@@ -410,7 +486,7 @@ class Train:
         self._ensure_finite("cost", cost)
         self._ensure_finite("actor_loss", actor_loss)
 
-        self.opt_actor.zero_grad()
+        self.opt_actor.zero_grad(set_to_none=True)
         actor_loss.backward()
         if self.hp.grad_clip:
             nn.utils.clip_grad_norm_(self.actor.parameters(), max_norm=1.0)
@@ -418,7 +494,7 @@ class Train:
 
         if self.hp.auto_entropy:
             alpha_loss = torch.mean(-self.temperature.log_alpha * (logp_pi + self.hp.target_entropy).detach())
-            self.opt_alpha.zero_grad()
+            self.opt_alpha.zero_grad(set_to_none=True)
             alpha_loss.backward()
             self.opt_alpha.step()
         else:
@@ -526,7 +602,7 @@ class Train:
                     obs_batch = np.stack([obs_map[key] for key, _ in active], axis=0)
                     obs_t = torch.as_tensor(obs_batch, device=DEVICE)
 
-                    with torch.no_grad():
+                    with torch.inference_mode():
                         action_t, _, _, _ = self.actor.sample(obs_t)
 
                     action_batch = action_t.detach().cpu().numpy()
@@ -555,8 +631,8 @@ class Train:
                         env_dones[key] = done or truncated
                         steps += 1
 
-                        progress_pct = 100.0 * steps / episode_total_steps
                         if (steps % self.log_every_steps == 0) or (steps == episode_total_steps):
+                            progress_pct = 100.0 * steps / episode_total_steps
                             pbar.set_postfix({
                                 "step": f"{steps}/{episode_total_steps}",
                                 "%": f"{progress_pct:.1f}",
@@ -582,12 +658,21 @@ class Train:
         checkpoint_score = np.nan
 
         if episode % self.hp.eval_every == 0:
-            eval_reward_det = float(self.eval(deterministic=True))
-            eval_reward_stoch = float(self.eval(deterministic=False))
-            self.eval_rewards.append(eval_reward_det)
-
+            eval_reward_det = float(self.eval(deterministic=True, runs=self.eval_runs_train, eval_desc="Eval Det (mini)"))
+            eval_reward_stoch = float(self.eval(deterministic=False, runs=self.eval_runs_train, eval_desc="Eval Stoch (mini)"))
             checkpoint_score = float(0.5 * eval_reward_det + 0.5 * eval_reward_stoch)
 
+            should_run_full = (
+                self.eval_full_on_best
+                and len(self.eval_runs_train) < len(self.eval_runs_full)
+                and checkpoint_score > self.best_checkpoint_score + self.checkpoint_min_delta
+            )
+            if should_run_full:
+                eval_reward_det = float(self.eval(deterministic=True, runs=self.eval_runs_full, eval_desc="Eval Det (full)"))
+                eval_reward_stoch = float(self.eval(deterministic=False, runs=self.eval_runs_full, eval_desc="Eval Stoch (full)"))
+                checkpoint_score = float(0.5 * eval_reward_det + 0.5 * eval_reward_stoch)
+
+            self.eval_rewards.append(eval_reward_det)
             self.eval_count += 1
 
             if eval_reward_det > self.best_eval_reward + self.checkpoint_min_delta:
@@ -628,6 +713,50 @@ class Train:
         self.last_improvement_eval_count = max(self.last_improvement_eval_count_det, self.last_improvement_eval_count_stoch, self.last_improvement_eval_count_combo)
 
         return eval_reward_det, eval_reward_stoch, checkpoint_score, no_improve_episodes, no_improve_evals
+
+
+    def _run_final_full_eval(self, episode: int) -> None:
+        if episode < 0:
+            return
+        if not self.eval_force_full_last_episode:
+            return
+        if len(self.eval_runs_train) >= len(self.eval_runs_full):
+            return
+
+        eval_reward_det = float(self.eval(deterministic=True, runs=self.eval_runs_full, eval_desc="Eval Det (final full)"))
+        eval_reward_stoch = float(self.eval(deterministic=False, runs=self.eval_runs_full, eval_desc="Eval Stoch (final full)"))
+        checkpoint_score = float(0.5 * eval_reward_det + 0.5 * eval_reward_stoch)
+
+        self.final_full_eval = {
+            "episode": int(episode),
+            "eval_reward_det": eval_reward_det,
+            "eval_reward_stoch": eval_reward_stoch,
+            "checkpoint_score": checkpoint_score,
+        }
+        with open(self.folder / "final_full_eval.json", "w", encoding="utf-8") as f:
+            json.dump(self.final_full_eval, f, indent=2)
+
+        if eval_reward_det > self.best_eval_reward + self.checkpoint_min_delta:
+            self.best_eval_reward = eval_reward_det
+            self.best_eval_episode = int(episode)
+            self._save_best_eval_det(eval_reward_det, episode, checkpoint_score, eval_reward_stoch)
+            self.last_improvement_episode_det = int(episode)
+            self.last_improvement_eval_count_det = int(self.eval_count)
+
+        if eval_reward_stoch > self.best_eval_reward_stoch + self.checkpoint_min_delta:
+            self.best_eval_reward_stoch = eval_reward_stoch
+            self.best_eval_episode_stoch = int(episode)
+            self._save_best_eval_stoch(eval_reward_stoch, episode, checkpoint_score, eval_reward_det)
+            self.last_improvement_episode_stoch = int(episode)
+            self.last_improvement_eval_count_stoch = int(self.eval_count)
+
+        if checkpoint_score > self.best_checkpoint_score + self.checkpoint_min_delta:
+            self.best_checkpoint_score = checkpoint_score
+            self.best_checkpoint_episode = int(episode)
+            self._save_best_eval(eval_reward_det, episode, checkpoint_score, eval_reward_stoch)
+            self.last_improvement_episode_combo = int(episode)
+            self.last_improvement_eval_count_combo = int(self.eval_count)
+
 
     def _aggregate_episode_update_metrics(self, q_start: int) -> dict:
         q_end = len(self.q1_values)
@@ -766,6 +895,15 @@ class Train:
         }
 
 
+    def _flush_audit(self, force: bool = False) -> None:
+        if not self._audit_pending_rows:
+            return
+        if force or len(self._audit_pending_rows) >= self.audit_every_episodes:
+            self.audit_df = pd.concat([self.audit_df, pd.DataFrame(self._audit_pending_rows)], ignore_index=True)
+            self._audit_pending_rows.clear()
+            self.audit_df.to_csv(self.audit_csv, index=False)
+
+
     def _update_train_postfix(self, p_outer, train_total: float, eval_reward_det: float, eval_reward_stoch: float, checkpoint_score: float, metrics: dict, no_improve_episodes: int, no_improve_evals: int = 0):
         p_outer.set_postfix({
             "train_total": f"{train_total:.2f}",
@@ -800,8 +938,10 @@ class Train:
         self._run_warmup()
 
         print("Starting training episodes...")
+        last_episode = -1
         for episode in (p_outer := tqdm(range(self.hp.train_episodes), desc="Training Episodes", position=0, dynamic_ncols=True)):
             episode_start_time = time.perf_counter()
+            last_episode = episode
             q_start = len(self.q1_values)
             train_total, steps = self._collect_training_episode(episode)
             self.train_rewards.append(train_total)
@@ -826,9 +966,10 @@ class Train:
                 no_improve_evals=no_improve_evals,
             )
 
-            self.audit_df.loc[len(self.audit_df)] = row
-            if ((episode + 1) % self.audit_every_episodes == 0) or ((episode + 1) == self.hp.train_episodes):
-                self.audit_df.to_csv(self.audit_csv, index=False)
+            self._audit_pending_rows.append(row)
+            flush_due = ((episode + 1) % self.audit_every_episodes == 0) or ((episode + 1) == self.hp.train_episodes)
+            if flush_due:
+                self._flush_audit(force=True)
 
             self._update_train_postfix(p_outer, train_total, eval_reward_det, eval_reward_stoch, checkpoint_score, metrics, no_improve_episodes, no_improve_evals)
 
@@ -837,8 +978,12 @@ class Train:
                     f"Early stopping at episode {episode}: no improvement for {no_improve_evals} evals "
                     f"(patience={self.early_stop_patience}, min_start={self.min_episodes_before_early_stop})."
                 )
-                self.audit_df.to_csv(self.audit_csv, index=False)
+                self._flush_audit(force=True)
                 break
+
+        self._run_final_full_eval(last_episode)
+        self._flush_audit(force=True)
+        self._close_eval_executor()
 
 
 def main():
