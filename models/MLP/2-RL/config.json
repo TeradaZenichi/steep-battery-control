@@ -3,7 +3,7 @@
         "seed": 42,
         "days": 7,
         "evaluate_every": 6,
-        "early_stop_patience": 50,
+        "early_stop_patience": 16,
         "min_episodes_before_early_stop": 50,
         "γ": 0.997,
         "τ": 0.005,

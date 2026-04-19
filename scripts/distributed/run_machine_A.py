@@ -17,7 +17,7 @@ def main() -> None:
         python_exe=sys.executable,
         dry_run=False,
         stop_on_error=False,
-        resume=False,
+        resume=True,
         live_output=True,
     )
 
