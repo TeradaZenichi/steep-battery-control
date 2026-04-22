@@ -211,3 +211,7 @@ Results/
 PROJECT.zip
 Resultsold/
 .vscode/
+
+# Local literature review workspace
+review/
+Review/
