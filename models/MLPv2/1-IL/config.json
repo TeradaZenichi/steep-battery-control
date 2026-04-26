@@ -4,7 +4,8 @@
     "training": {
         "epochs": 1000,
         "patience": 20,
-        "eval": 0.2
+        "eval": 0.2,
+        "history_len": 1
     },
     "optuna": {
         "enabled": true,
@@ -26,6 +27,14 @@
             "weight_decay": [
                 0,
                 0.1
+            ],
+            "history_len": [
+                1,
+                4,
+                8,
+                12,
+                16,
+                24
             ]
         }
     },

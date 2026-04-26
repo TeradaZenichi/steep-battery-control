@@ -1,5 +1,4 @@
-from datetime import datetime
-from collections import deque
+﻿from datetime import datetime
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import pandas as pd
@@ -49,7 +48,7 @@ def enrich_operation_with_reward_breakdown(operation: pd.DataFrame, raw_df: pd.D
     """
     op = operation.copy()
 
-    # dt in hours (consistent with environment.Simulation.?t)
+    # dt in hours (consistent with environment.Simulation.Î”t)
     dt = float(par["general"]["timestep"]) / 60.0
 
     # -------------------------
@@ -227,7 +226,7 @@ def mask_operation_with_ev_conn(operation: pd.DataFrame, raw_df: pd.DataFrame):
     return op
 
 
-def eval_actor_run_parallel(run: dict, tariff: str, par: dict, actor_cfg: dict, actor_state_dict: dict, save_operation_csv: bool, save_breakdown_csv: bool, include_breakdown_summary: bool, folder: Path, show_step_pbar: bool, history_len: int, pbar_position: int, actor_variant: str):
+def eval_actor_run_parallel(run: dict, tariff: str, par: dict, actor_cfg: dict, actor_state_dict: dict, save_operation_csv: bool, save_breakdown_csv: bool, include_breakdown_summary: bool, folder: Path, show_step_pbar: bool, pbar_position: int, actor_variant: str):
     start = datetime.strptime(run["date"], "%Y-%m-%d %H:%M:%S")
     days = run["days"]
     bess_soc = run["soc"]
@@ -246,9 +245,6 @@ def eval_actor_run_parallel(run: dict, tariff: str, par: dict, actor_cfg: dict, 
 
     actor_env = SmartHomeEnv(df, par, start, days, bess_soc, tariff)
     max_steps = int((24 * 60 * float(days)) / float(par["general"]["timestep"]))
-    history_len = max(1, int(history_len))
-    state0 = np.asarray(actor_env._get_observation(), dtype=np.float32).reshape(-1)
-    history = deque([state0.copy() for _ in range(history_len)], maxlen=history_len)
 
     done = False
     actor_reward = 0.0
@@ -261,14 +257,12 @@ def eval_actor_run_parallel(run: dict, tariff: str, par: dict, actor_cfg: dict, 
         disable=not show_step_pbar,
     ) as pbar_actor:
         while not done:
-            state_seq = np.stack(history, axis=0)
-            state_t = torch.as_tensor(state_seq, dtype=torch.float32, device=torch.device("cpu")).unsqueeze(0)
+            state = actor_env._get_observation()
+            state_t = torch.as_tensor(state, dtype=torch.float32, device=torch.device("cpu")).unsqueeze(0)
             with torch.no_grad():
-                _, _, action_t, _ = actor.sample(state_t)  # determin�stico + proje��o
+                _, _, action_t, _ = actor.sample(state_t)  # determinÃƒÆ’Ã‚Â­stico + projeÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚Â£o
             action = action_t.squeeze(0).detach().cpu().numpy()
-            next_state, reward, terminated, truncated, info = actor_env.step(action)
-            next_state = np.asarray(next_state, dtype=np.float32).reshape(-1)
-            history.append(next_state.copy())
+            state, reward, terminated, truncated, info = actor_env.step(action)
             done = terminated or truncated
             actor_reward += reward
             pbar_actor.update(1)
@@ -301,13 +295,13 @@ def eval_actor_run_parallel(run: dict, tariff: str, par: dict, actor_cfg: dict, 
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-with open(PROJECT_ROOT / "data" / "parameters.json", encoding="utf-8") as f:
+with open("data/parameters.json", encoding="utf-8") as f:
     par = json.load(f)
 
-with open(MLP_ROOT / "model.json", encoding="utf-8") as f:
+with open("models/MLP/model.json") as f:
     model_cfg = json.load(f)
 
-with open(Path(__file__).resolve().parent / "config.json", encoding="utf-8") as f:
+with open("models/MLP/2-RL/config.json") as f:
     cfg = json.load(f)
 
 seed = int(cfg["train"]["seed"])
@@ -315,10 +309,6 @@ torch.manual_seed(seed)
 np.random.seed(seed)
 EVAL_WORKERS = int(cfg["train"].get("eval_workers", 1))
 SHOW_ACTOR_STEP_PBAR = bool(cfg["train"].get("show_actor_step_pbar", True))
-HISTORY_LEN = max(1, int(cfg["train"].get("history_len", 1)))
-ACTOR_CFG = dict(model_cfg["actor"])
-ACTOR_CFG["input_dim"] = int(ACTOR_CFG["input_dim"]) * int(HISTORY_LEN)
-ACTOR_CFG["parameters"] = str(PROJECT_ROOT / "data" / "parameters.json")
 
 # I/O and breakdown toggles to speed up tests
 SAVE_OPERATION_CSV = True
@@ -351,7 +341,7 @@ for tariff in tqdm(["tar_s", "tar_w", "tar_sw", "tar_tou", "tar_flat"], desc="Ta
     summary = {}
 
     actor_state_dict = torch.load(
-        PROJECT_ROOT / "Results" / "train" / "MLP" / "2-RL" / tariff / ACTOR_FILENAME,
+        f"Results/train/MLP/2-RL/{tariff}/{ACTOR_FILENAME}",
         map_location=torch.device("cpu"),
     )
 
@@ -365,14 +355,13 @@ for tariff in tqdm(["tar_s", "tar_w", "tar_sw", "tar_tou", "tar_flat"], desc="Ta
                 run,
                 tariff,
                 par,
-                ACTOR_CFG,
+                model_cfg["actor"],
                 actor_state_dict,
                 SAVE_OPERATION_CSV,
                 SAVE_BREAKDOWN_CSV,
                 INCLUDE_BREAKDOWN_SUMMARY,
                 folder,
                 SHOW_ACTOR_STEP_PBAR,
-                HISTORY_LEN,
                 2 + idx,
                 ACTOR_VARIANT,
             ): run["name"]
@@ -424,3 +413,6 @@ for tariff in tqdm(["tar_s", "tar_w", "tar_sw", "tar_tou", "tar_flat"], desc="Ta
     )
 
     update_variant_comparison_csv(folder.parent)
+
+
+

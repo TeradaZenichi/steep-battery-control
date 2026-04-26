@@ -1,4 +1,4 @@
-from pathlib import Path
+﻿from pathlib import Path
 import json
 import pandas as pd
 
@@ -12,7 +12,7 @@ SAVE_OUTPUTS = True
 # =============================
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-RESULTS_ROOT = PROJECT_ROOT / "Results" / "test" / "MLP"
+RESULTS_ROOT = PROJECT_ROOT / "Results" / "test" / "MLPv2"
 OUTPUT_DIR = RESULTS_ROOT / "comparison"
 
 
@@ -207,3 +207,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

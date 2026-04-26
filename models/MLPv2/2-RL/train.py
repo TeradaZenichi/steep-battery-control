@@ -1,4 +1,5 @@
 ﻿from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from collections import deque
 from pathlib import Path
 from tqdm import tqdm
 import torch.nn as nn
@@ -12,11 +13,12 @@ import sys
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]  # .../steep-battery-control
 MODEL_ROOT   = Path(__file__).resolve().parents[2]  # .../models
-MLPv2_ROOT   = Path(__file__).resolve().parent.parent   # .../models/MLPv2
-sys.path.insert(0, str(PROJECT_ROOT))
-sys.path.insert(0, str(MLPv2_ROOT))
-sys.path.insert(0, str(MODEL_ROOT))
-sys.path.append(str(Path(__file__).resolve().parent))
+MLPv2_ROOT     = Path(__file__).resolve().parents[1]  # .../models/MLPv2
+ALGO_ROOT    = Path(__file__).resolve().parent      # .../models/MLPv2/2-RL
+sys.path.insert(0, str(ALGO_ROOT))
+sys.path.insert(1, str(MLPv2_ROOT))
+sys.path.insert(2, str(MODEL_ROOT))
+sys.path.insert(3, str(PROJECT_ROOT))
 
 from utils import ReplayBuffer, EpisodeGen, Hyperparameters, Temperature, _eval_worker
 from model import load_actor, load_critic
@@ -46,6 +48,8 @@ class Train:
             print(f"[il_hpo] invalid il_inherit_mode='{self.il_inherit_mode}', using 'history'")
             self.il_inherit_mode = "history"
         self.il_hpo = self._load_il_hpo(tariff)
+        self.base_history_len = self._resolve_history_len(tariff)
+        self.history_len = int(self.base_history_len)
         self._apply_il_hpo_overrides()
         self.log_every_steps = int(self.train_cfg["train"].get("log_every_steps", 50))
         self.audit_every_episodes = int(self.train_cfg["train"].get("audit_every_episodes", 5))
@@ -122,20 +126,24 @@ class Train:
             obs_dim=self.model_cfg["actor"]["input_dim"],
             act_dim=self.model_cfg["actor"]["output_dim"],
             device=DEVICE,
+            history_len=self.history_len,
             n_step=self.hp.n_step,
-            gamma=getattr(self.hp, "γ"),
+            gamma=self.hp.gamma,
         )
 
         # Merge actor architecture (model.json) with RL-specific stochastic settings (config.json).
         self.actor_cfg = dict(self.model_cfg["actor"])
+        self.actor_cfg["input_dim"] = int(self.actor_cfg["input_dim"]) * int(self.history_len)
+        self.actor_cfg["history_len"] = int(self.history_len)
         self.actor_cfg["log_std_min"] = float(self.hp.log_std_min)
         self.actor_cfg["log_std_max"] = float(self.hp.log_std_max)
         self.actor_cfg["parameters"] = str((PROJECT_ROOT / "data" / "parameters.json").resolve())
 
-        self.actor = load_actor(self.actor_cfg, device=DEVICE)
         self.critic_cfg = dict(self.model_cfg["critic"])
-        self.critic_cfg.setdefault("state_dim", int(self.model_cfg["actor"]["input_dim"]))
-        self.critic_cfg.setdefault("action_dim", int(self.model_cfg["actor"]["output_dim"]))
+        if "state_dim" in self.critic_cfg:
+            self.critic_cfg["state_dim"] = int(self.critic_cfg["state_dim"]) * int(self.history_len)
+
+        self.actor = load_actor(self.actor_cfg, device=DEVICE)
         self.critics = load_critic(self.critic_cfg, device=DEVICE)
         self.critics_target = load_critic(self.critic_cfg, device=DEVICE)
         self.critics_target.load_state_dict(self.critics.state_dict(), strict=True)
@@ -145,7 +153,7 @@ class Train:
             target_entropy=self.hp.target_entropy
         ).to(DEVICE)
 
-        self.opt_alpha = torch.optim.Adam([self.temperature.log_alpha], lr=getattr(self.hp, "a_lr", self.hp.α_lr))
+        self.opt_alpha = torch.optim.Adam([self.temperature.log_alpha], lr=getattr(self.hp, "a_lr", self.hp.alpha_lr))
         self.opt_actor = torch.optim.Adam(self.actor.parameters(), lr=self.hp.actor_lr, weight_decay=self.actor_weight_decay)
         self.opt_critic = torch.optim.Adam(self.critics.parameters(), lr=self.hp.critic_lr)
 
@@ -268,42 +276,6 @@ class Train:
         self.eval_runs_full = list(self.train_cfg["val"])
         self.eval_runs_train = self._select_eval_runs(self.eval_runs_full, self.eval_train_runs)
         self.final_full_eval = {}
-
-
-    def _load_il_hpo(self, tariff: str) -> dict:
-        il_path = PROJECT_ROOT / "Results" / "train" / "MLPv2" / "1-IL" / tariff / "best_params.json"
-        if not il_path.exists():
-            return {}
-        try:
-            with open(il_path, encoding="utf-8") as f:
-                data = json.load(f)
-            return data if isinstance(data, dict) else {}
-        except Exception as exc:
-            print(f"[il_hpo] failed to read {il_path}: {exc}")
-            return {}
-
-
-    def _apply_il_hpo_overrides(self) -> None:
-        if not self.il_hpo or self.il_inherit_mode == "none":
-            return
-
-        if self.il_inherit_mode == "history":
-            return
-
-        applied = []
-        if self.il_inherit_mode == "all":
-            if "batch_size" in self.il_hpo:
-                self.hp.batch_size = int(self.il_hpo["batch_size"])
-                applied.append(f"batch_size={self.hp.batch_size}")
-            if "lr" in self.il_hpo:
-                self.hp.actor_lr = float(self.il_hpo["lr"])
-                applied.append(f"actor_lr={self.hp.actor_lr}")
-            if "weight_decay" in self.il_hpo:
-                self.actor_weight_decay = float(self.il_hpo["weight_decay"])
-                applied.append(f"actor_weight_decay={self.actor_weight_decay}")
-
-        if applied:
-            print(f"[il_hpo] overrides ({self.tariff}, mode={self.il_inherit_mode}): " + ", ".join(applied))
 
 
     def save_checkpoint(self, filepath: Path) -> None:
@@ -552,7 +524,7 @@ class Train:
         self._ensure_finite("alpha_loss", alpha_loss)
 
         # Target critics soft update
-        tau = getattr(self.hp, "t", self.hp.τ)
+        tau = getattr(self.hp, "t", self.hp.tau)
         for param, target_param in zip(self.critics.parameters(), self.critics_target.parameters()):
             target_param.data.copy_(tau * param.data + (1 - tau) * target_param.data)
 
@@ -598,9 +570,24 @@ class Train:
             env.reset(options={"start": self.episodegen.sample(key), "bess_soc": np.random.uniform(0.1, 0.9)})
 
 
+    @staticmethod
+    def _obs_vector(obs) -> np.ndarray:
+        return np.asarray(obs, dtype=np.float32).reshape(-1)
+
+
+    def _init_histories(self) -> dict:
+        histories = {}
+        for key, env in self.envs.items():
+            obs0 = self._obs_vector(env.state)
+            histories[key] = deque([obs0.copy() for _ in range(self.history_len)], maxlen=self.history_len)
+        return histories
+
+
     def _run_warmup(self):
         print("Starting warmup episodes...")
         for episode in tqdm(range(self.hp.warmup_episodes), desc="Warmup Episodes", position=0, dynamic_ncols=True):
+            self._reset_train_envs()
+            histories = self._init_histories()
             env_dones = {"cy": False, "wy": False}
             steps = 0
 
@@ -610,21 +597,23 @@ class Train:
                         if env_dones[key]:
                             continue
 
-                        obs_np = np.asarray(env.state, dtype=np.float32).copy()
+                        obs_seq = np.stack(histories[key], axis=0)
                         action = env.action_space.sample()
                         next_obs, rew, done, truncated, info = env.step(action)
+                        next_obs_vec = self._obs_vector(next_obs)
+                        histories[key].append(next_obs_vec.copy())
+                        next_obs_seq = np.stack(histories[key], axis=0)
 
-                        self.buffer.add(obs_np, action, rew * self.hp.reward_scale, next_obs, done or truncated, stream_id=key)
+                        self.buffer.add(obs_seq, action, rew * self.hp.reward_scale, next_obs_seq, done or truncated, stream_id=key)
 
                         env_dones[key] = done or truncated
                         steps += 1
 
                         pbar.update(1)
 
-            self._reset_train_envs()
-
-
     def _collect_training_episode(self, episode: int) -> tuple[float, int]:
+        self._reset_train_envs()
+        histories = self._init_histories()
         env_dones = {"cy": False, "wy": False}
         reward = {"cy": 0.0, "wy": 0.0, "total": 0.0}
 
@@ -638,7 +627,7 @@ class Train:
                 while not all(env_dones.values()) and steps < episode_total_steps:
                     active = [(key, env) for key, env in self.envs.items() if not env_dones[key]]
 
-                    obs_map = {key: np.asarray(env.state, dtype=np.float32).copy() for key, env in active}
+                    obs_map = {key: np.stack(histories[key], axis=0) for key, env in active}
                     obs_batch = np.stack([obs_map[key] for key, _ in active], axis=0)
                     obs_t = torch.as_tensor(obs_batch, device=DEVICE)
 
@@ -660,8 +649,11 @@ class Train:
                         for fut in as_completed(futures)
                     ]
 
-                    for (key, obs_np, action_exec), (next_obs, rew, done, truncated, info) in completed:
-                        self.buffer.add(obs_np, action_exec, rew * self.hp.reward_scale, next_obs, done or truncated, stream_id=key)
+                    for (key, obs_seq, action_exec), (next_obs, rew, done, truncated, info) in completed:
+                        next_obs_vec = self._obs_vector(next_obs)
+                        histories[key].append(next_obs_vec.copy())
+                        next_obs_seq = np.stack(histories[key], axis=0)
+                        self.buffer.add(obs_seq, action_exec, rew * self.hp.reward_scale, next_obs_seq, done or truncated, stream_id=key)
 
                         reward[key] += rew
                         reward["total"] += rew
@@ -687,7 +679,6 @@ class Train:
                                 self.update()
                                 updates_in_episode += 1
 
-        self._reset_train_envs()
         return float(reward["total"]), int(steps)
 
 
@@ -843,6 +834,49 @@ class Train:
         }
 
 
+    def _load_il_hpo(self, tariff: str) -> dict:
+        il_path = PROJECT_ROOT / "Results" / "train" / "MLPv2" / "1-IL" / tariff / "best_params.json"
+        if not il_path.exists():
+            return {}
+        try:
+            with open(il_path, encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except Exception as exc:
+            print(f"[il_hpo] failed to read {il_path}: {exc}")
+            return {}
+
+
+    def _apply_il_hpo_overrides(self) -> None:
+        if not self.il_hpo or self.il_inherit_mode == "none":
+            return
+
+        applied = []
+
+        if self.il_inherit_mode in {"history", "all"} and "history_len" in self.il_hpo:
+            self.history_len = int(self.il_hpo["history_len"])
+            applied.append(f"history_len={self.history_len}")
+
+        if self.il_inherit_mode == "all":
+            if "batch_size" in self.il_hpo:
+                self.hp.batch_size = int(self.il_hpo["batch_size"])
+                applied.append(f"batch_size={self.hp.batch_size}")
+            if "lr" in self.il_hpo:
+                self.hp.actor_lr = float(self.il_hpo["lr"])
+                applied.append(f"actor_lr={self.hp.actor_lr}")
+            if "weight_decay" in self.il_hpo:
+                self.actor_weight_decay = float(self.il_hpo["weight_decay"])
+                applied.append(f"actor_weight_decay={self.actor_weight_decay}")
+
+        if applied:
+            print(f"[il_hpo] overrides ({self.tariff}, mode={self.il_inherit_mode}): " + ", ".join(applied))
+
+
+    def _resolve_history_len(self, tariff: str) -> int:
+        fallback = int(self.train_cfg["train"].get("history_len", 1))
+        print(f"[history_len] {tariff} = {fallback} (from RL config; mode={self.il_inherit_mode})")
+        return fallback
+
     def _build_audit_row(self, episode: int, train_total: float, eval_reward_det: float, eval_reward_stoch: float, checkpoint_score: float, metrics: dict, steps: int, iteration_time_sec: float, no_improve_episodes: int, no_improve_evals: int = 0) -> dict:
         alpha_val = float(self.temperature.alpha.detach().cpu())
 
@@ -991,6 +1025,8 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
 
 
 

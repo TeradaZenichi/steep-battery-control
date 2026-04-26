@@ -1,4 +1,4 @@
-# models/MLP/1-IL/plot.py
+﻿# models/MLP/1-IL/plot.py
 from __future__ import annotations
 
 from pathlib import Path
@@ -69,9 +69,9 @@ POWER_COLS = ["PPV", "PLoad", "PBESS", "PEV", "PGrid"]
 SOC_COLS_ACTOR = ["SoCBESS", "SoCEV"]
 SOC_COLS_TEACHER = ["SoCBESS", "SoCEV"]
 CMD_COLS_ACTOR = ["bess_cmd", "ev_cmd", "pv_cmd"]
-CURTAIL_COL = "χPV"
+CURTAIL_COL = "Ï‡PV"
 
-# If you want PV_available, we compute PPV / (1 - χPV)
+# If you want PV_available, we compute PPV / (1 - Ï‡PV)
 PLOT_PV_AVAILABLE = True
 # =============================================================================
 
@@ -378,3 +378,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+

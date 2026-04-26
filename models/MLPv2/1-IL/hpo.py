@@ -11,6 +11,13 @@ from model import load_actor
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
+def _actor_output(actor: torch.nn.Module, xb: torch.Tensor) -> torch.Tensor:
+    out = actor(xb)
+    if isinstance(out, tuple):
+        return out[0]
+    return out
+
+
 def _chronological_split(x_i: np.ndarray, y_i: np.ndarray, eval_frac: float):
     n = len(x_i)
     if n < 2:
@@ -24,24 +31,41 @@ def _chronological_split(x_i: np.ndarray, y_i: np.ndarray, eval_frac: float):
     return x_tr, y_tr, x_va, y_va
 
 
+def _make_sequences(x_i: np.ndarray, y_i: np.ndarray, history_len: int):
+    history_len = max(1, int(history_len))
+    if history_len == 1:
+        return x_i, y_i
+
+    n = len(x_i)
+    if n < history_len:
+        return np.empty((0, history_len, x_i.shape[1]), dtype=np.float32), np.empty((0, y_i.shape[1]), dtype=np.float32)
+
+    xs = []
+    ys = []
+    for end in range(history_len - 1, n):
+        start = end - history_len + 1
+        xs.append(x_i[start:end + 1])
+        ys.append(y_i[end])
+
+    x_seq = np.asarray(xs, dtype=np.float32)
+    y_seq = np.asarray(ys, dtype=np.float32)
+    return x_seq, y_seq
+
+
 class HPO:
     def __init__(self, cfg, model_cfg, teacher_class, params_path):
         self.cfg = cfg
         self.model_cfg = model_cfg
         self.teacher_class = teacher_class
         self.params_path = params_path
-        self.train_dataset = None
-        self.val_dataset = None
+        self.search_splits = []
 
         torch.manual_seed(cfg["seed"])
         np.random.seed(cfg["seed"])
 
     def load_data(self, tariff):
-        """Load data from all searches and split into train/val (chronological split per run)."""
-        X_tr = np.empty((0, 23), dtype=np.float32)
-        y_tr = np.empty((0, 3), dtype=np.float32)
-        X_va = np.empty((0, 23), dtype=np.float32)
-        y_va = np.empty((0, 3), dtype=np.float32)
+        """Load data from all searches and cache per-run chronological splits."""
+        self.search_splits = []
 
         eval_frac = float(self.cfg["optuna"]["eval"])
 
@@ -67,16 +91,49 @@ class HPO:
             y_i = y_i.astype(np.float32, copy=False)
 
             x_i_tr, y_i_tr, x_i_va, y_i_va = _chronological_split(x_i, y_i, eval_frac)
+            self.search_splits.append((x_i_tr, y_i_tr, x_i_va, y_i_va))
 
-            X_tr = np.vstack([X_tr, x_i_tr])
-            y_tr = np.vstack([y_tr, y_i_tr])
-            X_va = np.vstack([X_va, x_i_va])
-            y_va = np.vstack([y_va, y_i_va])
+    def _build_datasets(self, history_len: int):
+        base_input_dim = int(self.model_cfg["actor"]["input_dim"])
+        output_dim = int(self.model_cfg["actor"]["output_dim"])
 
-        self.train_dataset = TensorDataset(torch.FloatTensor(X_tr), torch.FloatTensor(y_tr))
-        self.val_dataset   = TensorDataset(torch.FloatTensor(X_va), torch.FloatTensor(y_va))
+        x_tr_list, y_tr_list = [], []
+        x_va_list, y_va_list = [], []
 
-        print(f"Data loaded: {len(X_tr)+len(X_va)} samples (train: {len(self.train_dataset)}, val: {len(self.val_dataset)})")
+        for x_i_tr, y_i_tr, x_i_va, y_i_va in self.search_splits:
+            x_tr_seq, y_tr_seq = _make_sequences(x_i_tr, y_i_tr, history_len)
+            x_va_seq, y_va_seq = _make_sequences(x_i_va, y_i_va, history_len)
+
+            if len(x_tr_seq) > 0:
+                x_tr_list.append(x_tr_seq)
+                y_tr_list.append(y_tr_seq)
+            if len(x_va_seq) > 0:
+                x_va_list.append(x_va_seq)
+                y_va_list.append(y_va_seq)
+
+        if x_tr_list:
+            X_tr = np.concatenate(x_tr_list, axis=0)
+            y_tr = np.concatenate(y_tr_list, axis=0)
+        else:
+            if history_len == 1:
+                X_tr = np.empty((0, base_input_dim), dtype=np.float32)
+            else:
+                X_tr = np.empty((0, history_len, base_input_dim), dtype=np.float32)
+            y_tr = np.empty((0, output_dim), dtype=np.float32)
+
+        if x_va_list:
+            X_va = np.concatenate(x_va_list, axis=0)
+            y_va = np.concatenate(y_va_list, axis=0)
+        else:
+            if history_len == 1:
+                X_va = np.empty((0, base_input_dim), dtype=np.float32)
+            else:
+                X_va = np.empty((0, history_len, base_input_dim), dtype=np.float32)
+            y_va = np.empty((0, output_dim), dtype=np.float32)
+
+        train_dataset = TensorDataset(torch.FloatTensor(X_tr), torch.FloatTensor(y_tr))
+        val_dataset = TensorDataset(torch.FloatTensor(X_va), torch.FloatTensor(y_va))
+        return train_dataset, val_dataset
 
     def objective(self, trial):
         """Optuna objective function."""
@@ -84,11 +141,18 @@ class HPO:
         lr = trial.suggest_float("lr", ss["lr"][0], ss["lr"][1], log=True)
         batch_size = trial.suggest_categorical("batch_size", ss["batch_size"])
         weight_decay = trial.suggest_float("weight_decay", ss["weight_decay"][0], ss["weight_decay"][1])
+        history_len = trial.suggest_categorical("history_len", ss.get("history_len", [self.cfg["training"].get("history_len", 1)]))
 
-        train_loader = DataLoader(self.train_dataset, batch_size=batch_size, shuffle=True)
-        val_loader   = DataLoader(self.val_dataset, batch_size=batch_size, shuffle=False)
+        train_dataset, val_dataset = self._build_datasets(history_len)
+        if len(train_dataset) == 0:
+            return float("inf")
 
-        model = load_actor(self.model_cfg["actor"], device=DEVICE)
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+        val_loader   = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+
+        actor_cfg = dict(self.model_cfg["actor"])
+        actor_cfg["input_dim"] = int(actor_cfg["input_dim"]) * int(history_len)
+        model = load_actor(actor_cfg, device=DEVICE)
 
         criterion = nn.MSELoss()
         optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
@@ -100,7 +164,7 @@ class HPO:
             for xb, yb in train_loader:
                 xb, yb = xb.to(DEVICE), yb.to(DEVICE)
                 optimizer.zero_grad()
-                loss = criterion(model(xb), yb)
+                loss = criterion(_actor_output(model, xb), yb)
                 loss.backward()
                 optimizer.step()
 
@@ -110,7 +174,7 @@ class HPO:
                 with torch.no_grad():
                     for xb, yb in val_loader:
                         xb, yb = xb.to(DEVICE), yb.to(DEVICE)
-                        val_loss += criterion(model(xb), yb).item()
+                        val_loss += criterion(_actor_output(model, xb), yb).item()
                 val_loss /= len(val_loader)
 
             if val_loss < best_val:

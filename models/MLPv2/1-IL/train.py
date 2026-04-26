@@ -39,6 +39,34 @@ def _chronological_split(x_i: np.ndarray, y_i: np.ndarray, eval_frac: float):
     return x_tr, y_tr, x_va, y_va
 
 
+def _make_sequences(x_i: np.ndarray, y_i: np.ndarray, history_len: int):
+    history_len = max(1, int(history_len))
+    if history_len == 1:
+        return x_i, y_i
+
+    n = len(x_i)
+    if n < history_len:
+        return np.empty((0, history_len, x_i.shape[1]), dtype=np.float32), np.empty((0, y_i.shape[1]), dtype=np.float32)
+
+    xs = []
+    ys = []
+    for end in range(history_len - 1, n):
+        start = end - history_len + 1
+        xs.append(x_i[start:end + 1])
+        ys.append(y_i[end])
+
+    x_seq = np.asarray(xs, dtype=np.float32)
+    y_seq = np.asarray(ys, dtype=np.float32)
+    return x_seq, y_seq
+
+
+def _actor_output(actor: torch.nn.Module, xb: torch.Tensor) -> torch.Tensor:
+    out = actor(xb)
+    if isinstance(out, tuple):
+        return out[0]
+    return out
+
+
 def main():
     with open(MLPv2_ROOT / "model.json", encoding="utf-8") as f:
         model_cfg = json.load(f)
@@ -63,10 +91,21 @@ def main():
         hpo = HPO(train_cfg, model_cfg, Teacher, PROJECT_ROOT / "data" / "parameters.json")
         hpo.run(tariff)
 
-        X_tr = np.empty((0, 23), dtype=np.float32)
-        y_tr = np.empty((0, 3), dtype=np.float32)
-        X_va = np.empty((0, 23), dtype=np.float32)
-        y_va = np.empty((0, 3), dtype=np.float32)
+        # Actor hyperparameters
+        lr = hpo.best_params["lr"]
+        batch_size = hpo.best_params["batch_size"]
+        weight_decay = hpo.best_params["weight_decay"]
+        history_len = int(hpo.best_params.get("history_len", train_cfg["training"].get("history_len", 1)))
+
+        base_input_dim = int(model_cfg["actor"]["input_dim"])
+        output_dim = int(model_cfg["actor"]["output_dim"])
+
+        train_seq_x: list[np.ndarray] = []
+        train_seq_y: list[np.ndarray] = []
+        val_seq_x: list[np.ndarray] = []
+        val_seq_y: list[np.ndarray] = []
+        raw_train_count = 0
+        raw_val_count = 0
 
         for run in train_cfg["runs"]:
             df = pd.read_csv(
@@ -87,26 +126,54 @@ def main():
             y_i = y_i.astype(np.float32, copy=False)
 
             x_i_tr, y_i_tr, x_i_va, y_i_va = _chronological_split(x_i, y_i, eval_frac)
+            raw_train_count += len(x_i_tr)
+            raw_val_count += len(x_i_va)
 
-            X_tr = np.vstack([X_tr, x_i_tr])
-            y_tr = np.vstack([y_tr, y_i_tr])
-            X_va = np.vstack([X_va, x_i_va])
-            y_va = np.vstack([y_va, y_i_va])
+            x_i_tr_seq, y_i_tr_seq = _make_sequences(x_i_tr, y_i_tr, history_len)
+            x_i_va_seq, y_i_va_seq = _make_sequences(x_i_va, y_i_va, history_len)
 
-        train_dataset = TensorDataset(torch.FloatTensor(X_tr), torch.FloatTensor(y_tr))
-        val_dataset   = TensorDataset(torch.FloatTensor(X_va), torch.FloatTensor(y_va))
+            if len(x_i_tr_seq) > 0:
+                train_seq_x.append(x_i_tr_seq)
+                train_seq_y.append(y_i_tr_seq)
+            if len(x_i_va_seq) > 0:
+                val_seq_x.append(x_i_va_seq)
+                val_seq_y.append(y_i_va_seq)
 
-        print(f"Data loaded: {len(X_tr)+len(X_va)} samples (train: {len(train_dataset)}, val: {len(val_dataset)})")
+        if train_seq_x:
+            X_tr_seq = np.concatenate(train_seq_x, axis=0)
+            y_tr_seq = np.concatenate(train_seq_y, axis=0)
+        else:
+            if history_len == 1:
+                X_tr_seq = np.empty((0, base_input_dim), dtype=np.float32)
+            else:
+                X_tr_seq = np.empty((0, history_len, base_input_dim), dtype=np.float32)
+            y_tr_seq = np.empty((0, output_dim), dtype=np.float32)
 
-        # Actor hyperparameters
-        lr = hpo.best_params["lr"]
-        batch_size = hpo.best_params["batch_size"]
-        weight_decay = hpo.best_params["weight_decay"]
+        if val_seq_x:
+            X_va_seq = np.concatenate(val_seq_x, axis=0)
+            y_va_seq = np.concatenate(val_seq_y, axis=0)
+        else:
+            if history_len == 1:
+                X_va_seq = np.empty((0, base_input_dim), dtype=np.float32)
+            else:
+                X_va_seq = np.empty((0, history_len, base_input_dim), dtype=np.float32)
+            y_va_seq = np.empty((0, output_dim), dtype=np.float32)
+
+        print(f"Data loaded: {raw_train_count + raw_val_count} samples (train: {raw_train_count}, val: {raw_val_count})")
+
+        train_dataset = TensorDataset(torch.FloatTensor(X_tr_seq), torch.FloatTensor(y_tr_seq))
+        val_dataset   = TensorDataset(torch.FloatTensor(X_va_seq), torch.FloatTensor(y_va_seq))
+
+        print(f"Sequence data: history_len={history_len} (train: {len(train_dataset)}, val: {len(val_dataset)})")
 
         train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
         val_loader   = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
 
-        model = load_actor(model_cfg["actor"], device=DEVICE)
+        actor_cfg = dict(model_cfg["actor"])
+        actor_cfg["input_dim"] = int(actor_cfg["input_dim"]) * int(history_len)
+        actor_cfg["parameters"] = str(PROJECT_ROOT / "data" / "parameters.json")
+
+        model = load_actor(actor_cfg, device=DEVICE)
 
         criterion = nn.MSELoss()
         optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
@@ -130,7 +197,7 @@ def main():
                 xb, yb = xb.to(DEVICE), yb.to(DEVICE)
                 optimizer.zero_grad()
                 # BC with forward(): do NOT use projection here (as you requested)
-                loss = criterion(model(xb), yb)
+                loss = criterion(_actor_output(model, xb), yb)
 
                 if not torch.isfinite(loss):
                     raise RuntimeError(
@@ -150,7 +217,7 @@ def main():
                 with torch.no_grad():
                     for xb, yb in val_loader:
                         xb, yb = xb.to(DEVICE), yb.to(DEVICE)
-                        val_loss += criterion(model(xb), yb).item()
+                        val_loss += criterion(_actor_output(model, xb), yb).item()
                 val_loss /= len(val_loader)
 
             if not np.isfinite(val_loss):
@@ -165,12 +232,15 @@ def main():
                         "lr": lr,
                         "batch_size": batch_size,
                         "weight_decay": weight_decay,
+                        "history_len": history_len,
                         "val_loss": float(val_loss)
                     }, f, indent=4)
 
                 best_val, patience = val_loss, 0
                 with open(folder / "actor_cfg.json", "w", encoding="utf-8") as f:
-                    json.dump(model_cfg["actor"], f, indent=4)
+                    actor_cfg_out = dict(actor_cfg)
+                    actor_cfg_out["history_len"] = history_len
+                    json.dump(actor_cfg_out, f, indent=4)
             else:
                 patience += 1
                 if patience >= train_cfg["training"]["patience"]:

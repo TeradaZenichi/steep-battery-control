@@ -1,4 +1,4 @@
-from torch.utils.data import DataLoader, TensorDataset
+﻿from torch.utils.data import DataLoader, TensorDataset
 from datetime import datetime
 from pathlib import Path
 from tqdm import tqdm
@@ -11,7 +11,7 @@ import sys
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]  # .../steep-battery-control
 MODEL_ROOT   = Path(__file__).resolve().parents[2]  # .../models
-MLP_ROOT     = Path(__file__).resolve().parent.parent   # .../models/MLP
+MLP_ROOT   = Path(__file__).resolve().parent.parent   # .../models/MLP
 sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(MLP_ROOT))
 sys.path.insert(0, str(MODEL_ROOT))
@@ -40,7 +40,7 @@ def _chronological_split(x_i: np.ndarray, y_i: np.ndarray, eval_frac: float):
 
 
 def main():
-    with open(Path(__file__).resolve().parent.parent / "model.json") as f:
+    with open(MLP_ROOT / "model.json", encoding="utf-8") as f:
         model_cfg = json.load(f)
 
     with open(Path(__file__).resolve().parent / "config.json") as f:
@@ -182,3 +182,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+

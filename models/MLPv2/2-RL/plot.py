@@ -1,4 +1,4 @@
-# models/MLP/1-IL/plot.py
+﻿# models/MLPv2/1-IL/plot.py
 from __future__ import annotations
 
 from pathlib import Path
@@ -17,9 +17,9 @@ from matplotlib import font_manager
 # =============================================================================
 PROJECT_ROOT = Path(__file__).resolve().parents[3]  # .../steep-battery-control
 MODEL_ROOT   = Path(__file__).resolve().parents[2]  # .../models
-MLP_ROOT     = Path(__file__).resolve().parent.parent   # .../models/MLP
+MLPv2_ROOT     = Path(__file__).resolve().parent.parent   # .../models/MLPv2
 sys.path.insert(0, str(PROJECT_ROOT))
-sys.path.insert(0, str(MLP_ROOT))
+sys.path.insert(0, str(MLPv2_ROOT))
 sys.path.insert(0, str(MODEL_ROOT))
 sys.path.append(str(Path(__file__).resolve().parent))
 
@@ -69,9 +69,9 @@ POWER_COLS = ["PPV", "PLoad", "PBESS", "PEV", "PGrid"]
 SOC_COLS_ACTOR = ["SoCBESS", "SoCEV"]
 SOC_COLS_TEACHER = ["SoCBESS", "SoCEV"]
 CMD_COLS_ACTOR = ["bess_cmd", "ev_cmd", "pv_cmd"]
-CURTAIL_COL = "χPV"
+CURTAIL_COL = "Ï‡PV"
 
-# If you want PV_available, we compute PPV / (1 - χPV)
+# If you want PV_available, we compute PPV / (1 - Ï‡PV)
 PLOT_PV_AVAILABLE = True
 # =============================================================================
 

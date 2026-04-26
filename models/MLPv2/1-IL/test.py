@@ -1,4 +1,5 @@
 from datetime import datetime
+from collections import deque
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import pandas as pd
@@ -10,9 +11,9 @@ from tqdm import tqdm
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]  # .../steep-battery-control
 MODEL_ROOT   = Path(__file__).resolve().parents[2]  # .../models
-MLP_ROOT     = Path(__file__).resolve().parent.parent   # .../models/MLP
+MLPv2_ROOT     = Path(__file__).resolve().parent.parent   # .../models/MLPv2
 sys.path.insert(0, str(PROJECT_ROOT))
-sys.path.insert(0, str(MLP_ROOT))
+sys.path.insert(0, str(MLPv2_ROOT))
 sys.path.insert(0, str(MODEL_ROOT))
 sys.path.append(str(Path(__file__).resolve().parent))
 
@@ -213,7 +214,7 @@ def mask_operation_with_ev_conn(operation: pd.DataFrame, raw_df: pd.DataFrame):
     return op
 
 
-def eval_actor_run_parallel(run: dict, tariff: str, par: dict, actor_cfg: dict, actor_state_dict: dict, use_projection: bool, save_operation_csv: bool, save_breakdown_csv: bool, include_breakdown_summary: bool, folder: Path, show_step_pbar: bool, pbar_position: int):
+def eval_actor_run_parallel(run: dict, tariff: str, par: dict, actor_cfg: dict, actor_state_dict: dict, use_projection: bool, save_operation_csv: bool, save_breakdown_csv: bool, include_breakdown_summary: bool, folder: Path, show_step_pbar: bool, history_len: int, pbar_position: int):
     start = datetime.strptime(run["date"], "%Y-%m-%d %H:%M:%S")
     days = run["days"]
     bess_soc = run["soc"]
@@ -233,6 +234,10 @@ def eval_actor_run_parallel(run: dict, tariff: str, par: dict, actor_cfg: dict, 
     actor_env = SmartHomeEnv(df, par, start, days, bess_soc, tariff)
     max_steps = int((24 * 60 * float(days)) / float(par["general"]["timestep"]))
 
+    history_len = max(1, int(history_len))
+    state0 = np.asarray(actor_env._get_observation(), dtype=np.float32).reshape(-1)
+    history = deque([state0.copy() for _ in range(history_len)], maxlen=history_len)
+
     done = False
     actor_reward = 0.0
     with tqdm(
@@ -244,8 +249,8 @@ def eval_actor_run_parallel(run: dict, tariff: str, par: dict, actor_cfg: dict, 
         disable=not show_step_pbar,
     ) as pbar_actor:
         while not done:
-            state = actor_env._get_observation()
-            state_t = torch.as_tensor(state, dtype=torch.float32, device=torch.device("cpu")).unsqueeze(0)
+            state_seq = np.stack(history, axis=0)
+            state_t = torch.as_tensor(state_seq, dtype=torch.float32, device=torch.device("cpu")).unsqueeze(0)
             with torch.no_grad():
                 if use_projection:
                     _, _, action_t, _ = actor.sample(state_t)  # deterministic + projection
@@ -253,7 +258,14 @@ def eval_actor_run_parallel(run: dict, tariff: str, par: dict, actor_cfg: dict, 
                     action_t, _, _, _ = actor.sample(state_t)  # stochastic + projection
             action = action_t.squeeze(0).detach().cpu().numpy()
 
-            state, reward, terminated, truncated, info = actor_env.step(action)
+            next_state, reward, terminated, truncated, info = actor_env.step(action)
+            if isinstance(next_state, tuple):
+                next_state = next_state[0]
+            if isinstance(next_state, dict):
+                next_state = next_state["obs"] if "obs" in next_state else (next_state["observation"] if "observation" in next_state else next(iter(next_state.values())))
+            next_state = np.asarray(next_state, dtype=np.float32).reshape(-1)
+            history.append(next_state.copy())
+
             done = terminated or truncated
             actor_reward += reward
             pbar_actor.update(1)
@@ -289,10 +301,10 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 with open("data/parameters.json", encoding="utf-8") as f:
     par = json.load(f)
 
-with open("models/MLP/1-IL/config.json") as f:
+with open("models/MLPv2/1-IL/config.json") as f:
     test_cfg = json.load(f)
 
-with open("models/MLP/model.json") as f:
+with open("models/MLPv2/model.json") as f:
     model_cfg = json.load(f)
 
 torch.manual_seed(test_cfg["seed"])
@@ -311,13 +323,36 @@ SAVE_BREAKDOWN_CSV = True
 INCLUDE_BREAKDOWN_SUMMARY = True
 
 for tariff in tqdm(["tar_s", "tar_w", "tar_sw", "tar_tou", "tar_flat"], desc="Tariffs", position=0, dynamic_ncols=True):
-    folder = PROJECT_ROOT / "Results" / "test" / "MLP" / "1-IL" / tariff
+    folder = PROJECT_ROOT / "Results" / "test" / "MLPv2" / "1-IL" / tariff
     folder.mkdir(parents=True, exist_ok=True)
+
+    history_len = int(test_cfg.get("training", {}).get("history_len", 1))
+    best_params_path = PROJECT_ROOT / "Results" / "train" / "MLPv2" / "1-IL" / tariff / "best_params.json"
+    if best_params_path.exists():
+        with open(best_params_path, "r", encoding="utf-8") as f:
+            history_len = int(json.load(f).get("history_len", history_len))
+
+    actor_cfg = dict(model_cfg["actor"])
+    actor_cfg_path = PROJECT_ROOT / "Results" / "train" / "MLPv2" / "1-IL" / tariff / "actor_cfg.json"
+    if actor_cfg_path.exists():
+        with open(actor_cfg_path, "r", encoding="utf-8") as f:
+            loaded_actor_cfg = json.load(f)
+        if isinstance(loaded_actor_cfg, dict):
+            actor_cfg.update(loaded_actor_cfg)
+            history_len = int(actor_cfg.get("history_len", history_len))
+
+    base_input_dim = int(model_cfg["actor"]["input_dim"])
+    actor_input_dim = int(actor_cfg.get("input_dim", base_input_dim))
+    if "history_len" not in actor_cfg and base_input_dim > 0 and actor_input_dim % base_input_dim == 0:
+        history_len = max(1, actor_input_dim // base_input_dim)
+    actor_cfg["history_len"] = int(history_len)
+    actor_cfg["input_dim"] = int(actor_input_dim)
+    actor_cfg["parameters"] = str(PROJECT_ROOT / "data" / "parameters.json")
 
     summary = {}
 
     actor_state_dict = torch.load(
-        f"Results/train/MLP/1-IL/{tariff}/best.pth",
+        f"Results/train/MLPv2/1-IL/{tariff}/best.pth",
         map_location=torch.device("cpu"),
     )
 
@@ -330,7 +365,7 @@ for tariff in tqdm(["tar_s", "tar_w", "tar_sw", "tar_tou", "tar_flat"], desc="Ta
                 run,
                 tariff,
                 par,
-                model_cfg["actor"],
+                actor_cfg,
                 actor_state_dict,
                 USE_PROJECTION,
                 SAVE_OPERATION_CSV,
@@ -338,6 +373,7 @@ for tariff in tqdm(["tar_s", "tar_w", "tar_sw", "tar_tou", "tar_flat"], desc="Ta
                 INCLUDE_BREAKDOWN_SUMMARY,
                 folder,
                 SHOW_ACTOR_STEP_PBAR,
+                history_len,
                 2 + idx,
             ): run["name"]
             for idx, run in enumerate(runs)
@@ -381,4 +417,6 @@ for tariff in tqdm(["tar_s", "tar_w", "tar_sw", "tar_tou", "tar_flat"], desc="Ta
 
     with open(folder / "summary.json", "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=4)
+
+
 

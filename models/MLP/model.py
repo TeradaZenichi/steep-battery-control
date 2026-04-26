@@ -169,26 +169,8 @@ class Actor(nn.Module):
             nn.init.zeros_(last.weight)
             nn.init.constant_(last.bias, float(init_log_std_bias))
 
-    @staticmethod
-    def _flatten_history(x: torch.Tensor) -> torch.Tensor:
-        if x.dim() == 2:
-            return x
-        if x.dim() == 3:
-            b, t, d = x.shape
-            return x.reshape(b, t * d)
-        raise ValueError(f"Expected x with 2 or 3 dims, got {x.dim()}")
-
-    @staticmethod
-    def _last_step(x: torch.Tensor) -> torch.Tensor:
-        if x.dim() == 2:
-            return x
-        if x.dim() == 3:
-            return x[:, -1, :]
-        raise ValueError(f"Expected x with 2 or 3 dims, got {x.dim()}")
-
     def _dist_params(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        x_flat = self._flatten_history(x)
-        h = self.backbone(x_flat)
+        h = self.backbone(x)
         mu = self.mu_head(h)
         log_std = self.logstd_head(h)
         log_std = torch.clamp(log_std, self.log_std_min, self.log_std_max)
@@ -213,10 +195,9 @@ class Actor(nn.Module):
         13 -> ev_soc
         14 -> ev_present (0/1)
         """
-        x_last = self._last_step(x)
-        soc_bess = x_last[..., 12:13]
-        soc_ev   = x_last[..., 13:14]
-        ev_on    = x_last[..., 14:15]
+        soc_bess = x[..., 12:13]
+        soc_ev   = x[..., 13:14]
+        ev_on    = x[..., 14:15]
 
         amin_b, amax_b = self.bess.limits(soc_bess)
         amin_e, amax_e = self.ev.get_limits(soc_ev, ev_on)
@@ -285,18 +266,8 @@ class Critic(nn.Module):
         self.q1 = build()
         self.q2 = build()
 
-    @staticmethod
-    def _flatten_history(obs: torch.Tensor) -> torch.Tensor:
-        if obs.dim() == 2:
-            return obs
-        if obs.dim() == 3:
-            b, t, d = obs.shape
-            return obs.reshape(b, t * d)
-        raise ValueError(f"Expected obs with 2 or 3 dims, got {obs.dim()}")
-
     def forward(self, obs: torch.Tensor, act: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        obs_flat = self._flatten_history(obs)
-        x = torch.cat([obs_flat, act], dim=-1)
+        x = torch.cat([obs, act], dim=-1)
         return self.q1(x), self.q2(x)
 
 
