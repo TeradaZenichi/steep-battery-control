@@ -208,28 +208,26 @@ class ReplayBuffer:
 
 class Hyperparameters:
     def __init__(self, config: dict):
-        self.seed       = config["seed"]
-        self.days       = config["days"]
-        self.γ          = config["γ"]
-        self.τ          = config["τ"]
-        self.batch_size     = config["batch_size"]
-        self.update_steps   = config["update_steps"]
-        self.actor_lr       = config["actor_lr"]
-        self.critic_lr      = config["critic_lr"]
-        self.α_lr           = config["α_lr"]
-        self.auto_α         = config["auto_entropy"]
-        self.auto_entropy   = config["auto_entropy"]
-        self.grad_clip      = config["grad_clip"]
-        self.log_std_min    = config["log_std_min"]
-        self.log_std_max    = config["log_std_max"]
-        self.warmup_episodes = config["warmup_episodes"]
-        self.train_episodes  = config["train_episodes"]
-        self.eval_every      = config["evaluate_every"]
-        self.batch_size      = config["batch_size"]
-        self.buffer_size     = config["buffer_size"]
-        self.reward_scale    = config["reward_scale"]
-        self.target_entropy  = config["target_entropy"]
-        self.n_step          = int(config.get("n_step", 1))
+        self.seed = 42
+        self.days = int(config["days"])
+        self.gamma = float(config["gamma"])
+        self.tau = float(config["tau"])
+        self.batch_size = int(config["batch_size"])
+        self.update_steps = 1
+        self.actor_lr = 1e-4
+        self.critic_lr = 1e-4
+        self.alpha_lr = float(config["alpha_lr"])
+        self.auto_entropy = True
+        self.grad_clip = True
+        self.log_std_min = -10
+        self.log_std_max = float(config["log_std_max"])
+        self.warmup_episodes = int(config["warmup_episodes"])
+        self.train_episodes = int(config["train_episodes"])
+        self.eval_every = int(config["evaluate_every"])
+        self.buffer_size = int(config["buffer_size"])
+        self.reward_scale = 1.0
+        self.target_entropy = float(config["target_entropy"])
+        self.n_step = int(config["n_step"])
 
 
 class Temperature(torch.nn.Module):
@@ -260,7 +258,7 @@ class EpisodeGen:
         self.val_cfg = config["val"]
         self.duration = pd.Timedelta(days=self.days)
         self.eval_windows = self._build_eval_windows()
-        self.rng = np.random.default_rng(int(config["train"].get("seed", 0)))
+        self.rng = np.random.default_rng(42)
 
     def _build_eval_windows(self):
         windows = {"cy": [], "wy": []}

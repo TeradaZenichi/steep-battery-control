@@ -49,6 +49,7 @@ class Grid:
         self.df = df
         self.Pmax = parameters["Pmax_import"]
         self.Pmin = -parameters["Pmax_export"]
+        self.export_tariff_factor = parameters.get("export_tariff_factor", 1.0)
         self.penalty = parameters["net_penalty"]
         self.history = []
 
@@ -61,7 +62,10 @@ class Grid:
             tariff_t = self.df[self.sim.t_idx]
         else:
             tariff_t = self.df[self.sim.step]
-        cost, penalty = power * tariff_t * self.sim.Δt, 0.0
+        import_power = max(power, 0.0)
+        export_power = max(-power, 0.0)
+        cost = (import_power - self.export_tariff_factor * export_power) * tariff_t * self.sim.Δt
+        penalty = 0.0
         if power > self.Pmax:
             penalty = self.penalty * (power - self.Pmax) * self.sim.Δt
         if power < self.Pmin:

@@ -1,4 +1,4 @@
-﻿from datetime import datetime
+from datetime import datetime
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import pandas as pd
@@ -48,7 +48,7 @@ def enrich_operation_with_reward_breakdown(operation: pd.DataFrame, raw_df: pd.D
     """
     op = operation.copy()
 
-    # dt in hours (consistent with environment.Simulation.Î”t)
+    # dt in hours (consistent with environment.Simulation.Δt)
     dt = float(par["general"]["timestep"]) / 60.0
 
     # -------------------------
@@ -75,8 +75,9 @@ def enrich_operation_with_reward_breakdown(operation: pd.DataFrame, raw_df: pd.D
     op["energy_cost_load"] = op["PLoad"].astype(float) * tar * dt
     op["energy_cost_bess"] = op["PBESS"].astype(float) * tar * dt
     op["energy_cost_ev"]   = op["PEV"].astype(float) * tar * dt
-    op["energy_cost_pv"]   = -op["PPV"].astype(float) * tar * dt
-
+    op["energy_cost_pv"] = op["energy_cost"].astype(float) - (
+        op["energy_cost_load"] + op["energy_cost_bess"] + op["energy_cost_ev"]
+    )
     op["energy_cost_recon"] = (
         op["energy_cost_load"]
         + op["energy_cost_bess"]
@@ -260,7 +261,7 @@ def eval_actor_run_parallel(run: dict, tariff: str, par: dict, actor_cfg: dict, 
             state = actor_env._get_observation()
             state_t = torch.as_tensor(state, dtype=torch.float32, device=torch.device("cpu")).unsqueeze(0)
             with torch.no_grad():
-                _, _, action_t, _ = actor.sample(state_t)  # determinÃƒÆ’Ã‚Â­stico + projeÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚Â£o
+                _, _, action_t, _ = actor.sample(state_t)  # determinÃƒÂ­stico + projeÃƒÂ§ÃƒÂ£o
             action = action_t.squeeze(0).detach().cpu().numpy()
             state, reward, terminated, truncated, info = actor_env.step(action)
             done = terminated or truncated
@@ -304,10 +305,10 @@ with open("models/MLP/model.json") as f:
 with open("models/MLP/2-RL/config.json") as f:
     cfg = json.load(f)
 
-seed = int(cfg["train"]["seed"])
+seed = 42
 torch.manual_seed(seed)
 np.random.seed(seed)
-EVAL_WORKERS = int(cfg["train"].get("eval_workers", 1))
+EVAL_WORKERS = 8
 SHOW_ACTOR_STEP_PBAR = bool(cfg["train"].get("show_actor_step_pbar", True))
 
 # I/O and breakdown toggles to speed up tests
@@ -319,8 +320,8 @@ parser = argparse.ArgumentParser(description="Evaluate RL actor checkpoint varia
 parser.add_argument(
     "--actor-variant",
     choices=["combo", "det", "stoch"],
-    default="combo",
-    help="Actor checkpoint variant: combo=0.5*det+0.5*stoch, det, or stoch.",
+    default="det",
+    help="Actor checkpoint variant. Use det for the current training protocol; combo/stoch are legacy options.",
 )
 args, _ = parser.parse_known_args()
 ACTOR_VARIANT = str(args.actor_variant).lower()

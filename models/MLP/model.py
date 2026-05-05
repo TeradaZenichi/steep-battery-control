@@ -178,7 +178,7 @@ class Actor(nn.Module):
 
     @staticmethod
     def _map_pv(z_pv: torch.Tensor) -> torch.Tensor:
-        return 0.5 * (z_pv + 1.0)
+        return torch.exp(5.0 * (z_pv - 1.0)).clamp(0.0, 1.0)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         mu, _ = self._dist_params(x)
@@ -241,6 +241,7 @@ class Actor(nn.Module):
         # log prob of tanh-squashed action
         logp = dist.log_prob(raw).sum(dim=-1, keepdim=True)
         logp -= torch.log(1.0 - torch.tanh(raw).pow(2) + 1e-6).sum(dim=-1, keepdim=True)
+        logp -= torch.log(5.0 * z_pv.clamp_min(1e-6)).sum(dim=-1, keepdim=True)
 
         mu_tanh = torch.tanh(mu)
         mu_pv = self._map_pv(mu_tanh[..., 2:3])

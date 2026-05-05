@@ -38,6 +38,7 @@ class Grid:
         self.df = df
         self.Pmax = parameters["Pmax_import"]
         self.Pmin = -parameters["Pmax_export"]
+        self.export_tariff_factor = parameters.get("export_tariff_factor", 1.0)
         return
 
     def cost(self, t):
@@ -126,6 +127,8 @@ class Teacher:
 
         # Variables
         m.PGrid = pyo.Var(m.Ωt, bounds=(self.grid.Pmin, self.grid.Pmax))
+        m.PGrid_import = pyo.Var(m.Ωt, bounds=(0, self.grid.Pmax))
+        m.PGrid_export = pyo.Var(m.Ωt, bounds=(0, -self.grid.Pmin))
 
         m.PBESS = pyo.Var(m.Ωt, bounds=(-self.bess.Pmax, self.bess.Pmax))
         m.PBESS_c = pyo.Var(m.Ωt, bounds=(0, self.bess.Pmax))
@@ -154,9 +157,14 @@ class Teacher:
         def _is_connected(v):
             return int(v) in (1, 2)
 
-        # Objective (export kept as-is)
+        # Objective
         def objective_rule(model):
-            energy_cost = sum(self.grid.cost(t) * model.PGrid[t] * self.sim.Δt for t in model.Ωt)
+            energy_cost = sum(
+                self.grid.cost(t) *
+                (model.PGrid_import[t] - self.grid.export_tariff_factor * model.PGrid_export[t]) *
+                self.sim.Δt
+                for t in model.Ωt
+            )
 
             bess_degradation = sum(
                 (self.bess.capex / self.bess.ncycles) *
@@ -177,6 +185,11 @@ class Teacher:
             return energy_cost + bess_degradation + ev_degradation + pv_penalty + ev_penalty
 
         m.objective = pyo.Objective(rule=objective_rule, sense=pyo.minimize)
+
+        def grid_import_export_rule(model, t):
+            return model.PGrid[t] == model.PGrid_import[t] - model.PGrid_export[t]
+
+        m.grid_import_export = pyo.Constraint(m.Ωt, rule=grid_import_export_rule)
 
         # Power balance
         def power_balance_rule(model, t):
@@ -387,7 +400,10 @@ class Teacher:
                 "SoCEV": (pyo.value(self.model.EEV[t]) / self.ev.Emax) * ev_mask,
                 "χPV": pyo.value(self.model.χPV[t]),
                 "tariff": self.grid.df[t],
-                "energy_cost": self.grid.cost(t) * pyo.value(self.model.PGrid[t]) * self.sim.Δt,
+                "energy_cost": self.grid.cost(t) *
+                               (pyo.value(self.model.PGrid_import[t]) -
+                                self.grid.export_tariff_factor * pyo.value(self.model.PGrid_export[t])) *
+                               self.sim.Δt,
                 "bess_cost": (self.bess.capex / self.bess.ncycles) *
                              (pyo.value(self.model.PBESS_d[t] + self.model.PBESS_c[t]) * self.sim.Δt) / self.bess.Emax,
                 "ev_cost": (self.ev.capex / self.ev.ncycles) *

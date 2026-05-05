@@ -1,4 +1,4 @@
-﻿from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from collections import deque
 from pathlib import Path
 from tqdm import tqdm
@@ -42,38 +42,18 @@ class Train:
 
         self.episodegen = EpisodeGen(self.train_cfg, PROJECT_ROOT / "data")
         self.hp = Hyperparameters(self.train_cfg["train"])
-        self.actor_weight_decay = float(self.train_cfg["train"].get("actor_weight_decay", 0.0))
-        self.il_inherit_mode = str(self.train_cfg["train"].get("il_inherit_mode", "history")).lower()
-        if self.il_inherit_mode not in {"none", "history", "all"}:
-            print(f"[il_hpo] invalid il_inherit_mode='{self.il_inherit_mode}', using 'history'")
-            self.il_inherit_mode = "history"
-        self.il_hpo = self._load_il_hpo(tariff)
-        self.base_history_len = self._resolve_history_len(tariff)
-        self.history_len = int(self.base_history_len)
-        self._apply_il_hpo_overrides()
-        self.log_every_steps = int(self.train_cfg["train"].get("log_every_steps", 50))
-        self.audit_every_episodes = int(self.train_cfg["train"].get("audit_every_episodes", 5))
-        self.update_every_steps = int(self.train_cfg["train"].get("update_every_steps", 1))
-        self.eval_workers = int(self.train_cfg["train"].get("eval_workers", 1))
-        self.train_env_workers = int(self.train_cfg["train"].get("train_env_workers", 1))
-        self.early_stop_patience = int(self.train_cfg["train"].get("early_stop_patience", 120))
-        self.min_episodes_before_early_stop = int(self.train_cfg["train"].get("min_episodes_before_early_stop", 150))
-        self.checkpoint_min_delta = float(self.train_cfg["train"].get("checkpoint_min_delta", 0.0))
-        self.checkpoint_use_combined_score = bool(self.train_cfg["train"].get("checkpoint_use_combined_score", True))
-        self.checkpoint_weight_det = float(self.train_cfg["train"].get("checkpoint_weight_det", 0.4))
-        self.checkpoint_weight_stoch = float(self.train_cfg["train"].get("checkpoint_weight_stoch", 0.6))
-        default_checkpoint_metric = "mean" if self.checkpoint_use_combined_score else "det"
-        self.checkpoint_metric = str(self.train_cfg["train"].get("checkpoint_metric", default_checkpoint_metric)).lower()
-        if self.checkpoint_metric not in {"det", "stoch", "mean"}:
-            self.checkpoint_metric = default_checkpoint_metric
-        w_sum = self.checkpoint_weight_det + self.checkpoint_weight_stoch
-        if w_sum <= 0.0:
-            self.checkpoint_weight_det = 0.5
-            self.checkpoint_weight_stoch = 0.5
-            w_sum = 1.0
-        self.checkpoint_weight_det /= w_sum
-        self.checkpoint_weight_stoch /= w_sum
-
+        self.actor_weight_decay = 0.0
+        self.history_len = int(self.train_cfg["train"].get("history_len", 1))
+        print(f"[history_len] {tariff} = {self.history_len} (from RL config)")
+        self.log_every_steps = 50
+        self.audit_every_episodes = 5
+        self.update_every_steps = int(self.train_cfg["train"]["update_every_steps"])
+        self.eval_workers = 8
+        self.train_env_workers = 1
+        self.early_stop_patience = int(self.train_cfg["train"]["early_stop_patience"])
+        self.min_episodes_before_early_stop = 50
+        self.checkpoint_min_delta = 0.0
+        self.checkpoint_metric = "det"
         self.env_cy = SmartHomeEnv(
             self.episodegen.df_cy,
             self.parameters,
@@ -94,7 +74,7 @@ class Train:
         )
         self.envs = {"cy": self.env_cy, "wy": self.env_wy}
 
-        # Defina o tamanho do episódio (número de steps por episódio)
+        # Defina o tamanho do episÃ³dio (nÃºmero de steps por episÃ³dio)
         self.episode_length = int(24 * 60 // self.env_cy.sim.timestep * self.hp.days)
 
         torch.manual_seed(self.hp.seed)
@@ -108,7 +88,7 @@ class Train:
         self.folder = PROJECT_ROOT / "Results" / "train" / "GRU" / "2-RL" / self.tariff
         self.folder.mkdir(parents=True, exist_ok=True)
 
-        # Arquivos únicos (sobrescrevem)
+        # Arquivos Ãºnicos (sobrescrevem)
         self.best_actor_path = self.folder / "best_actor_eval.pt"
         self.best_ckpt_path  = self.folder / "best_checkpoint_eval.pt"
         self.best_meta_path  = self.folder / "best_eval_meta.json"
@@ -117,9 +97,6 @@ class Train:
         self.best_actor_det_path = self.folder / "best_actor_eval_det.pt"
         self.best_ckpt_det_path  = self.folder / "best_checkpoint_eval_det.pt"
         self.best_meta_det_path  = self.folder / "best_eval_det_meta.json"
-        self.best_actor_stoch_path = self.folder / "best_actor_eval_stoch.pt"
-        self.best_ckpt_stoch_path  = self.folder / "best_checkpoint_eval_stoch.pt"
-        self.best_meta_stoch_path  = self.folder / "best_eval_stoch_meta.json"
 
         self.buffer = ReplayBuffer(
             capacity=self.hp.buffer_size,
@@ -128,7 +105,7 @@ class Train:
             device=DEVICE,
             history_len=self.history_len,
             n_step=self.hp.n_step,
-            gamma=self.hp.γ,
+            gamma=self.hp.gamma,
         )
 
         # Merge actor architecture (model.json) with RL-specific stochastic settings (config.json).
@@ -147,42 +124,34 @@ class Train:
             target_entropy=self.hp.target_entropy
         ).to(DEVICE)
 
-        self.opt_alpha = torch.optim.Adam([self.temperature.log_alpha], lr=self.hp.α_lr)
+        self.opt_alpha = torch.optim.Adam([self.temperature.log_alpha], lr=self.hp.alpha_lr)
         self.opt_actor = torch.optim.Adam(self.actor.parameters(), lr=self.hp.actor_lr, weight_decay=self.actor_weight_decay)
         self.opt_critic = torch.optim.Adam(self.critics.parameters(), lr=self.hp.critic_lr)
 
         # --- CHANGE (Lagrangian): initialize dual variable (lambda) and its hyperparameters ---
         # This lambda penalizes infeasible raw actions via a cost produced by the projected sample().
-        self.lmbda = torch.zeros(1, device=DEVICE)  # lambda >= 0
-        self.lmbda_lr = float(self.train_cfg["train"].get("lambda_lr", 1e-3))
-        self.cost_limit = float(self.train_cfg["train"].get("cost_limit", 1e-4))  # target cost (0 means no violation)
-        self.lmbda_max = float(self.train_cfg["train"].get("lambda_max", 100.0))
-        self.lambda_deadzone = float(self.train_cfg["train"].get("lambda_deadzone", 0.0))
-        self.dual_enabled = bool(self.train_cfg["train"].get("dual_enabled", True))
-        # --- END CHANGE ---
+        self.lmbda = torch.zeros(1, device=DEVICE)
+        self.lmbda_lr = float(self.train_cfg["train"]["lambda_lr"])
+        self.cost_limit = 0.05
+        self.lmbda_max = 1.0
+        self.lambda_deadzone = 1e-5
+        self.dual_enabled = True
+        self.cost_limit_high = 0.07
+        self.cost_limit_low = 0.03
+        self.dual_warmup_episodes = 50
+        self.lambda_decay = 0.995
 
-        # eval and reward tracking
-        self.best_eval_reward  = -float("inf")
+        self.best_eval_reward = -float("inf")
         self.best_eval_episode = -1
-        self.best_eval_reward_stoch = -float("inf")
-        self.best_eval_episode_stoch = -1
         self.best_checkpoint_score = -float("inf")
         self.best_checkpoint_episode = -1
-        self.best_train_reward = -float("inf")  # rastrear apenas (não salvar arquivos)
-        self.last_improvement_episode_det = -1
-        self.last_improvement_episode_stoch = -1
-        self.last_improvement_episode_combo = -1
+        self.best_train_reward = -float("inf")
         self.last_improvement_episode = -1
-        self.last_improvement_eval_count_det = -1
-        self.last_improvement_eval_count_stoch = -1
-        self.last_improvement_eval_count_combo = -1
         self.last_improvement_eval_count = -1
         self.eval_count = 0
-        self.no_improve_evals_det = 0
-        self.no_improve_evals_stoch = 0
-        self.no_improve_evals_combo = 0
+        self.no_improve_evals = 0
 
-        # tracking lists
+
         self.eval_rewards = []
         self.train_rewards = []
         self.q1_values = []
@@ -207,7 +176,7 @@ class Train:
         self.actor_term_duals = []
         self.critic_losses = []
         self.alpha_losses = []
-        self.violation_eps = float(self.train_cfg["train"].get("violation_eps", 1e-6))
+        self.violation_eps = 1e-6
         # --- END CHANGE ---
 
         # audit dataframe (updated at end of each episode)
@@ -216,13 +185,9 @@ class Train:
             "train_reward_total",
             "eval_reward_det",
             "eval_reward",
-            "eval_reward_stoch",
             "checkpoint_score",
-            "checkpoint_metric",
             "best_train_reward",
             "best_eval_reward",
-            "best_eval_reward_stoch",
-            "best_eval_reward_combo",
             "best_checkpoint_score",
             "q1_mean",
             "q2_mean",
@@ -235,11 +200,8 @@ class Train:
             "steps",
             "buffer_size",
             "alpha",
-            # --- CHANGE (Lagrangian): log lambda value for audit ---
             "lambda",
             "dual_enabled",
-            # --- END CHANGE ---
-            # --- CHANGE (Projection/Loss audit): aggregated per-episode from per-update values ---
             "cost_mean",
             "cost_p95",
             "frac_violation",
@@ -251,11 +213,7 @@ class Train:
             "alpha_loss",
             "no_improve_episodes",
             "no_improve_evals",
-            "no_improve_evals_det",
-            "no_improve_evals_stoch",
-            "no_improve_evals_combo",
             "iteration_time_sec",
-            # --- END CHANGE ---
         ])
         self.audit_csv = self.folder / "audit_training.csv"
 
@@ -264,12 +222,10 @@ class Train:
         self._eval_executor_workers = 0
         self._eval_parallel_enabled = True
         self._eval_cache_tag = 0
-        self.eval_train_runs = int(self.train_cfg["train"].get("eval_train_runs", 2))
-        self.eval_full_on_best = bool(self.train_cfg["train"].get("eval_full_on_best", True))
-        self.eval_force_full_last_episode = bool(self.train_cfg["train"].get("eval_force_full_last_episode", True))
         self.eval_runs_full = list(self.train_cfg["val"])
-        self.eval_runs_train = self._select_eval_runs(self.eval_runs_full, self.eval_train_runs)
+        self.eval_runs_train = list(self.eval_runs_full)
         self.final_full_eval = {}
+
 
 
     def save_checkpoint(self, filepath: Path) -> None:
@@ -293,63 +249,22 @@ class Train:
         torch.save(ckpt, filepath)
 
 
-    def _save_best_eval(self, eval_reward_det: float, episode: int, checkpoint_score: float, eval_reward_stoch: float) -> None:
-        torch.save(self.actor.state_dict(), self.best_actor_path)
-        self.save_checkpoint(self.best_ckpt_path)
-        meta = {
-            "best_checkpoint_score": float(checkpoint_score),
-            "best_checkpoint_episode": int(episode),
-            "eval_reward_det": float(eval_reward_det),
-            "eval_reward_stoch": float(eval_reward_stoch),
-            "checkpoint_metric": str(self.checkpoint_metric),
-            "checkpoint_weight_det": float(self.checkpoint_weight_det),
-            "checkpoint_weight_stoch": float(self.checkpoint_weight_stoch),
-            "tariff": self.tariff
-        }
-        with open(self.best_meta_path, "w", encoding="utf-8") as f:
-            json.dump(meta, f, indent=2)
-
-
-    def _save_best_eval_det(self, eval_reward_det: float, episode: int, checkpoint_score: float, eval_reward_stoch: float) -> None:
+    def _save_best_eval_det(self, eval_reward_det: float, episode: int, checkpoint_score: float) -> None:
         torch.save(self.actor.state_dict(), self.best_actor_det_path)
+        torch.save(self.actor.state_dict(), self.best_actor_path)
         self.save_checkpoint(self.best_ckpt_det_path)
+        self.save_checkpoint(self.best_ckpt_path)
         meta = {
             "best_eval_reward": float(eval_reward_det),
             "best_eval_episode": int(episode),
-            "checkpoint_score_at_best_det": float(checkpoint_score),
-            "eval_reward_stoch_at_best_det": float(eval_reward_stoch),
-            "checkpoint_weight_det": float(self.checkpoint_weight_det),
-            "checkpoint_weight_stoch": float(self.checkpoint_weight_stoch),
-            "tariff": self.tariff
+            "checkpoint_score": float(checkpoint_score),
+            "checkpoint_metric": "det",
+            "tariff": self.tariff,
         }
         with open(self.best_meta_det_path, "w", encoding="utf-8") as f:
             json.dump(meta, f, indent=2)
-
-    def _save_best_eval_stoch(self, eval_reward_stoch: float, episode: int, checkpoint_score: float, eval_reward_det: float) -> None:
-        torch.save(self.actor.state_dict(), self.best_actor_stoch_path)
-        self.save_checkpoint(self.best_ckpt_stoch_path)
-        meta = {
-            "best_eval_reward_stoch": float(eval_reward_stoch),
-            "best_eval_episode_stoch": int(episode),
-            "checkpoint_score_at_best_stoch": float(checkpoint_score),
-            "eval_reward_det_at_best_stoch": float(eval_reward_det),
-            "checkpoint_metric": str(self.checkpoint_metric),
-            "tariff": self.tariff
-        }
-        with open(self.best_meta_stoch_path, "w", encoding="utf-8") as f:
+        with open(self.best_meta_path, "w", encoding="utf-8") as f:
             json.dump(meta, f, indent=2)
-
-
-    @staticmethod
-    def _select_eval_runs(runs: list, max_runs: int) -> list:
-        if not runs:
-            return []
-        max_runs = max(1, int(max_runs))
-        if max_runs >= len(runs):
-            return list(runs)
-        idx = np.linspace(0, len(runs) - 1, num=max_runs, dtype=int)
-        unique_idx = sorted(set(int(i) for i in idx))
-        return [runs[i] for i in unique_idx]
 
 
     def _next_eval_cache_tag(self) -> int:
@@ -447,7 +362,7 @@ class Train:
             raise RuntimeError(f"Non-finite tensor detected in update(): {name}")
 
 
-    def update(self):
+    def update(self, episode=None):
         """Single SAC update step."""
         batch = self.buffer.sample(self.hp.batch_size)
 
@@ -522,16 +437,27 @@ class Train:
 
         # Target critics soft update
         for param, target_param in zip(self.critics.parameters(), self.critics_target.parameters()):
-            target_param.data.copy_(self.hp.τ * param.data + (1 - self.hp.τ) * target_param.data)
+            target_param.data.copy_(self.hp.tau * param.data + (1 - self.hp.tau) * target_param.data)
 
         # --- CHANGE (Lagrangian): lambda dual update ---
         # lambda <- max(0, min(lambda_max, lambda + lr*(E[cost] - cost_limit)))
         with torch.no_grad():
-            if self.dual_enabled and self.lmbda_lr > 0.0:
+            mean_cost = torch.mean(cost)
+            dual_active = (
+                self.dual_enabled
+                and self.lmbda_lr > 0.0
+                and (episode is None or int(episode) >= self.dual_warmup_episodes)
+            )
+            if dual_active:
+                high = cost.new_tensor(self.cost_limit_high)
+                low = cost.new_tensor(self.cost_limit_low)
                 target = cost.new_tensor(self.cost_limit)
-                grad = torch.mean(cost) - target
-                if abs(float(grad.detach().cpu())) > self.lambda_deadzone:
-                    self.lmbda += self.lmbda_lr * grad
+                if mean_cost > high:
+                    grad = mean_cost - target
+                    if abs(float(grad.detach().cpu())) > self.lambda_deadzone:
+                        self.lmbda += self.lmbda_lr * grad
+                elif mean_cost < low:
+                    self.lmbda *= self.lambda_decay
                 self.lmbda = torch.clamp(self.lmbda, min=0.0, max=self.lmbda_max)
             else:
                 self.lmbda.zero_()
@@ -594,7 +520,19 @@ class Train:
                             continue
 
                         obs_seq = np.stack(histories[key], axis=0)
-                        action = env.action_space.sample()
+
+                        raw_action = env.action_space.sample()
+
+                        obs_t = torch.as_tensor(obs_seq[None, ...], device=DEVICE)
+
+                        raw_action_t = torch.as_tensor(raw_action[None, ...], device=DEVICE)
+
+                        with torch.inference_mode():
+
+                            action_t, _ = self.actor._project(obs_t, raw_action_t)
+
+                        action = np.clip(action_t[0].detach().cpu().numpy(), env.action_space.low, env.action_space.high)
+
                         next_obs, rew, done, truncated, info = env.step(action)
                         next_obs_vec = self._obs_vector(next_obs)
                         histories[key].append(next_obs_vec.copy())
@@ -672,31 +610,19 @@ class Train:
 
                         if self.buffer.size >= self.hp.batch_size and (steps % self.update_every_steps == 0):
                             for _ in range(self.hp.update_steps):
-                                self.update()
+                                self.update(episode)
                                 updates_in_episode += 1
 
         return float(reward["total"]), int(steps)
 
 
-    def _run_eval_and_checkpoint(self, episode: int) -> tuple[float, float, float, int, int]:
+    def _run_eval_and_checkpoint(self, episode: int) -> tuple[float, float, int, int]:
         eval_reward_det = np.nan
-        eval_reward_stoch = np.nan
         checkpoint_score = np.nan
 
         if episode % self.hp.eval_every == 0:
-            eval_reward_det = float(self.eval(deterministic=True, runs=self.eval_runs_train, eval_desc="Eval Det (mini)"))
-            eval_reward_stoch = float(self.eval(deterministic=False, runs=self.eval_runs_train, eval_desc="Eval Stoch (mini)"))
-            checkpoint_score = float(0.5 * eval_reward_det + 0.5 * eval_reward_stoch)
-
-            should_run_full = (
-                self.eval_full_on_best
-                and len(self.eval_runs_train) < len(self.eval_runs_full)
-                and checkpoint_score > self.best_checkpoint_score + self.checkpoint_min_delta
-            )
-            if should_run_full:
-                eval_reward_det = float(self.eval(deterministic=True, runs=self.eval_runs_full, eval_desc="Eval Det (full)"))
-                eval_reward_stoch = float(self.eval(deterministic=False, runs=self.eval_runs_full, eval_desc="Eval Stoch (full)"))
-                checkpoint_score = float(0.5 * eval_reward_det + 0.5 * eval_reward_stoch)
+            eval_reward_det = float(self.eval(deterministic=True, runs=self.eval_runs_train, eval_desc="Eval Det"))
+            checkpoint_score = float(eval_reward_det)
 
             self.eval_rewards.append(eval_reward_det)
             self.eval_count += 1
@@ -704,84 +630,21 @@ class Train:
             if eval_reward_det > self.best_eval_reward + self.checkpoint_min_delta:
                 self.best_eval_reward = eval_reward_det
                 self.best_eval_episode = int(episode)
-                self._save_best_eval_det(eval_reward_det, episode, checkpoint_score, eval_reward_stoch)
-                self.last_improvement_episode_det = int(episode)
-                self.last_improvement_eval_count_det = int(self.eval_count)
-
-            if eval_reward_stoch > self.best_eval_reward_stoch + self.checkpoint_min_delta:
-                self.best_eval_reward_stoch = eval_reward_stoch
-                self.best_eval_episode_stoch = int(episode)
-                self._save_best_eval_stoch(eval_reward_stoch, episode, checkpoint_score, eval_reward_det)
-                self.last_improvement_episode_stoch = int(episode)
-                self.last_improvement_eval_count_stoch = int(self.eval_count)
-
-            if checkpoint_score > self.best_checkpoint_score + self.checkpoint_min_delta:
                 self.best_checkpoint_score = checkpoint_score
                 self.best_checkpoint_episode = int(episode)
-                self._save_best_eval(eval_reward_det, episode, checkpoint_score, eval_reward_stoch)
-                self.last_improvement_episode_combo = int(episode)
-                self.last_improvement_eval_count_combo = int(self.eval_count)
+                self._save_best_eval_det(eval_reward_det, episode, checkpoint_score)
+                self.last_improvement_episode = int(episode)
+                self.last_improvement_eval_count = int(self.eval_count)
 
-        no_improve_evals_det = int(self.eval_count if self.last_improvement_eval_count_det < 0 else self.eval_count - self.last_improvement_eval_count_det)
-        no_improve_evals_stoch = int(self.eval_count if self.last_improvement_eval_count_stoch < 0 else self.eval_count - self.last_improvement_eval_count_stoch)
-        no_improve_evals_combo = int(self.eval_count if self.last_improvement_eval_count_combo < 0 else self.eval_count - self.last_improvement_eval_count_combo)
-        no_improve_evals = int(min(no_improve_evals_det, no_improve_evals_stoch, no_improve_evals_combo))
+        no_improve_evals = int(self.eval_count if self.last_improvement_eval_count < 0 else self.eval_count - self.last_improvement_eval_count)
+        no_improve_episodes = int((episode + 1) if self.last_improvement_episode < 0 else episode - self.last_improvement_episode)
+        self.no_improve_evals = no_improve_evals
 
-        no_improve_episodes_det = int((episode + 1) if self.last_improvement_episode_det < 0 else episode - self.last_improvement_episode_det)
-        no_improve_episodes_stoch = int((episode + 1) if self.last_improvement_episode_stoch < 0 else episode - self.last_improvement_episode_stoch)
-        no_improve_episodes_combo = int((episode + 1) if self.last_improvement_episode_combo < 0 else episode - self.last_improvement_episode_combo)
-        no_improve_episodes = int(max(no_improve_episodes_det, no_improve_episodes_stoch, no_improve_episodes_combo))
-
-        self.no_improve_evals_det = no_improve_evals_det
-        self.no_improve_evals_stoch = no_improve_evals_stoch
-        self.no_improve_evals_combo = no_improve_evals_combo
-        self.last_improvement_episode = max(self.last_improvement_episode_det, self.last_improvement_episode_stoch, self.last_improvement_episode_combo)
-        self.last_improvement_eval_count = max(self.last_improvement_eval_count_det, self.last_improvement_eval_count_stoch, self.last_improvement_eval_count_combo)
-
-        return eval_reward_det, eval_reward_stoch, checkpoint_score, no_improve_episodes, no_improve_evals
+        return eval_reward_det, checkpoint_score, no_improve_episodes, no_improve_evals
 
 
     def _run_final_full_eval(self, episode: int) -> None:
-        if episode < 0:
-            return
-        if not self.eval_force_full_last_episode:
-            return
-        if len(self.eval_runs_train) >= len(self.eval_runs_full):
-            return
-
-        eval_reward_det = float(self.eval(deterministic=True, runs=self.eval_runs_full, eval_desc="Eval Det (final full)"))
-        eval_reward_stoch = float(self.eval(deterministic=False, runs=self.eval_runs_full, eval_desc="Eval Stoch (final full)"))
-        checkpoint_score = float(0.5 * eval_reward_det + 0.5 * eval_reward_stoch)
-
-        self.final_full_eval = {
-            "episode": int(episode),
-            "eval_reward_det": eval_reward_det,
-            "eval_reward_stoch": eval_reward_stoch,
-            "checkpoint_score": checkpoint_score,
-        }
-        with open(self.folder / "final_full_eval.json", "w", encoding="utf-8") as f:
-            json.dump(self.final_full_eval, f, indent=2)
-
-        if eval_reward_det > self.best_eval_reward + self.checkpoint_min_delta:
-            self.best_eval_reward = eval_reward_det
-            self.best_eval_episode = int(episode)
-            self._save_best_eval_det(eval_reward_det, episode, checkpoint_score, eval_reward_stoch)
-            self.last_improvement_episode_det = int(episode)
-            self.last_improvement_eval_count_det = int(self.eval_count)
-
-        if eval_reward_stoch > self.best_eval_reward_stoch + self.checkpoint_min_delta:
-            self.best_eval_reward_stoch = eval_reward_stoch
-            self.best_eval_episode_stoch = int(episode)
-            self._save_best_eval_stoch(eval_reward_stoch, episode, checkpoint_score, eval_reward_det)
-            self.last_improvement_episode_stoch = int(episode)
-            self.last_improvement_eval_count_stoch = int(self.eval_count)
-
-        if checkpoint_score > self.best_checkpoint_score + self.checkpoint_min_delta:
-            self.best_checkpoint_score = checkpoint_score
-            self.best_checkpoint_episode = int(episode)
-            self._save_best_eval(eval_reward_det, episode, checkpoint_score, eval_reward_stoch)
-            self.last_improvement_episode_combo = int(episode)
-            self.last_improvement_eval_count_combo = int(self.eval_count)
+        return
 
 
     def _aggregate_episode_update_metrics(self, q_start: int) -> dict:
@@ -830,50 +693,7 @@ class Train:
         }
 
 
-    def _load_il_hpo(self, tariff: str) -> dict:
-        il_path = PROJECT_ROOT / "Results" / "train" / "GRU" / "1-IL" / tariff / "best_params.json"
-        if not il_path.exists():
-            return {}
-        try:
-            with open(il_path, encoding="utf-8") as f:
-                data = json.load(f)
-            return data if isinstance(data, dict) else {}
-        except Exception as exc:
-            print(f"[il_hpo] failed to read {il_path}: {exc}")
-            return {}
-
-
-    def _apply_il_hpo_overrides(self) -> None:
-        if not self.il_hpo or self.il_inherit_mode == "none":
-            return
-
-        applied = []
-
-        if self.il_inherit_mode in {"history", "all"} and "history_len" in self.il_hpo:
-            self.history_len = int(self.il_hpo["history_len"])
-            applied.append(f"history_len={self.history_len}")
-
-        if self.il_inherit_mode == "all":
-            if "batch_size" in self.il_hpo:
-                self.hp.batch_size = int(self.il_hpo["batch_size"])
-                applied.append(f"batch_size={self.hp.batch_size}")
-            if "lr" in self.il_hpo:
-                self.hp.actor_lr = float(self.il_hpo["lr"])
-                applied.append(f"actor_lr={self.hp.actor_lr}")
-            if "weight_decay" in self.il_hpo:
-                self.actor_weight_decay = float(self.il_hpo["weight_decay"])
-                applied.append(f"actor_weight_decay={self.actor_weight_decay}")
-
-        if applied:
-            print(f"[il_hpo] overrides ({self.tariff}, mode={self.il_inherit_mode}): " + ", ".join(applied))
-
-
-    def _resolve_history_len(self, tariff: str) -> int:
-        fallback = int(self.train_cfg["train"].get("history_len", 1))
-        print(f"[history_len] {tariff} = {fallback} (from RL config; mode={self.il_inherit_mode})")
-        return fallback
-
-    def _build_audit_row(self, episode: int, train_total: float, eval_reward_det: float, eval_reward_stoch: float, checkpoint_score: float, metrics: dict, steps: int, iteration_time_sec: float, no_improve_episodes: int, no_improve_evals: int = 0) -> dict:
+    def _build_audit_row(self, episode: int, train_total: float, eval_reward_det: float, checkpoint_score: float, metrics: dict, steps: int, iteration_time_sec: float, no_improve_episodes: int, no_improve_evals: int = 0) -> dict:
         alpha_val = float(self.temperature.alpha.detach().cpu())
 
         return {
@@ -881,14 +701,9 @@ class Train:
             "train_reward_total": train_total,
             "eval_reward_det": float(eval_reward_det) if not np.isnan(eval_reward_det) else np.nan,
             "eval_reward": float(eval_reward_det) if not np.isnan(eval_reward_det) else np.nan,
-            "eval_reward_stoch": float(eval_reward_stoch) if not np.isnan(eval_reward_stoch) else np.nan,
             "checkpoint_score": float(checkpoint_score) if not np.isnan(checkpoint_score) else np.nan,
-            "checkpoint_metric": str(self.checkpoint_metric),
             "best_train_reward": float(self.best_train_reward),
             "best_eval_reward": float(self.best_eval_reward),
-            "best_eval_reward_det": float(self.best_eval_reward),
-            "best_eval_reward_stoch": float(self.best_eval_reward_stoch),
-            "best_eval_reward_combo": float(self.best_checkpoint_score),
             "best_checkpoint_score": float(self.best_checkpoint_score),
             "q1_mean": float(metrics["q1_mean"]) if not np.isnan(metrics["q1_mean"]) else np.nan,
             "q2_mean": float(metrics["q2_mean"]) if not np.isnan(metrics["q2_mean"]) else np.nan,
@@ -914,9 +729,6 @@ class Train:
             "alpha_loss": float(metrics["alpha_loss_ep"]) if not np.isnan(metrics["alpha_loss_ep"]) else np.nan,
             "no_improve_episodes": int(no_improve_episodes),
             "no_improve_evals": int(no_improve_evals),
-            "no_improve_evals_det": int(self.no_improve_evals_det),
-            "no_improve_evals_stoch": int(self.no_improve_evals_stoch),
-            "no_improve_evals_combo": int(self.no_improve_evals_combo),
             "iteration_time_sec": float(iteration_time_sec),
         }
 
@@ -930,16 +742,12 @@ class Train:
             self.audit_df.to_csv(self.audit_csv, index=False)
 
 
-    def _update_train_postfix(self, p_outer, train_total: float, eval_reward_det: float, eval_reward_stoch: float, checkpoint_score: float, metrics: dict, no_improve_episodes: int, no_improve_evals: int = 0):
+    def _update_train_postfix(self, p_outer, train_total: float, eval_reward_det: float, checkpoint_score: float, metrics: dict, no_improve_episodes: int, no_improve_evals: int = 0):
         p_outer.set_postfix({
             "train_total": f"{train_total:.2f}",
             "eval": f"{eval_reward_det:.2f}" if not np.isnan(eval_reward_det) else "-",
-            "eval_stoch": f"{eval_reward_stoch:.2f}" if not np.isnan(eval_reward_stoch) else "-",
             "ckpt": f"{checkpoint_score:.2f}" if not np.isnan(checkpoint_score) else "-",
-            "ckpt_m": str(self.checkpoint_metric),
-            "best_det": f"{self.best_eval_reward:.2f}",
-            "best_stoch": f"{self.best_eval_reward_stoch:.2f}",
-            "best_combo": f"{self.best_checkpoint_score:.2f}",
+            "best": f"{self.best_eval_reward:.2f}",
             "alpha": f"{float(self.temperature.alpha.detach().cpu()):.3f}",
             "lambda": f"{float(self.lmbda.detach().cpu().item()):.3f}",
             "dual": int(self.dual_enabled),
@@ -977,14 +785,13 @@ class Train:
             if train_total > self.best_train_reward:
                 self.best_train_reward = train_total
 
-            eval_reward_det, eval_reward_stoch, checkpoint_score, no_improve_episodes, no_improve_evals = self._run_eval_and_checkpoint(episode)
+            eval_reward_det, checkpoint_score, no_improve_episodes, no_improve_evals = self._run_eval_and_checkpoint(episode)
             metrics = self._aggregate_episode_update_metrics(q_start)
             iteration_time_sec = float(time.perf_counter() - episode_start_time)
             row = self._build_audit_row(
                 episode=episode,
                 train_total=train_total,
                 eval_reward_det=eval_reward_det,
-                eval_reward_stoch=eval_reward_stoch,
                 checkpoint_score=checkpoint_score,
                 metrics=metrics,
                 steps=steps,
@@ -998,7 +805,7 @@ class Train:
             if flush_due:
                 self._flush_audit(force=True)
 
-            self._update_train_postfix(p_outer, train_total, eval_reward_det, eval_reward_stoch, checkpoint_score, metrics, no_improve_episodes, no_improve_evals)
+            self._update_train_postfix(p_outer, train_total, eval_reward_det, checkpoint_score, metrics, no_improve_episodes, no_improve_evals)
 
             if self._should_early_stop(episode, no_improve_evals):
                 print(

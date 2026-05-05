@@ -55,9 +55,10 @@ def enrich_operation_with_reward_breakdown(operation: pd.DataFrame, raw_df: pd.D
     op["energy_cost_load"] = op["PLoad"].astype(float) * tar * dt
     op["energy_cost_bess"] = op["PBESS"].astype(float) * tar * dt
     op["energy_cost_ev"]   = op["PEV"].astype(float) * tar * dt
-    # PV reduces net grid import; keep the sign consistent with PGrid = load + bess + ev - pv
-    op["energy_cost_pv"]   = -op["PPV"].astype(float) * tar * dt
-
+    # PV term is the residual so reduced export credit is handled exactly.
+    op["energy_cost_pv"] = op["energy_cost"].astype(float) - (
+        op["energy_cost_load"] + op["energy_cost_bess"] + op["energy_cost_ev"]
+    )
     op["energy_cost_recon"] = (
         op["energy_cost_load"]
         + op["energy_cost_bess"]
