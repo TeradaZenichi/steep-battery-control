@@ -62,7 +62,7 @@ DPI = 200
 EXT = "pdf"                 # "pdf" or "png"
 
 # Which files to plot
-ACTOR_SUFFIX   = "_actor_env_operation.csv"
+ACTOR_SUFFIX   = "_actor_env_operation_combo.csv"
 TEACHER_SUFFIX = "_teacher_operation.csv"
 
 # Strict schema (no candidates)
@@ -159,7 +159,7 @@ def _plot_actor(df: pd.DataFrame, title: str, out_path: Path) -> None:
     #     alpha=0.7,
     #     label="ev_cmd",
     # )
-    # ax0.plot(
+    # ax0.step(
     #     df.index,
     #     df["pv_cmd"].astype(float).values,
     #     color=colors["PV"],
@@ -175,7 +175,7 @@ def _plot_actor(df: pd.DataFrame, title: str, out_path: Path) -> None:
     if PLOT_PV_AVAILABLE:
         denom = (1.0 - df[CURTAIL_COL].astype(float)).replace(0.0, np.nan)
         pv_available = (df["PPV"].astype(float) / denom).fillna(df["PPV"].astype(float))
-        ax0.plot(
+        ax0.step(
             df.index,
             pv_available.values,
             label="PV_available",
@@ -183,9 +183,9 @@ def _plot_actor(df: pd.DataFrame, title: str, out_path: Path) -> None:
             linestyle="--",
         )
 
-    ax0.plot(df.index, df["PPV"].astype(float).values, label="PPV", color=colors["PV"])
-    ax0.plot(df.index, df["PLoad"].astype(float).values, label="PLoad", color=colors["Load"])
-    ax0.plot(df.index, df["PGrid"].astype(float).values, label="PGrid", color=colors["Grid"])
+    ax0.step(df.index, df["PPV"].astype(float).values, label="PPV", color=colors["PV"])
+    ax0.step(df.index, df["PLoad"].astype(float).values, label="PLoad", color=colors["Load"])
+    ax0.step(df.index, df["PGrid"].astype(float).values, label="PGrid", color=colors["Grid"])
 
     ax0.bar(
         df.index,
@@ -212,7 +212,7 @@ def _plot_actor(df: pd.DataFrame, title: str, out_path: Path) -> None:
 
     # SoC (bottom)
     for c in SOC_COLS_ACTOR:
-        ax1.plot(df.index, df[c].astype(float).values, label=c)
+        ax1.step(df.index, df[c].astype(float).values, label=c)
 
     ax1.set_ylabel("SoC")
     ax1.set_ylim(-0.05, 1.05)
@@ -253,7 +253,7 @@ def _plot_teacher(df: pd.DataFrame, title: str, out_path: Path) -> None:
     if PLOT_PV_AVAILABLE:
         denom = (1.0 - df[CURTAIL_COL].astype(float)).replace(0.0, np.nan)
         pv_available = (df["PPV"].astype(float) / denom).fillna(df["PPV"].astype(float))
-        ax0.plot(
+        ax0.step(
             df.index,
             pv_available.values,
             label="PV_available",
@@ -261,9 +261,9 @@ def _plot_teacher(df: pd.DataFrame, title: str, out_path: Path) -> None:
             linestyle="--",
         )
 
-    ax0.plot(df.index, df["PPV"].astype(float).values, label="PPV", color=colors["PV"])
-    ax0.plot(df.index, df["PLoad"].astype(float).values, label="PLoad", color=colors["Load"])
-    ax0.plot(df.index, df["PGrid"].astype(float).values, label="PGrid", color=colors["Grid"])
+    ax0.step(df.index, df["PPV"].astype(float).values, label="PPV", color=colors["PV"])
+    ax0.step(df.index, df["PLoad"].astype(float).values, label="PLoad", color=colors["Load"])
+    ax0.step(df.index, df["PGrid"].astype(float).values, label="PGrid", color=colors["Grid"])
 
     ax0.bar(
         df.index,
@@ -290,7 +290,7 @@ def _plot_teacher(df: pd.DataFrame, title: str, out_path: Path) -> None:
 
     # SoC (bottom)
     for c in SOC_COLS_TEACHER:
-        ax1.plot(df.index, df[c].astype(float).values, label=c)
+        ax1.step(df.index, df[c].astype(float).values, label=c)
 
     ax1.set_ylabel("SoC")
     ax1.set_ylim(-0.05, 1.05)
@@ -313,7 +313,7 @@ def _plot_tariff(df: pd.DataFrame, title: str, out_path: Path) -> None:
 
     fig, ax = plt.subplots(1, 1, figsize=FIGSIZE, sharex=True)
 
-    ax.plot(df.index, df["tariff"].astype(float).values, label="tariff", color="#9467bd")
+    ax.step(df.index, df["tariff"].astype(float).values, label="tariff", color="#9467bd")
     ax.set_ylabel("Tariff")
     ax.set_xlabel("Time")
     ax.grid(True, alpha=0.3)

@@ -218,13 +218,13 @@ class Hyperparameters:
 
         self.seed       = config["seed"]
         self.days       = config["days"]
-        self.gamma      = float(_get_first(["ÃŽÂ³", "Î³"]))
-        self.tau        = float(_get_first(["Ãâ€ž", "Ï„"]))
+        self.gamma      = float(_get_first(["γ", "gamma", "ÃŽÂ³", "Î³"]))
+        self.tau        = float(_get_first(["τ", "tau", "Ãâ€ž", "Ï„"]))
         self.batch_size     = config["batch_size"]
         self.update_steps   = config["update_steps"]
         self.actor_lr       = config["actor_lr"]
         self.critic_lr      = config["critic_lr"]
-        self.alpha_lr       = float(_get_first(["ÃŽÂ±_lr", "Î±_lr"]))
+        self.alpha_lr       = float(_get_first(["α_lr", "alpha_lr", "ÃŽÂ±_lr", "Î±_lr"]))
         self.auto_alpha     = config["auto_entropy"]
         self.auto_entropy   = config["auto_entropy"]
         self.grad_clip      = config["grad_clip"]
@@ -241,6 +241,12 @@ class Hyperparameters:
 
         # Backward-compatible aliases used by legacy callsites.
         self.a_lr = self.alpha_lr
+        setattr(self, "γ", self.gamma)
+        setattr(self, "τ", self.tau)
+        setattr(self, "α_lr", self.alpha_lr)
+        setattr(self, "auto_α", self.auto_alpha)
+
+        # Keep mojibake aliases for compatibility with older scripts.
         setattr(self, "Î³", self.gamma)
         setattr(self, "Ï„", self.tau)
         setattr(self, "Î±_lr", self.alpha_lr)
