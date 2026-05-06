@@ -206,7 +206,18 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 
-Results/
+# Results: ignore generated outputs, but keep small IL metadata needed by later runs.
+Results/*
+!Results/train/
+Results/train/*
+!Results/train/*/
+Results/train/*/*
+!Results/train/*/1-IL/
+Results/train/*/1-IL/*
+!Results/train/*/1-IL/*/
+Results/train/*/1-IL/*/*
+!Results/train/*/1-IL/*/best_params.json
+!Results/train/*/1-IL/*/actor_cfg.json
 .old/
 PROJECT.zip
 Resultsold/

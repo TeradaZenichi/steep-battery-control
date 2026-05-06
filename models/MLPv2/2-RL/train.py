@@ -51,7 +51,7 @@ class Train:
         self.eval_workers = 8
         self.train_env_workers = 1
         self.early_stop_patience = int(self.train_cfg["train"]["early_stop_patience"])
-        self.min_episodes_before_early_stop = 50
+        self.min_episodes_before_early_stop = 100
         self.checkpoint_min_delta = 0.0
         self.checkpoint_metric = "det"
         self.env_cy = SmartHomeEnv(
@@ -142,9 +142,9 @@ class Train:
         self.lmbda_max = 1.0
         self.lambda_deadzone = 1e-5
         self.dual_enabled = True
-        self.cost_limit_high = 0.07
-        self.cost_limit_low = 0.03
-        self.dual_warmup_episodes = 50
+        self.cost_limit_high = 0.05
+        self.cost_limit_low = 0.02
+        self.dual_warmup_episodes = 10
         self.lambda_decay = 0.995
 
         self.best_eval_reward = -float("inf")
