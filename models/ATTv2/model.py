@@ -196,6 +196,66 @@ class AttentionActor(nn.Module):
     def _map_pv(z_pv: torch.Tensor) -> torch.Tensor:
         return torch.exp(5.0 * (z_pv - 1.0)).clamp(0.0, 1.0)
 
+
+    @staticmethod
+    def _last_obs(x: torch.Tensor) -> torch.Tensor:
+        if x.dim() == 2:
+            return x
+        if x.dim() == 3:
+            return x[:, -1, :]
+        raise ValueError(f"Expected x with 2 or 3 dims, got {x.dim()}")
+
+    @staticmethod
+    def _scale_unit(z: torch.Tensor, amin: torch.Tensor, amax: torch.Tensor) -> torch.Tensor:
+        return amin + 0.5 * (z + 1.0) * (amax - amin)
+
+    def _action_bounds(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        x_last = self._last_obs(x)
+        soc_bess = x_last[..., 12:13]
+        soc_ev = x_last[..., 13:14]
+        ev_on = x_last[..., 14:15]
+        amin_b, amax_b = self.bess.limits(soc_bess)
+        amin_e, amax_e = self.ev.get_limits(soc_ev, ev_on)
+        return amin_b, amax_b, amin_e, amax_e
+
+    def _action_from_unit(self, x: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
+        amin_b, amax_b, amin_e, amax_e = self._action_bounds(x)
+        a_bess = self._scale_unit(z[..., 0:1], amin_b, amax_b)
+        a_ev = self._scale_unit(z[..., 1:2], amin_e, amax_e)
+        a_pv = self._map_pv(z[..., 2:3])
+        return torch.cat([a_bess, a_ev, a_pv], dim=-1)
+
+    def _action_and_logp(self, x: torch.Tensor, raw: torch.Tensor, dist: Normal) -> tuple[torch.Tensor, torch.Tensor]:
+        z = torch.tanh(raw)
+        amin_b, amax_b, amin_e, amax_e = self._action_bounds(x)
+
+        a_bess = self._scale_unit(z[..., 0:1], amin_b, amax_b)
+        a_ev = self._scale_unit(z[..., 1:2], amin_e, amax_e)
+        a_pv = self._map_pv(z[..., 2:3])
+        action = torch.cat([a_bess, a_ev, a_pv], dim=-1)
+
+        eps = raw.new_tensor(1e-6)
+        logp_unit = dist.log_prob(raw) - torch.log(1.0 - z.pow(2) + eps)
+
+        span_b = torch.clamp(amax_b - amin_b, min=0.0)
+        span_e = torch.clamp(amax_e - amin_e, min=0.0)
+        active_b = span_b > eps
+        active_e = span_e > eps
+
+        logp_b = torch.where(
+            active_b,
+            logp_unit[..., 0:1] - torch.log((0.5 * span_b).clamp_min(eps)),
+            torch.zeros_like(logp_unit[..., 0:1]),
+        )
+        logp_e = torch.where(
+            active_e,
+            logp_unit[..., 1:2] - torch.log((0.5 * span_e).clamp_min(eps)),
+            torch.zeros_like(logp_unit[..., 1:2]),
+        )
+        logp_pv = logp_unit[..., 2:3] - torch.log(5.0 * a_pv.clamp_min(eps))
+        logp = logp_b + logp_e + logp_pv
+        return action, logp
+
     @staticmethod
     def _to_seq(x: torch.Tensor) -> tuple[torch.Tensor, bool]:
         if x.dim() == 2:
@@ -229,9 +289,7 @@ class AttentionActor(nn.Module):
 
     def forward(self, x: torch.Tensor):
         mu, _ = self._dist_params(x)
-        z = torch.tanh(mu)
-        pv = self._map_pv(z[..., 2:3])
-        action = torch.cat([z[..., 0:1], z[..., 1:2], pv], dim=-1)
+        action = self._action_from_unit(x, torch.tanh(mu))
         return action
 
     def _project(self, x: torch.Tensor, action_raw: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -264,20 +322,11 @@ class AttentionActor(nn.Module):
         dist = Normal(mu, std)
 
         raw = dist.rsample()
-        z = torch.tanh(raw)
-        z_pv = self._map_pv(z[..., 2:3])
-        z = torch.cat([z[..., 0:1], z[..., 1:2], z_pv], dim=-1)
+        action, logp = self._action_and_logp(x, raw, dist)
+        action_proj, cost = self._project(x, action)
 
-        action_proj, cost = self._project(x, z)
-
-        logp = dist.log_prob(raw).sum(dim=-1, keepdim=True)
-        logp -= torch.log(1.0 - torch.tanh(raw).pow(2) + 1e-6).sum(dim=-1, keepdim=True)
-        logp -= torch.log(5.0 * z_pv.clamp_min(1e-6)).sum(dim=-1, keepdim=True)
-
-        mu_tanh = torch.tanh(mu)
-        mu_pv = self._map_pv(mu_tanh[..., 2:3])
-        mu_tanh = torch.cat([mu_tanh[..., 0:1], mu_tanh[..., 1:2], mu_pv], dim=-1)
-        mu_action_proj, _ = self._project(x, mu_tanh)
+        mu_action = self._action_from_unit(x, torch.tanh(mu))
+        mu_action_proj, _ = self._project(x, mu_action)
 
         return action_proj, logp, mu_action_proj, cost
 

@@ -22,7 +22,7 @@ from model import load_actor
 _EVAL_DF_CACHE = {}
 _EVAL_ACTOR_CACHE = {}
 
-class ReplayBuffer:
+class _ReplayShard:
     """Lazy-frame replay buffer: stores one obs per transition and reconstructs
     sequences of ``history_len`` on the fly during ``sample()``.
 
@@ -197,6 +197,86 @@ class ReplayBuffer:
         }
     
 
+
+class ReplayBuffer:
+    """Replay buffer split by data base/stream.
+
+    Each stream (currently CY and WY) owns an independent n-step queue,
+    episode counter, and circular storage. Sequence models therefore never
+    reconstruct histories across bases, even when collection interleaves CY
+    and WY steps inside the same training episode.
+    """
+
+    def __init__(self, capacity: int, obs_dim: int, act_dim: int, device: torch.device,
+                 history_len: int = 1, n_step: int = 1, gamma: float = 0.995):
+        self.capacity = int(capacity)
+        self.obs_dim = int(obs_dim)
+        self.act_dim = int(act_dim)
+        self.device = device
+        self.history_len = max(1, int(history_len))
+        self.n_step = max(1, int(n_step))
+        self.gamma = float(gamma)
+        self.shard_capacity = max(1, self.capacity // 2)
+        self._shards: dict[object, _ReplayShard] = {}
+
+    @property
+    def size(self) -> int:
+        return int(sum(shard.size for shard in self._shards.values()))
+
+    def __len__(self) -> int:
+        return self.size
+
+    def _new_shard(self) -> _ReplayShard:
+        try:
+            return _ReplayShard(
+                capacity=self.shard_capacity,
+                obs_dim=self.obs_dim,
+                act_dim=self.act_dim,
+                device=self.device,
+                history_len=self.history_len,
+                n_step=self.n_step,
+                gamma=self.gamma,
+            )
+        except TypeError:
+            return _ReplayShard(
+                capacity=self.shard_capacity,
+                obs_dim=self.obs_dim,
+                act_dim=self.act_dim,
+                device=self.device,
+                n_step=self.n_step,
+                gamma=self.gamma,
+            )
+
+    def _shard(self, stream_id=0) -> _ReplayShard:
+        key = stream_id
+        if key not in self._shards:
+            self._shards[key] = self._new_shard()
+        return self._shards[key]
+
+    def add(self, obs: np.ndarray, act: np.ndarray, rew: float,
+            next_obs: np.ndarray, done: bool, stream_id=0) -> None:
+        self._shard(stream_id).add(obs, act, rew, next_obs, done, stream_id=0)
+
+    def sample(self, batch_size: int) -> dict[str, torch.Tensor]:
+        shards = [shard for shard in self._shards.values() if shard.size > 0]
+        if not shards:
+            raise RuntimeError("Cannot sample from an empty buffer.")
+
+        batch_size = int(batch_size)
+        base = batch_size // len(shards)
+        rem = batch_size % len(shards)
+        counts = [base + (1 if i < rem else 0) for i in range(len(shards))]
+        counts = [count for count in counts if count > 0]
+
+        batches = [shard.sample(count) for shard, count in zip(shards, counts)]
+        out = {
+            key: torch.cat([batch[key] for batch in batches], dim=0)
+            for key in batches[0].keys()
+        }
+        perm = torch.randperm(out["obs"].shape[0], device=self.device)
+        return {key: value[perm] for key, value in out.items()}
+
+
 class Hyperparameters:
     def __init__(self, config: dict):
         self.seed = 42
@@ -369,5 +449,16 @@ def _eval_worker(run, parameters, tariff, actor_cfg, actor_state_dict, episode_l
         history.append(next_obs.copy())
         steps += 1
 
-    return episode_reward
-
+    result = {"reward": float(episode_reward), "steps": int(steps)}
+    op = getattr(env, "operation", None)
+    if op is not None and len(op) > 0:
+        for col in ["energy_cost", "bess_cost", "ev_cost", "pv_cost", "grid_penalty"]:
+            if col in op:
+                result[col] = float(pd.to_numeric(op[col], errors="coerce").fillna(0.0).sum())
+        if "pv_cmd" in op:
+            result["pv_cmd_mean"] = float(pd.to_numeric(op["pv_cmd"], errors="coerce").fillna(0.0).mean())
+        if "PBESS" in op:
+            result["bess_abs_power_mean"] = float(np.abs(pd.to_numeric(op["PBESS"], errors="coerce").fillna(0.0).to_numpy()).mean())
+        if "PEV" in op:
+            result["ev_abs_power_mean"] = float(np.abs(pd.to_numeric(op["PEV"], errors="coerce").fillna(0.0).to_numpy()).mean())
+    return result

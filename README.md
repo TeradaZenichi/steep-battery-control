@@ -5,7 +5,7 @@ Research repository for residential energy management with battery energy storag
 The project uses a two-stage learning pipeline:
 
 1. `1-IL` (Imitation Learning): train actors to imitate a MILP teacher (`Pyomo`).
-2. `2-RL` (Reinforcement Learning): refine policies with SAC plus feasibility-aware projection and dual penalty.
+2. `2-RL` (Reinforcement Learning): refine policies with SAC plus state-bounded actions and a feasibility guard.
 
 ## Technical Overview
 
@@ -123,8 +123,8 @@ The `2-RL` stage refines each actor with Soft Actor-Critic (SAC) after IL pretra
 - With two streams, this gives `4032` environment steps per episode:
   - `2016` steps for CY,
   - `2016` steps for WY.
-- Warmup uses random actions projected through the same safety layer used during policy rollouts.
-- After warmup, the actor samples stochastic actions for exploration and stores projected executable actions in replay.
+- Warmup samples random actions directly inside the state-dependent feasible BESS/EV bounds and then applies the model-level guard.
+- After warmup, the actor samples stochastic actions directly inside the state-dependent BESS/EV/PV bounds and stores executable actions in replay.
 
 ### SAC Update
 
@@ -135,8 +135,7 @@ Each update samples lazy history sequences from the replay buffer and applies:
 - automatic entropy temperature (`alpha`),
 - actor loss composed of:
   - entropy term,
-  - Q-value term,
-  - dual feasibility term.
+  - Q-value term.
 
 The main RL hyperparameters are configured in `models/<family>/2-RL/config.json`, including:
 
@@ -144,7 +143,6 @@ The main RL hyperparameters are configured in `models/<family>/2-RL/config.json`
 - `history_len`,
 - `n_step`,
 - `update_every_steps`,
-- `lambda_lr`,
 - `early_stop_patience`,
 - `gamma`,
 - `tau`,
@@ -162,26 +160,17 @@ Other training choices are intentionally fixed in code for reproducibility and s
 - `train_env_workers = 1`,
 - `eval_workers = 12`.
 
-### Safety Layer and Dual Penalty
+### Bounded Actor and Feasibility Guard
 
-The actor proposes a raw action, and the model-level safety layer projects it to feasible BESS, EV, and PV bounds before the action is executed in `SmartHomeEnv`.
+The actor samples a raw Gaussian variable, applies `tanh`, and then maps the BESS and EV components directly to the feasible action interval induced by the current observation. PV curtailment is mapped to `[0, 1]` with the same smooth transform used by all model families.
 
-This design keeps the executed policy physically feasible while still teaching the actor to internalize constraints:
+This avoids the old mismatch where SAC optimized the log-probability of a pre-projection action while the critic and environment saw the projected action. The model-level projection remains as a guard for numerical drift:
 
-1. The projected action is sent to the environment.
-2. The projection residual is converted into a feasibility cost.
-3. A Lagrangian dual variable `lambda` penalizes repeated dependence on projection.
+1. The bounded sampled action is sent to the environment.
+2. The guard projection is applied afterward and should usually have zero residual.
+3. The residual is still logged as a feasibility cost.
 
-The current dual policy is:
-
-- `cost_limit = 0.05`,
-- `cost_limit_high = 0.05`,
-- `cost_limit_low = 0.02`,
-- `dual_warmup_episodes = 10`,
-- `lambda_max = 1.0`,
-- `lambda_lr` from the RL config.
-
-This means the safety layer is used as an execution guard, while the dual term pressures the stochastic actor to generate actions that are feasible before projection.
+In normal policy rollouts, the projection cost should remain near zero because the actor distribution is already state-feasible.
 
 ### Validation and Early Stopping
 
@@ -196,7 +185,7 @@ Validation uses a process pool with `eval_workers = 12`, so the 24 scenarios run
 
 ### Checkpoints
 
-The trainer writes two deterministic checkpoint families:
+The trainer writes four deterministic checkpoint families:
 
 - reward checkpoint:
   - `best_actor_eval.pt`,
@@ -205,19 +194,26 @@ The trainer writes two deterministic checkpoint families:
   - `best_checkpoint_eval_det.pt`,
   - `best_eval_meta.json`,
   - `best_eval_det_meta.json`.
-- safety-aware checkpoint:
-  - `best_actor_eval_safe.pt`,
-  - `best_checkpoint_eval_safe.pt`,
-  - `best_eval_safe_meta.json`.
+- robust checkpoint:
+  - `best_actor_eval_robust.pt`,
+  - `best_checkpoint_eval_robust.pt`,
+  - `best_eval_robust_meta.json`.
+- operational checkpoint:
+  - `best_actor_eval_operational.pt`,
+  - `best_checkpoint_eval_operational.pt`,
+  - `best_eval_operational_meta.json`.
+- final checkpoint:
+  - `final_actor.pt`,
+  - `final_checkpoint.pt`,
+  - `final_eval_meta.json`.
 
 The reward checkpoint selects the highest deterministic validation reward.
 
-The safety-aware checkpoint first prefers policies with:
+The robust checkpoint selects the highest mean reward over the two worst validation scenarios. This avoids choosing a policy that wins only by overperforming in easier validation windows.
 
-- `cost_mean <= 0.04`,
-- `cost_p95 <= 0.18`.
+The operational checkpoint considers policies within a small reward tolerance of the current best reward and then prefers lower operational side costs: grid penalty, EV cost, and PV curtailment cost. It is meant for inspection and figure selection, while the reward checkpoint remains the main result checkpoint.
 
-Among feasible policies, it selects the highest validation reward. If no feasible policy has appeared yet, it selects the lowest mean projection cost, then lowest p95 projection cost, then lowest violation fraction, then highest reward. The violation fraction is kept as a diagnostic and tie-breaker because it can be high even when the projection magnitude is already small.
+The final checkpoint stores the last actor and a final deterministic validation summary. It is useful for diagnosing late training degradation.
 
 ### Training Audit
 
@@ -225,9 +221,11 @@ Every 5 episodes, and also at the end of training or early stopping, the trainer
 
 - training reward,
 - deterministic validation reward,
+- worst-case and robust validation reward,
+- operational validation score,
 - best checkpoint scores,
 - Q-value and backup statistics,
-- `alpha` and `lambda`,
+- `alpha`,
 - projection cost metrics,
 - violation fraction,
 - actor/critic/alpha losses,
@@ -245,9 +243,10 @@ Main behavior:
 - Trains one SAC agent per tariff (`tar_s`, `tar_w`, `tar_sw`, `tar_tou`, `tar_flat`).
 - Uses two training streams (`CY` and `WY`) sampled by `EpisodeGen`.
 - Runs warmup episodes with random actions before gradient updates.
-- Uses a lazy-frame replay buffer with:
+- Uses a replay buffer split by data stream (`CY`/`WY`) with:
   - history stacking (`history_len`),
   - n-step returns (`n_step`),
+  - independent n-step queues and episode ids per stream,
   - lower memory usage by storing flat transitions and reconstructing sequences on sample.
 - Supports multi-thread stepping for train environments (`train_env_workers`).
 - Supports process-pool parallel evaluation (`eval_workers`).
@@ -255,19 +254,17 @@ Main behavior:
 SAC update logic includes:
 
 - critic backup with entropy term,
-- actor loss with three terms:
+- actor loss with two terms:
   - entropy term,
-  - Q term,
-  - dual feasibility term (`lambda * cost`) when enabled.
+  - Q term.
 - automatic entropy temperature update (`alpha`) when configured.
 - target critic soft update (`tau`).
 
 Feasibility/constraint handling:
 
-- Actor output is projected to action-feasible bounds (model-level projection).
-- Projection residual induces a cost.
-- Dual variable `lambda` is updated with:
-  - `lambda <- clamp(lambda + lr * (E[cost] - cost_limit), 0, lambda_max)`.
+- Actor output is sampled directly inside action-feasible bounds.
+- The model-level projection remains as a final guard and its residual induces a cost when nonzero.
+- Projection cost is logged as a diagnostic; it is not part of the actor objective.
 
 Evaluation and checkpoint policy:
 
@@ -275,13 +272,17 @@ Evaluation and checkpoint policy:
 - Saves reward-selected deterministic checkpoints:
   - `best_actor_eval.pt`,
   - `best_actor_eval_det.pt`.
-- Saves safety-aware deterministic checkpoints:
-  - `best_actor_eval_safe.pt`.
+- Saves robust deterministic checkpoints:
+  - `best_actor_eval_robust.pt`.
+- Saves operational deterministic checkpoints:
+  - `best_actor_eval_operational.pt`.
+- Saves final-episode checkpoints:
+  - `final_actor.pt`.
 - Saves full checkpoint files and metadata JSON.
 - Writes `audit_training.csv` with episode-level diagnostics:
   - rewards,
   - Q/backup statistics,
-  - alpha/lambda,
+  - alpha,
   - cost violation metrics,
   - actor/critic/alpha losses,
   - no-improvement counters,
@@ -433,11 +434,13 @@ Main outputs:
   - `best_params.json`
   - `actor_cfg.json`
 - `Results/train/<MODEL>/2-RL/<TARIFF>/`
-  - `best_actor_eval.pt`, `best_actor_eval_det.pt`, `best_actor_eval_safe.pt`
+  - `best_actor_eval.pt`, `best_actor_eval_det.pt`
+  - `best_actor_eval_robust.pt`, `best_actor_eval_operational.pt`
+  - `final_actor.pt`
   - `best_checkpoint_eval*.pt`
   - `best_eval*_meta.json`
+  - `final_checkpoint.pt`, `final_eval_meta.json`
   - `audit_training.csv`
-  - `final_full_eval.json` (when enabled)
 - `Results/test/<MODEL>/<STAGE>/<TARIFF>/`
   - `teacher_summary.json`
   - `summary.json` and/or `summary_<variant>.json`

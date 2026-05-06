@@ -431,6 +431,7 @@ class Teacher:
 
         conn_t = int(self.ev.df["ev_conn"].loc[t])
         ev_connected = _is_connected(conn_t)
+        ev_controllable = conn_t == 1
 
         if t == self.sim.start:
             bess_soc_state = float(self.bess.soc0)
@@ -442,7 +443,7 @@ class Teacher:
             conn_prev = int(self.ev.df["ev_conn"].loc[t_prev])
             ev_prev_connected = _is_connected(conn_prev)
 
-            if not ev_connected:
+            if not ev_controllable:
                 ev_soc_state = 0.0
             elif not ev_prev_connected:
                 ev_soc_state = 0.0
@@ -453,8 +454,8 @@ class Teacher:
             self.load.power(t) / self.Pnorm,
             self.pv.power(t) / self.Pnorm,
             bess_soc_state,
-            ev_soc_state * int(ev_connected),
-            1.0 if ev_connected else 0.0,
+            ev_soc_state * int(ev_controllable),
+            1.0 if ev_controllable else 0.0,
         ]
 
         tariff_obs = [self.grid.df[t]]

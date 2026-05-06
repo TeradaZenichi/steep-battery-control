@@ -97,9 +97,15 @@ class Train:
         self.best_actor_det_path = self.folder / "best_actor_eval_det.pt"
         self.best_ckpt_det_path  = self.folder / "best_checkpoint_eval_det.pt"
         self.best_meta_det_path  = self.folder / "best_eval_det_meta.json"
-        self.best_actor_safe_path = self.folder / "best_actor_eval_safe.pt"
-        self.best_ckpt_safe_path  = self.folder / "best_checkpoint_eval_safe.pt"
-        self.best_meta_safe_path  = self.folder / "best_eval_safe_meta.json"
+        self.best_actor_robust_path = self.folder / "best_actor_eval_robust.pt"
+        self.best_ckpt_robust_path  = self.folder / "best_checkpoint_eval_robust.pt"
+        self.best_meta_robust_path  = self.folder / "best_eval_robust_meta.json"
+        self.best_actor_operational_path = self.folder / "best_actor_eval_operational.pt"
+        self.best_ckpt_operational_path  = self.folder / "best_checkpoint_eval_operational.pt"
+        self.best_meta_operational_path  = self.folder / "best_eval_operational_meta.json"
+        self.final_actor_path = self.folder / "final_actor.pt"
+        self.final_ckpt_path  = self.folder / "final_checkpoint.pt"
+        self.final_meta_path  = self.folder / "final_eval_meta.json"
 
         self.buffer = ReplayBuffer(
             capacity=self.hp.buffer_size,
@@ -136,27 +142,16 @@ class Train:
         self.opt_actor = torch.optim.Adam(self.actor.parameters(), lr=self.hp.actor_lr, weight_decay=self.actor_weight_decay)
         self.opt_critic = torch.optim.Adam(self.critics.parameters(), lr=self.hp.critic_lr)
 
-        # --- CHANGE (Lagrangian): initialize dual variable (lambda) and its hyperparameters ---
-        # This lambda penalizes infeasible raw actions via a cost produced by the projected sample().
-        self.lmbda = torch.zeros(1, device=DEVICE)
-        self.lmbda_lr = float(self.train_cfg["train"]["lambda_lr"])
-        self.cost_limit = 0.05
-        self.lmbda_max = 1.0
-        self.lambda_deadzone = 1e-5
-        self.dual_enabled = True
-        self.cost_limit_high = 0.05
-        self.cost_limit_low = 0.02
-        self.dual_warmup_episodes = 10
-        self.lambda_decay = 0.995
-
         self.best_eval_reward = -float("inf")
         self.best_eval_episode = -1
         self.best_checkpoint_score = -float("inf")
         self.best_checkpoint_episode = -1
-        self.safe_cost_mean_limit = 0.04
-        self.safe_cost_p95_limit = 0.18
-        self.best_safe_key = (-float("inf"), -float("inf"), -float("inf"), -float("inf"), -float("inf"))
-        self.best_safe_episode = -1
+        self.best_robust_score = -float("inf")
+        self.best_robust_episode = -1
+        self.best_operational_score = -float("inf")
+        self.best_operational_key = (-float("inf"), -float("inf"), -float("inf"))
+        self.best_operational_episode = -1
+        self.operational_reward_tolerance = 5.0
         self.best_train_reward = -float("inf")
         self.last_improvement_episode = -1
         self.last_improvement_eval_count = -1
@@ -177,7 +172,7 @@ class Train:
         self.logp_means = []
         self.logp_mins = []
 
-        # --- CHANGE (Projection/Loss audit): extra per-update metrics ---
+        # --- CHANGE (Bounded-action audit): extra per-update metrics ---
         # These are appended once per update, and sliced per-episode using q_start:q_end.
         self.cost_means = []
         self.cost_p95s = []
@@ -185,7 +180,6 @@ class Train:
         self.actor_losses = []
         self.actor_term_entropies = []
         self.actor_term_qs = []
-        self.actor_term_duals = []
         self.critic_losses = []
         self.alpha_losses = []
         self.violation_eps = 1e-6
@@ -197,10 +191,15 @@ class Train:
             "train_reward_total",
             "eval_reward_det",
             "eval_reward",
+            "eval_reward_worst",
+            "eval_reward_robust",
+            "eval_operational_score",
             "checkpoint_score",
             "best_train_reward",
             "best_eval_reward",
             "best_checkpoint_score",
+            "best_robust_score",
+            "best_operational_score",
             "q1_mean",
             "q2_mean",
             "backup_mean",
@@ -212,8 +211,6 @@ class Train:
             "steps",
             "buffer_size",
             "alpha",
-            "lambda",
-            "dual_enabled",
             "cost_mean",
             "cost_p95",
             "frac_violation",
@@ -221,7 +218,6 @@ class Train:
             "actor_loss",
             "actor_term_entropy",
             "actor_term_q",
-            "actor_term_dual",
             "alpha_loss",
             "no_improve_episodes",
             "no_improve_evals",
@@ -237,6 +233,7 @@ class Train:
         self.eval_runs_full = list(self.train_cfg["val"])
         self.eval_runs_train = list(self.eval_runs_full)
         self.final_full_eval = {}
+        self.last_eval_stats = {}
 
 
 
@@ -254,71 +251,109 @@ class Train:
             "opt_actor_state_dict": self.opt_actor.state_dict(),
             "opt_critic_state_dict": self.opt_critic.state_dict(),
             "opt_alpha_state_dict": self.opt_alpha.state_dict(),
-            # --- CHANGE (Lagrangian): persist lambda for reproducibility ---
-            "lambda_value": float(self.lmbda.detach().cpu().item()),
-            # --- END CHANGE ---
         }
         torch.save(ckpt, filepath)
 
 
-    def _save_best_eval_det(self, eval_reward_det: float, episode: int, checkpoint_score: float) -> None:
-        torch.save(self.actor.state_dict(), self.best_actor_det_path)
-        torch.save(self.actor.state_dict(), self.best_actor_path)
-        self.save_checkpoint(self.best_ckpt_det_path)
-        self.save_checkpoint(self.best_ckpt_path)
-        meta = {
-            "best_eval_reward": float(eval_reward_det),
+
+    @staticmethod
+    def _json_safe(value):
+        if isinstance(value, dict):
+            return {str(k): Train._json_safe(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [Train._json_safe(v) for v in value]
+        if isinstance(value, np.ndarray):
+            return Train._json_safe(value.tolist())
+        if isinstance(value, (np.floating, np.integer)):
+            return value.item()
+        return value
+
+
+    def _checkpoint_meta(self, metric: str, stats: dict, episode: int, score: float) -> dict:
+        return {
+            "best_eval_reward": float(stats.get("mean_reward", np.nan)),
             "best_eval_episode": int(episode),
-            "checkpoint_score": float(checkpoint_score),
-            "checkpoint_metric": "det",
+            "checkpoint_score": float(score),
+            "checkpoint_metric": metric,
             "tariff": self.tariff,
+            "eval_stats": self._json_safe(stats),
         }
-        with open(self.best_meta_det_path, "w", encoding="utf-8") as f:
+
+
+    def _save_checkpoint_bundle(self, actor_path: Path, ckpt_path: Path, meta_path: Path, meta: dict, mirror_legacy: bool = False) -> None:
+        torch.save(self.actor.state_dict(), actor_path)
+        self.save_checkpoint(ckpt_path)
+        with open(meta_path, "w", encoding="utf-8") as f:
             json.dump(meta, f, indent=2)
-        with open(self.best_meta_path, "w", encoding="utf-8") as f:
+        if mirror_legacy:
+            torch.save(self.actor.state_dict(), self.best_actor_path)
+            self.save_checkpoint(self.best_ckpt_path)
+            with open(self.best_meta_path, "w", encoding="utf-8") as f:
+                json.dump(meta, f, indent=2)
+
+
+    def _save_best_eval_det(self, stats: dict, episode: int) -> None:
+        score = float(stats["mean_reward"])
+        meta = self._checkpoint_meta("mean_reward_det", stats, episode, score)
+        self._save_checkpoint_bundle(self.best_actor_det_path, self.best_ckpt_det_path, self.best_meta_det_path, meta, mirror_legacy=True)
+
+
+    def _save_best_eval_robust(self, stats: dict, episode: int) -> None:
+        score = float(stats["robust_score"])
+        meta = self._checkpoint_meta("worst_two_mean_reward", stats, episode, score)
+        self._save_checkpoint_bundle(self.best_actor_robust_path, self.best_ckpt_robust_path, self.best_meta_robust_path, meta)
+
+
+    def _save_best_eval_operational(self, stats: dict, episode: int, key: tuple[float, float, float]) -> None:
+        score = float(stats["operational_score"])
+        meta = self._checkpoint_meta("operational_cost_with_reward_tolerance", stats, episode, score)
+        meta["operational_reward_tolerance"] = float(self.operational_reward_tolerance)
+        meta["operational_key"] = [float(x) for x in key]
+        self._save_checkpoint_bundle(self.best_actor_operational_path, self.best_ckpt_operational_path, self.best_meta_operational_path, meta)
+
+
+    def _save_final_checkpoint(self, episode: int) -> None:
+        torch.save(self.actor.state_dict(), self.final_actor_path)
+        self.save_checkpoint(self.final_ckpt_path)
+        meta = {"episode": int(episode), "checkpoint_metric": "final_episode", "tariff": self.tariff, "eval_stats": self._json_safe(self.final_full_eval)}
+        with open(self.final_meta_path, "w", encoding="utf-8") as f:
             json.dump(meta, f, indent=2)
 
 
-    def _maybe_save_safe_checkpoint(self, eval_reward_det: float, episode: int, metrics: dict) -> None:
-        if np.isnan(eval_reward_det):
+    def _maybe_save_mean_checkpoint(self, stats: dict, episode: int) -> bool:
+        score = float(stats.get("mean_reward", np.nan))
+        if np.isnan(score) or score <= self.best_eval_reward + self.checkpoint_min_delta:
+            return False
+        self.best_eval_reward = score
+        self.best_eval_episode = int(episode)
+        self.best_checkpoint_score = score
+        self.best_checkpoint_episode = int(episode)
+        self._save_best_eval_det(stats, episode)
+        return True
+
+
+    def _maybe_save_robust_checkpoint(self, stats: dict, episode: int) -> None:
+        score = float(stats.get("robust_score", np.nan))
+        if np.isnan(score) or score <= self.best_robust_score + self.checkpoint_min_delta:
             return
+        self.best_robust_score = score
+        self.best_robust_episode = int(episode)
+        self._save_best_eval_robust(stats, episode)
 
-        cost_mean = float(metrics.get("cost_mean_ep", np.nan))
-        cost_p95 = float(metrics.get("cost_p95_ep", np.nan))
-        frac_violation = float(metrics.get("frac_violation_ep", np.nan))
-        if np.isnan(cost_mean) or np.isnan(cost_p95) or np.isnan(frac_violation):
+
+    def _maybe_save_operational_checkpoint(self, stats: dict, episode: int) -> None:
+        mean_reward = float(stats.get("mean_reward", np.nan))
+        operational_cost = float(stats.get("operational_cost", np.nan))
+        if np.isnan(mean_reward) or np.isnan(operational_cost):
             return
-
-        feasible = cost_mean <= self.safe_cost_mean_limit and cost_p95 <= self.safe_cost_p95_limit
-        if feasible:
-            safe_key = (1.0, float(eval_reward_det), -cost_mean, -cost_p95, -frac_violation)
-            safe_metric = "reward_within_projection_cost_limits"
-        else:
-            safe_key = (0.0, -cost_mean, -cost_p95, -frac_violation, float(eval_reward_det))
-            safe_metric = "lowest_projection_cost_until_feasible"
-
-        if safe_key <= self.best_safe_key:
+        reward_ok = mean_reward >= self.best_eval_reward - self.operational_reward_tolerance
+        key = (1.0 if reward_ok else 0.0, -operational_cost, mean_reward)
+        if key <= self.best_operational_key:
             return
-
-        self.best_safe_key = safe_key
-        self.best_safe_episode = int(episode)
-        torch.save(self.actor.state_dict(), self.best_actor_safe_path)
-        self.save_checkpoint(self.best_ckpt_safe_path)
-        meta = {
-            "best_eval_reward": float(eval_reward_det),
-            "best_eval_episode": int(episode),
-            "checkpoint_metric": safe_metric,
-            "safe_feasible": bool(feasible),
-            "safe_cost_mean_limit": float(self.safe_cost_mean_limit),
-            "safe_cost_p95_limit": float(self.safe_cost_p95_limit),
-            "cost_mean": float(cost_mean),
-            "cost_p95": float(cost_p95),
-            "frac_violation": float(frac_violation),
-            "safe_key": [float(x) for x in safe_key],
-            "tariff": self.tariff,
-        }
-        with open(self.best_meta_safe_path, "w", encoding="utf-8") as f:
-            json.dump(meta, f, indent=2)
+        self.best_operational_key = key
+        self.best_operational_score = float(stats.get("operational_score", mean_reward - operational_cost))
+        self.best_operational_episode = int(episode)
+        self._save_best_eval_operational(stats, episode, key)
 
 
     def _next_eval_cache_tag(self) -> int:
@@ -341,73 +376,74 @@ class Train:
             self._eval_executor_workers = int(eval_workers)
         return self._eval_executor
 
+
+    @staticmethod
+    def _summarize_eval_results(results: list[dict]) -> dict:
+        if not results:
+            return {"mean_reward": np.nan, "worst_reward": np.nan, "robust_score": np.nan, "std_reward": np.nan, "operational_cost": np.nan, "operational_score": np.nan, "rewards": []}
+        rewards = np.asarray([float(r["reward"]) for r in results], dtype=np.float64)
+        sorted_rewards = np.sort(rewards)
+        tail_k = min(2, len(sorted_rewards))
+        def mean_metric(name: str) -> float:
+            vals = [float(r.get(name, 0.0)) for r in results]
+            return float(np.mean(vals)) if vals else 0.0
+        grid_penalty = mean_metric("grid_penalty")
+        ev_cost = mean_metric("ev_cost")
+        pv_cost = mean_metric("pv_cost")
+        operational_cost = grid_penalty + ev_cost + pv_cost
+        return {
+            "mean_reward": float(np.mean(rewards)),
+            "worst_reward": float(np.min(rewards)),
+            "robust_score": float(np.mean(sorted_rewards[:tail_k])),
+            "std_reward": float(np.std(rewards)),
+            "operational_cost": float(operational_cost),
+            "operational_score": float(np.mean(rewards) - operational_cost),
+            "grid_penalty_mean": grid_penalty,
+            "ev_cost_mean": ev_cost,
+            "pv_cost_mean": pv_cost,
+            "energy_cost_mean": mean_metric("energy_cost"),
+            "bess_cost_mean": mean_metric("bess_cost"),
+            "pv_cmd_mean": mean_metric("pv_cmd_mean"),
+            "bess_abs_power_mean": mean_metric("bess_abs_power_mean"),
+            "ev_abs_power_mean": mean_metric("ev_abs_power_mean"),
+            "rewards": [float(x) for x in rewards],
+        }
+
+
     def eval(self, deterministic: bool = True, runs: list | None = None, eval_desc: str | None = None) -> float:
         runs = self.eval_runs_full if runs is None else list(runs)
         if not runs:
+            self.last_eval_stats = self._summarize_eval_results([])
             return float("nan")
-
         eval_desc = eval_desc or ("Eval Det" if deterministic else "Eval Stoch")
         eval_workers = max(1, min(self.eval_workers, len(runs)))
         actor_state_cpu = {k: v.detach().cpu() for k, v in self.actor.state_dict().items()}
         eval_cache_tag = self._next_eval_cache_tag()
-        worker_args_suffix = []
-        history_len = getattr(self, "history_len", None)
-        if history_len is not None:
-            worker_args_suffix.append(history_len)
-        worker_args_suffix.extend([deterministic, eval_cache_tag])
+        worker_args_suffix = [self.history_len, deterministic, eval_cache_tag]
 
-        rewards = []
+        results = []
         with tqdm(total=len(runs), desc=eval_desc, position=2, dynamic_ncols=True, leave=False) as p_eval:
             futures = None
             if eval_workers > 1 and self._eval_parallel_enabled:
                 try:
                     executor = self._get_eval_executor(eval_workers)
-                    futures = [
-                        executor.submit(
-                            _eval_worker,
-                            run,
-                            self.parameters,
-                            self.tariff,
-                            self.actor_cfg,
-                            actor_state_cpu,
-                            self.episode_length,
-                            *worker_args_suffix,
-                        )
-                        for run in runs
-                    ]
+                    futures = [executor.submit(_eval_worker, run, self.parameters, self.tariff, self.actor_cfg, actor_state_cpu, self.episode_length, *worker_args_suffix) for run in runs]
                 except (PermissionError, OSError) as exc:
                     print(f"[eval] process pool unavailable ({exc}); falling back to sequential evaluation.")
                     self._eval_parallel_enabled = False
                     self._close_eval_executor()
-
             iterator = as_completed(futures) if futures is not None else runs
             for idx, item in enumerate(iterator, start=1):
-                total_reward = (
-                    float(item.result())
-                    if futures is not None
-                    else float(
-                        _eval_worker(
-                            item,
-                            self.parameters,
-                            self.tariff,
-                            self.actor_cfg,
-                            actor_state_cpu,
-                            self.episode_length,
-                            *worker_args_suffix,
-                        )
-                    )
-                )
-                rewards.append(total_reward)
-                running_mean = float(np.mean(rewards))
-                p_eval.set_postfix({
-                    "scenario": f"{idx}/{len(runs)}",
-                    "reward": f"{total_reward:.2f}",
-                    "avg": f"{running_mean:.2f}",
-                    "w": int(eval_workers) if futures is not None else 1,
-                })
+                result = item.result() if futures is not None else _eval_worker(item, self.parameters, self.tariff, self.actor_cfg, actor_state_cpu, self.episode_length, *worker_args_suffix)
+                if not isinstance(result, dict):
+                    result = {"reward": float(result)}
+                result["reward"] = float(result["reward"])
+                results.append(result)
+                rewards = [float(r["reward"]) for r in results]
+                p_eval.set_postfix({"scenario": f"{idx}/{len(runs)}", "reward": f"{result['reward']:.2f}", "avg": f"{float(np.mean(rewards)):.2f}", "w": int(eval_workers) if futures is not None else 1})
                 p_eval.update(1)
-
-        return float(np.mean(rewards))
+        self.last_eval_stats = self._summarize_eval_results(results)
+        return float(self.last_eval_stats["mean_reward"])
 
 
     @staticmethod
@@ -432,7 +468,7 @@ class Train:
 
         with torch.inference_mode():
             # Next action sampled from current policy
-            next_action, logp_next, _, cost_next = self.actor.sample(next_obs)
+            next_action, logp_next, _, _ = self.actor.sample(next_obs)
 
             q1_next, q2_next = self.critics_target(next_obs_critic, next_action)
             q_next = torch.min(q1_next, q2_next)
@@ -465,8 +501,7 @@ class Train:
 
         actor_term_entropy = alpha * logp_pi
         actor_term_q = -q_pi
-        actor_term_dual = self.lmbda * cost if self.dual_enabled else torch.zeros_like(cost)
-        actor_loss = torch.mean(actor_term_entropy + actor_term_q + actor_term_dual)
+        actor_loss = torch.mean(actor_term_entropy + actor_term_q)
         self._ensure_finite("logp_pi", logp_pi)
         self._ensure_finite("q_pi", q_pi)
         self._ensure_finite("cost", cost)
@@ -493,30 +528,6 @@ class Train:
         for param, target_param in zip(self.critics.parameters(), self.critics_target.parameters()):
             target_param.data.copy_(self.hp.tau * param.data + (1 - self.hp.tau) * target_param.data)
 
-        # --- CHANGE (Lagrangian): lambda dual update ---
-        # lambda <- max(0, min(lambda_max, lambda + lr*(E[cost] - cost_limit)))
-        with torch.no_grad():
-            mean_cost = torch.mean(cost)
-            dual_active = (
-                self.dual_enabled
-                and self.lmbda_lr > 0.0
-                and (episode is None or int(episode) >= self.dual_warmup_episodes)
-            )
-            if dual_active:
-                high = cost.new_tensor(self.cost_limit_high)
-                low = cost.new_tensor(self.cost_limit_low)
-                target = cost.new_tensor(self.cost_limit)
-                if mean_cost > high:
-                    grad = mean_cost - target
-                    if abs(float(grad.detach().cpu())) > self.lambda_deadzone:
-                        self.lmbda += self.lmbda_lr * grad
-                elif mean_cost < low:
-                    self.lmbda *= self.lambda_decay
-                self.lmbda = torch.clamp(self.lmbda, min=0.0, max=self.lmbda_max)
-            else:
-                self.lmbda.zero_()
-        # --- END CHANGE ---
-
         # Logging for audit
         self.q1_values.append(float(q1.mean().detach().cpu()))
         self.q2_values.append(float(q2.mean().detach().cpu()))
@@ -526,7 +537,7 @@ class Train:
         self.logp_means.append(float(logp_pi.mean().detach().cpu()))
         self.logp_mins.append(float(logp_pi.min().detach().cpu()))
 
-        # --- CHANGE (Projection/Loss audit): cost stats and losses ---
+        # --- CHANGE (Bounded-action audit): cost stats and losses ---
         cost_cpu = cost.detach().view(-1).cpu().numpy()
         self.cost_means.append(float(np.mean(cost_cpu)))
         self.cost_p95s.append(float(np.percentile(cost_cpu, 95)))
@@ -536,7 +547,6 @@ class Train:
         self.actor_losses.append(float(actor_loss.detach().cpu()))
         self.actor_term_entropies.append(float(torch.mean(actor_term_entropy).detach().cpu()))
         self.actor_term_qs.append(float(torch.mean(actor_term_q).detach().cpu()))
-        self.actor_term_duals.append(float(torch.mean(actor_term_dual).detach().cpu()))
         self.alpha_losses.append(float(alpha_loss.detach().cpu()))
         # --- END CHANGE ---
 
@@ -559,6 +569,19 @@ class Train:
         return histories
 
 
+    def _sample_warmup_action(self, obs) -> np.ndarray:
+        obs_arr = np.asarray(obs, dtype=np.float32)
+        obs_t = torch.as_tensor(obs_arr[None, ...], device=DEVICE)
+        with torch.inference_mode():
+            amin_b, amax_b, amin_e, amax_e = self.actor._action_bounds(obs_t)
+            a_bess = amin_b + torch.rand_like(amin_b) * (amax_b - amin_b)
+            a_ev = amin_e + torch.rand_like(amin_e) * (amax_e - amin_e)
+            a_pv = torch.rand_like(amin_b)
+            action_t = torch.cat([a_bess, a_ev, a_pv], dim=-1)
+            action_t, _ = self.actor._project(obs_t, action_t)
+        return action_t[0].detach().cpu().numpy()
+
+
     def _run_warmup(self):
         print("Starting warmup episodes...")
         for episode in tqdm(range(self.hp.warmup_episodes), desc="Warmup Episodes", position=0, dynamic_ncols=True):
@@ -566,26 +589,17 @@ class Train:
             histories = self._init_histories()
             env_dones = {"cy": False, "wy": False}
             steps = 0
+            episode_total_steps = self.episode_length * len(self.envs)
 
-            with tqdm(total=self.episode_length, desc="Warmup Steps", position=1, dynamic_ncols=True, leave=False) as pbar:
-                while not all(env_dones.values()) and steps < self.episode_length:
+            with tqdm(total=episode_total_steps, desc="Warmup Steps", position=1, dynamic_ncols=True, leave=False) as pbar:
+                while not all(env_dones.values()) and steps < episode_total_steps:
                     for key, env in self.envs.items():
                         if env_dones[key]:
                             continue
 
                         obs_seq = np.stack(histories[key], axis=0)
 
-                        raw_action = env.action_space.sample()
-
-                        obs_t = torch.as_tensor(obs_seq[None, ...], device=DEVICE)
-
-                        raw_action_t = torch.as_tensor(raw_action[None, ...], device=DEVICE)
-
-                        with torch.inference_mode():
-
-                            action_t, _ = self.actor._project(obs_t, raw_action_t)
-
-                        action = np.clip(action_t[0].detach().cpu().numpy(), env.action_space.low, env.action_space.high)
+                        action = self._sample_warmup_action(obs_seq)
 
                         next_obs, rew, done, truncated, info = env.step(action)
                         next_obs_vec = self._obs_vector(next_obs)
@@ -670,35 +684,34 @@ class Train:
         return float(reward["total"]), int(steps)
 
 
+
     def _run_eval_and_checkpoint(self, episode: int) -> tuple[float, float, int, int]:
         eval_reward_det = np.nan
         checkpoint_score = np.nan
-
         if episode % self.hp.eval_every == 0:
             eval_reward_det = float(self.eval(deterministic=True, runs=self.eval_runs_train, eval_desc="Eval Det"))
-            checkpoint_score = float(eval_reward_det)
-
+            stats = dict(self.last_eval_stats)
+            checkpoint_score = float(stats.get("mean_reward", eval_reward_det))
             self.eval_rewards.append(eval_reward_det)
             self.eval_count += 1
-
-            if eval_reward_det > self.best_eval_reward + self.checkpoint_min_delta:
-                self.best_eval_reward = eval_reward_det
-                self.best_eval_episode = int(episode)
-                self.best_checkpoint_score = checkpoint_score
-                self.best_checkpoint_episode = int(episode)
-                self._save_best_eval_det(eval_reward_det, episode, checkpoint_score)
+            improved = self._maybe_save_mean_checkpoint(stats, episode)
+            self._maybe_save_robust_checkpoint(stats, episode)
+            self._maybe_save_operational_checkpoint(stats, episode)
+            if improved:
                 self.last_improvement_episode = int(episode)
                 self.last_improvement_eval_count = int(self.eval_count)
-
         no_improve_evals = int(self.eval_count if self.last_improvement_eval_count < 0 else self.eval_count - self.last_improvement_eval_count)
         no_improve_episodes = int((episode + 1) if self.last_improvement_episode < 0 else episode - self.last_improvement_episode)
         self.no_improve_evals = no_improve_evals
-
         return eval_reward_det, checkpoint_score, no_improve_episodes, no_improve_evals
 
 
     def _run_final_full_eval(self, episode: int) -> None:
-        return
+        if episode < 0:
+            return
+        self.eval(deterministic=True, runs=self.eval_runs_full, eval_desc="Final Eval Det")
+        self.final_full_eval = dict(self.last_eval_stats)
+        self._save_final_checkpoint(episode)
 
 
     def _aggregate_episode_update_metrics(self, q_start: int) -> dict:
@@ -722,7 +735,6 @@ class Train:
                 "actor_loss_ep": float(np.mean(self.actor_losses[q_start:q_end])),
                 "actor_term_entropy_ep": float(np.mean(self.actor_term_entropies[q_start:q_end])),
                 "actor_term_q_ep": float(np.mean(self.actor_term_qs[q_start:q_end])),
-                "actor_term_dual_ep": float(np.mean(self.actor_term_duals[q_start:q_end])),
                 "alpha_loss_ep": float(np.mean(self.alpha_losses[q_start:q_end])),
             }
 
@@ -742,23 +754,28 @@ class Train:
             "actor_loss_ep": np.nan,
             "actor_term_entropy_ep": np.nan,
             "actor_term_q_ep": np.nan,
-            "actor_term_dual_ep": np.nan,
             "alpha_loss_ep": np.nan,
         }
 
 
     def _build_audit_row(self, episode: int, train_total: float, eval_reward_det: float, checkpoint_score: float, metrics: dict, steps: int, iteration_time_sec: float, no_improve_episodes: int, no_improve_evals: int = 0) -> dict:
         alpha_val = float(self.temperature.alpha.detach().cpu())
+        eval_stats = self.last_eval_stats if not np.isnan(eval_reward_det) else {}
 
         return {
             "episode": int(episode),
             "train_reward_total": train_total,
             "eval_reward_det": float(eval_reward_det) if not np.isnan(eval_reward_det) else np.nan,
             "eval_reward": float(eval_reward_det) if not np.isnan(eval_reward_det) else np.nan,
+            "eval_reward_worst": float(eval_stats.get("worst_reward", np.nan)),
+            "eval_reward_robust": float(eval_stats.get("robust_score", np.nan)),
+            "eval_operational_score": float(eval_stats.get("operational_score", np.nan)),
             "checkpoint_score": float(checkpoint_score) if not np.isnan(checkpoint_score) else np.nan,
             "best_train_reward": float(self.best_train_reward),
             "best_eval_reward": float(self.best_eval_reward),
             "best_checkpoint_score": float(self.best_checkpoint_score),
+            "best_robust_score": float(self.best_robust_score),
+            "best_operational_score": float(self.best_operational_score),
             "q1_mean": float(metrics["q1_mean"]) if not np.isnan(metrics["q1_mean"]) else np.nan,
             "q2_mean": float(metrics["q2_mean"]) if not np.isnan(metrics["q2_mean"]) else np.nan,
             "backup_mean": float(metrics["backup_mean"]) if not np.isnan(metrics["backup_mean"]) else np.nan,
@@ -770,8 +787,6 @@ class Train:
             "steps": int(steps),
             "buffer_size": int(self.buffer.size),
             "alpha": alpha_val,
-            "lambda": float(self.lmbda.detach().cpu().item()),
-            "dual_enabled": int(self.dual_enabled),
             "cost_mean": float(metrics["cost_mean_ep"]) if not np.isnan(metrics["cost_mean_ep"]) else np.nan,
             "cost_p95": float(metrics["cost_p95_ep"]) if not np.isnan(metrics["cost_p95_ep"]) else np.nan,
             "frac_violation": float(metrics["frac_violation_ep"]) if not np.isnan(metrics["frac_violation_ep"]) else np.nan,
@@ -779,7 +794,6 @@ class Train:
             "actor_loss": float(metrics["actor_loss_ep"]) if not np.isnan(metrics["actor_loss_ep"]) else np.nan,
             "actor_term_entropy": float(metrics["actor_term_entropy_ep"]) if not np.isnan(metrics["actor_term_entropy_ep"]) else np.nan,
             "actor_term_q": float(metrics["actor_term_q_ep"]) if not np.isnan(metrics["actor_term_q_ep"]) else np.nan,
-            "actor_term_dual": float(metrics["actor_term_dual_ep"]) if not np.isnan(metrics["actor_term_dual_ep"]) else np.nan,
             "alpha_loss": float(metrics["alpha_loss_ep"]) if not np.isnan(metrics["alpha_loss_ep"]) else np.nan,
             "no_improve_episodes": int(no_improve_episodes),
             "no_improve_evals": int(no_improve_evals),
@@ -803,8 +817,6 @@ class Train:
             "ckpt": f"{checkpoint_score:.2f}" if not np.isnan(checkpoint_score) else "-",
             "best": f"{self.best_eval_reward:.2f}",
             "alpha": f"{float(self.temperature.alpha.detach().cpu()):.3f}",
-            "lambda": f"{float(self.lmbda.detach().cpu().item()):.3f}",
-            "dual": int(self.dual_enabled),
             "frac_viol": f"{float(metrics['frac_violation_ep']):.3f}" if not np.isnan(metrics["frac_violation_ep"]) else "nan",
             "no_imp_ep": int(no_improve_episodes),
             "no_imp_ev": int(no_improve_evals),
@@ -841,7 +853,6 @@ class Train:
 
             eval_reward_det, checkpoint_score, no_improve_episodes, no_improve_evals = self._run_eval_and_checkpoint(episode)
             metrics = self._aggregate_episode_update_metrics(q_start)
-            self._maybe_save_safe_checkpoint(eval_reward_det, episode, metrics)
             iteration_time_sec = float(time.perf_counter() - episode_start_time)
             row = self._build_audit_row(
                 episode=episode,

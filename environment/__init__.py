@@ -513,7 +513,7 @@ class SmartHomeEnv(gym.Env):
         ev_connected = conn_t in (1, 2)
         is_start_obs = (self.sim.step == self.sim.start)
         is_arrival_obs = ev_connected and (int(self.ev.prev_conn) == 0) and (not is_start_obs)
-        ev_controllable = ev_connected and (not is_start_obs) and (not is_arrival_obs)
+        ev_controllable = (conn_t == 1) and (not is_start_obs) and (not is_arrival_obs)
 
         if ev_controllable:
             ev_soc_obs = float(self.ev.soc)

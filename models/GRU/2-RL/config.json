@@ -11,7 +11,6 @@
         "history_len": 8,
         "n_step": 16,
         "update_every_steps": 4,
-        "lambda_lr": 0.0005,
         "early_stop_patience": 30,
         "gamma": 0.995,
         "tau": 0.005,
