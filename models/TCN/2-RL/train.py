@@ -48,7 +48,7 @@ class Train:
         self.log_every_steps = 50
         self.audit_every_episodes = 5
         self.update_every_steps = int(self.train_cfg["train"]["update_every_steps"])
-        self.eval_workers = 8
+        self.eval_workers = 12
         self.train_env_workers = 1
         self.early_stop_patience = int(self.train_cfg["train"]["early_stop_patience"])
         self.min_episodes_before_early_stop = 100
@@ -95,6 +95,9 @@ class Train:
         self.best_actor_det_path = self.folder / "best_actor_eval_det.pt"
         self.best_ckpt_det_path  = self.folder / "best_checkpoint_eval_det.pt"
         self.best_meta_det_path  = self.folder / "best_eval_det_meta.json"
+        self.best_actor_safe_path = self.folder / "best_actor_eval_safe.pt"
+        self.best_ckpt_safe_path  = self.folder / "best_checkpoint_eval_safe.pt"
+        self.best_meta_safe_path  = self.folder / "best_eval_safe_meta.json"
 
         self.buffer = ReplayBuffer(
             capacity=self.hp.buffer_size,
@@ -140,6 +143,10 @@ class Train:
         self.best_eval_episode = -1
         self.best_checkpoint_score = -float("inf")
         self.best_checkpoint_episode = -1
+        self.safe_cost_mean_limit = 0.04
+        self.safe_cost_p95_limit = 0.18
+        self.best_safe_key = (-float("inf"), -float("inf"), -float("inf"), -float("inf"), -float("inf"))
+        self.best_safe_episode = -1
         self.best_train_reward = -float("inf")
         self.last_improvement_episode = -1
         self.last_improvement_eval_count = -1
@@ -251,6 +258,48 @@ class Train:
         with open(self.best_meta_det_path, "w", encoding="utf-8") as f:
             json.dump(meta, f, indent=2)
         with open(self.best_meta_path, "w", encoding="utf-8") as f:
+            json.dump(meta, f, indent=2)
+
+
+    def _maybe_save_safe_checkpoint(self, eval_reward_det: float, episode: int, metrics: dict) -> None:
+        if np.isnan(eval_reward_det):
+            return
+
+        cost_mean = float(metrics.get("cost_mean_ep", np.nan))
+        cost_p95 = float(metrics.get("cost_p95_ep", np.nan))
+        frac_violation = float(metrics.get("frac_violation_ep", np.nan))
+        if np.isnan(cost_mean) or np.isnan(cost_p95) or np.isnan(frac_violation):
+            return
+
+        feasible = cost_mean <= self.safe_cost_mean_limit and cost_p95 <= self.safe_cost_p95_limit
+        if feasible:
+            safe_key = (1.0, float(eval_reward_det), -cost_mean, -cost_p95, -frac_violation)
+            safe_metric = "reward_within_projection_cost_limits"
+        else:
+            safe_key = (0.0, -cost_mean, -cost_p95, -frac_violation, float(eval_reward_det))
+            safe_metric = "lowest_projection_cost_until_feasible"
+
+        if safe_key <= self.best_safe_key:
+            return
+
+        self.best_safe_key = safe_key
+        self.best_safe_episode = int(episode)
+        torch.save(self.actor.state_dict(), self.best_actor_safe_path)
+        self.save_checkpoint(self.best_ckpt_safe_path)
+        meta = {
+            "best_eval_reward": float(eval_reward_det),
+            "best_eval_episode": int(episode),
+            "checkpoint_metric": safe_metric,
+            "safe_feasible": bool(feasible),
+            "safe_cost_mean_limit": float(self.safe_cost_mean_limit),
+            "safe_cost_p95_limit": float(self.safe_cost_p95_limit),
+            "cost_mean": float(cost_mean),
+            "cost_p95": float(cost_p95),
+            "frac_violation": float(frac_violation),
+            "safe_key": [float(x) for x in safe_key],
+            "tariff": self.tariff,
+        }
+        with open(self.best_meta_safe_path, "w", encoding="utf-8") as f:
             json.dump(meta, f, indent=2)
 
 
@@ -762,6 +811,7 @@ class Train:
 
             eval_reward_det, checkpoint_score, no_improve_episodes, no_improve_evals = self._run_eval_and_checkpoint(episode)
             metrics = self._aggregate_episode_update_metrics(q_start)
+            self._maybe_save_safe_checkpoint(eval_reward_det, episode, metrics)
             iteration_time_sec = float(time.perf_counter() - episode_start_time)
             row = self._build_audit_row(
                 episode=episode,

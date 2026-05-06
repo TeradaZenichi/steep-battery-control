@@ -109,6 +109,131 @@ Training/testing CSV files are expected to include at least:
 - tariff columns (`tar_s`, `tar_w`, `tar_sw`, `tar_tou`, `tar_flat`)
 - weather columns used in state normalization.
 
+## RL Training Protocol
+
+The `2-RL` stage refines each actor with Soft Actor-Critic (SAC) after IL pretraining/architecture selection. Each model family has its own `models/<family>/2-RL/train.py`, but the training protocol is shared across families.
+
+### Training Rollout
+
+- One SAC agent is trained per tariff: `tar_s`, `tar_w`, `tar_sw`, `tar_tou`, and `tar_flat`.
+- Each training episode uses two parallel data streams:
+  - `CY` from `Simulation_CY_Cur_HP__PV5000-HB5000.csv`,
+  - `WY` from `Simulation_WY_Cur_HP__PV5000-HB5000.csv`.
+- The default RL horizon is `7` days at the global 5-minute timestep.
+- With two streams, this gives `4032` environment steps per episode:
+  - `2016` steps for CY,
+  - `2016` steps for WY.
+- Warmup uses random actions projected through the same safety layer used during policy rollouts.
+- After warmup, the actor samples stochastic actions for exploration and stores projected executable actions in replay.
+
+### SAC Update
+
+Each update samples lazy history sequences from the replay buffer and applies:
+
+- twin critics with target critics,
+- n-step returns,
+- automatic entropy temperature (`alpha`),
+- actor loss composed of:
+  - entropy term,
+  - Q-value term,
+  - dual feasibility term.
+
+The main RL hyperparameters are configured in `models/<family>/2-RL/config.json`, including:
+
+- `batch_size`,
+- `history_len`,
+- `n_step`,
+- `update_every_steps`,
+- `lambda_lr`,
+- `early_stop_patience`,
+- `gamma`,
+- `tau`,
+- `alpha_lr`.
+
+Other training choices are intentionally fixed in code for reproducibility and simpler experiment management:
+
+- `days = 7`,
+- `train_episodes = 300`,
+- `warmup_episodes = 10`,
+- `evaluate_every = 1`,
+- `target_entropy = -2.0`,
+- `log_std_max = 0`,
+- `buffer_size = 200000`,
+- `train_env_workers = 1`,
+- `eval_workers = 12`.
+
+### Safety Layer and Dual Penalty
+
+The actor proposes a raw action, and the model-level safety layer projects it to feasible BESS, EV, and PV bounds before the action is executed in `SmartHomeEnv`.
+
+This design keeps the executed policy physically feasible while still teaching the actor to internalize constraints:
+
+1. The projected action is sent to the environment.
+2. The projection residual is converted into a feasibility cost.
+3. A Lagrangian dual variable `lambda` penalizes repeated dependence on projection.
+
+The current dual policy is:
+
+- `cost_limit = 0.05`,
+- `cost_limit_high = 0.05`,
+- `cost_limit_low = 0.02`,
+- `dual_warmup_episodes = 10`,
+- `lambda_max = 1.0`,
+- `lambda_lr` from the RL config.
+
+This means the safety layer is used as an execution guard, while the dual term pressures the stochastic actor to generate actions that are feasible before projection.
+
+### Validation and Early Stopping
+
+Validation runs every episode. The validation suite has 24 scenarios:
+
+- 12 monthly CY scenarios,
+- 12 monthly WY scenarios,
+- 7 days per scenario,
+- initial BESS SoC cycling through `0.2`, `0.5`, and `0.8`.
+
+Validation uses a process pool with `eval_workers = 12`, so the 24 scenarios run in two parallel batches. Early stopping is delayed until at least 100 episodes and then controlled by `early_stop_patience`.
+
+### Checkpoints
+
+The trainer writes two deterministic checkpoint families:
+
+- reward checkpoint:
+  - `best_actor_eval.pt`,
+  - `best_actor_eval_det.pt`,
+  - `best_checkpoint_eval.pt`,
+  - `best_checkpoint_eval_det.pt`,
+  - `best_eval_meta.json`,
+  - `best_eval_det_meta.json`.
+- safety-aware checkpoint:
+  - `best_actor_eval_safe.pt`,
+  - `best_checkpoint_eval_safe.pt`,
+  - `best_eval_safe_meta.json`.
+
+The reward checkpoint selects the highest deterministic validation reward.
+
+The safety-aware checkpoint first prefers policies with:
+
+- `cost_mean <= 0.04`,
+- `cost_p95 <= 0.18`.
+
+Among feasible policies, it selects the highest validation reward. If no feasible policy has appeared yet, it selects the lowest mean projection cost, then lowest p95 projection cost, then lowest violation fraction, then highest reward. The violation fraction is kept as a diagnostic and tie-breaker because it can be high even when the projection magnitude is already small.
+
+### Training Audit
+
+Every 5 episodes, and also at the end of training or early stopping, the trainer flushes `audit_training.csv` with:
+
+- training reward,
+- deterministic validation reward,
+- best checkpoint scores,
+- Q-value and backup statistics,
+- `alpha` and `lambda`,
+- projection cost metrics,
+- violation fraction,
+- actor/critic/alpha losses,
+- no-improvement counters,
+- episode timing.
+
 ## RL Scripts (Detailed)
 
 RL scripts live under `models/<family>/2-RL/`.
@@ -146,13 +271,12 @@ Feasibility/constraint handling:
 
 Evaluation and checkpoint policy:
 
-- Periodic mini-eval (`evaluate_every`) on a subset of validation runs.
-- Optional full eval when checkpoint score improves.
-- Tracks deterministic and stochastic metrics.
-- Saves 3 actor variants:
-  - `best_actor_eval.pt` (combo score),
-  - `best_actor_eval_det.pt`,
-  - `best_actor_eval_stoch.pt`.
+- Deterministic validation every episode on the configured validation suite.
+- Saves reward-selected deterministic checkpoints:
+  - `best_actor_eval.pt`,
+  - `best_actor_eval_det.pt`.
+- Saves safety-aware deterministic checkpoints:
+  - `best_actor_eval_safe.pt`.
 - Saves full checkpoint files and metadata JSON.
 - Writes `audit_training.csv` with episode-level diagnostics:
   - rewards,
@@ -167,18 +291,13 @@ Early stop:
 
 - Controlled by `early_stop_patience` and `min_episodes_before_early_stop`.
 
-IL-to-RL inheritance:
-
-- RL can load IL HPO artifacts (`Results/train/<family>/1-IL/<tariff>/best_params.json`).
-- `il_inherit_mode` controls what gets inherited (for example `history_len`, optionally LR/batch/weight decay).
-
 ### `test.py`
 
 Main behavior:
 
 - Evaluates trained RL actors against the cached teacher summaries.
 - Supports checkpoint selection with:
-  - `--actor-variant combo|det|stoch`
+  - `--actor-variant combo|det`
 - For each tariff and configured test run:
   - rolls out actor in `SmartHomeEnv`,
   - computes actor reward,
@@ -242,7 +361,6 @@ This creates/reuses shared teacher cache and writes `teacher_summary.json` per f
 .\.venv\Scripts\python.exe .\models\MLP\2-RL\train.py
 .\.venv\Scripts\python.exe .\models\MLP\2-RL\test.py --actor-variant combo
 .\.venv\Scripts\python.exe .\models\MLP\2-RL\test.py --actor-variant det
-.\.venv\Scripts\python.exe .\models\MLP\2-RL\test.py --actor-variant stoch
 ```
 
 ### 3) Run all families sequentially
@@ -315,7 +433,7 @@ Main outputs:
   - `best_params.json`
   - `actor_cfg.json`
 - `Results/train/<MODEL>/2-RL/<TARIFF>/`
-  - `best_actor_eval.pt`, `best_actor_eval_det.pt`, `best_actor_eval_stoch.pt`
+  - `best_actor_eval.pt`, `best_actor_eval_det.pt`, `best_actor_eval_safe.pt`
   - `best_checkpoint_eval*.pt`
   - `best_eval*_meta.json`
   - `audit_training.csv`
