@@ -208,21 +208,16 @@ __marimo__/
 
 # Results: ignore generated outputs, but keep small IL metadata needed by later runs.
 Results/*
-!Results/train/
-Results/train/*
-!Results/train/*/
-Results/train/*/*
-!Results/train/*/1-IL/
-Results/train/*/1-IL/*
-!Results/train/*/1-IL/*/
-Results/train/*/1-IL/*/*
-!Results/train/*/1-IL/*/best_params.json
-!Results/train/*/1-IL/*/actor_cfg.json
 .old/
+.claude/
+.bkp/
+bkp/
+.bkp-new/
 PROJECT.zip
 Resultsold/
 .vscode/
-
+.review/
 # Local literature review workspace
 review/
 Review/
+.bkp/

@@ -1,368 +1,186 @@
+"""GRU SAC: actor samples 2 stochastic dims (BESS, EV); PV curtailment is
+closed deterministically as the minimum required by the export limit, plus an
+economic component when the effective export price is worse than curtailing.
+
+The executed action seen by the env and the critic is 3-D [BESS, EV, PV];
+the policy entropy only counts the 2 strategic dimensions.
+"""
 from torch.distributions import Normal
 import torch.nn as nn
 import torch
 import json
 
-
-class Battery:
-    def __init__(self, general):
-        p = general["BESS"]
-        self.Δt = torch.tensor(general["general"]["timestep"] / 60, dtype=torch.float32)
-        self.Pmax = torch.tensor(p["Pmax"], dtype=torch.float32)
-        self.Emax = torch.tensor(p["Emax"], dtype=torch.float32)
-        self.DoD = torch.tensor(p["DoD"], dtype=torch.float32)
-        self.η = torch.tensor(p["η"], dtype=torch.float32)
-        self.β = torch.tensor(p["β"], dtype=torch.float32)
-
-        sp = p["soc_power_curve_pu"]
-        self.soc_grid = torch.tensor(sp["soc"], dtype=torch.float32)
-        self.ch_pu = torch.tensor(sp["charge_pu"], dtype=torch.float32)
-        self.dis_pu = torch.tensor(sp["discharge_pu"], dtype=torch.float32)
-
-    @staticmethod
-    def _like(x: torch.Tensor, c: torch.Tensor) -> torch.Tensor:
-        return c.to(device=x.device, dtype=x.dtype)
-
-    def limits(self, soc: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        soc = torch.clamp(soc.to(torch.float32), 0.0, 1.0)
-
-        dt = self._like(soc, self.Δt)
-        Pmax = self._like(soc, self.Pmax)
-        Emax = self._like(soc, self.Emax)
-        DoD = self._like(soc, self.DoD)
-        eta = self._like(soc, self.η)
-        beta = self._like(soc, self.β)
-
-        soc_grid = self._like(soc, self.soc_grid)
-        ch_pu = self._like(soc, self.ch_pu)
-        dis_pu = self._like(soc, self.dis_pu)
-
-        idx = torch.searchsorted(soc_grid, soc) - 1
-        idx = torch.clamp(idx, 0, soc_grid.numel() - 1).long()
-
-        Emin = Emax * (1.0 - DoD)
-
-        E = soc * Emax
-        E = E * (1.0 - beta * dt)
-
-        eps = soc.new_tensor(1e-12)
-
-        P_curve_ch = ch_pu[idx] * Pmax
-        P_head_ch = torch.clamp((Emax - E) / (dt * eta + eps), min=0.0)
-        Pcmd_max = torch.minimum(P_curve_ch, P_head_ch)
-        amax = torch.clamp(Pcmd_max / (Pmax + eps), 0.0, 1.0)
-
-        P_curve_dis = -dis_pu[idx] * Pmax
-        P_head_dis = (Emin - E) * eta / (dt + eps)
-        Pcmd_min = torch.maximum(P_curve_dis, P_head_dis)
-        amin = torch.clamp(Pcmd_min / (Pmax + eps), -1.0, 0.0)
-
-        return amin, amax
+from models._physics import Battery, EV
 
 
-class EV:
-    def __init__(self, general):
-        p = general["EV"]
-        self.Δt = torch.tensor(general["general"]["timestep"] / 60, dtype=torch.float32)
-        self.Pmax_c = torch.tensor(p["Pmax_c"], dtype=torch.float32)
-        self.Pmax_d = torch.tensor(p["Pmax_d"], dtype=torch.float32)
-        self.Emax = torch.tensor(p["Emax"], dtype=torch.float32)
-        self.DoD = torch.tensor(p["DoD"], dtype=torch.float32)
-        self.η = torch.tensor(p["η"], dtype=torch.float32)
-        self.β = torch.tensor(p["β"], dtype=torch.float32)
-
-        sp = p["soc_power_curve_pu"]
-        self.soc_grid = torch.tensor(sp["soc"], dtype=torch.float32)
-        self.ch_pu = torch.tensor(sp["charge_pu"], dtype=torch.float32)
-        self.dis_pu = torch.tensor(sp["discharge_pu"], dtype=torch.float32)
-
-    @staticmethod
-    def _like(x: torch.Tensor, c: torch.Tensor) -> torch.Tensor:
-        return c.to(device=x.device, dtype=x.dtype)
-
-    def get_limits(self, soc: torch.Tensor, status: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        soc = torch.clamp(soc.to(torch.float32), 0.0, 1.0)
-        status = torch.clamp(status.to(torch.float32), 0.0, 1.0)
-
-        dt = self._like(soc, self.Δt)
-        Emax = self._like(soc, self.Emax)
-        DoD = self._like(soc, self.DoD)
-        eta = self._like(soc, self.η)
-        beta = self._like(soc, self.β)
-
-        Pmax_c = self._like(soc, self.Pmax_c)
-        Pmax_d = self._like(soc, self.Pmax_d)
-
-        soc_grid = self._like(soc, self.soc_grid)
-        ch_pu = self._like(soc, self.ch_pu)
-        dis_pu = self._like(soc, self.dis_pu)
-
-        idx = torch.searchsorted(soc_grid, soc) - 1
-        idx = torch.clamp(idx, 0, soc_grid.numel() - 1).long()
-
-        Emin = Emax * (1.0 - DoD)
-
-        E = soc * Emax
-        E = E * (1.0 - beta * dt)
-
-        eps = soc.new_tensor(1e-12)
-
-        P_curve_ch = ch_pu[idx] * Pmax_c
-        P_head_ch = torch.clamp((Emax - E) / (dt * eta + eps), min=0.0)
-        Pcmd_max = torch.minimum(P_curve_ch, P_head_ch)
-        amax = torch.clamp(Pcmd_max / (Pmax_c + eps), 0.0, 1.0)
-
-        P_curve_dis = -dis_pu[idx] * Pmax_d
-        P_head_dis = (Emin - E) * eta / (dt + eps)
-        Pcmd_min = torch.maximum(P_curve_dis, P_head_dis)
-        amin = torch.clamp(Pcmd_min / (Pmax_d + eps), -1.0, 0.0)
-
-        amin = amin * status
-        amax = amax * status
-
-        return amin, amax
+def _last(x):
+    return x if x.dim() == 2 else x[:, -1, :]
 
 
-class GRUActor(nn.Module):
-    def __init__(
-        self,
-        input_dim: int,
-        hidden_dim: int,
-        num_layers: int,
-        head_dim: int,
-        log_std_min: float = -20.0,
-        log_std_max: float = 2.0,
-        init_log_std_bias: float = -2.0,
-        parameters: str = "data/parameters.json",
-    ):
+def _scale(z, lo, hi):
+    return lo + 0.5 * (z + 1.0) * (hi - lo)
+
+
+class Actor(nn.Module):
+    def __init__(self, input_dim, hidden_dim, num_layers, head_dim,
+                 log_std_min=-10.0, log_std_max=2.0, init_log_std_bias=-2.0,
+                 parameters="data/parameters.json", use_layer_norm=False):
         super().__init__()
-
-        self.gru = nn.GRU(
-            input_size=input_dim,
-            hidden_size=hidden_dim,
-            num_layers=num_layers,
-            batch_first=True,
-        )
-
-        self.mu_head = nn.Sequential(
-            nn.Linear(hidden_dim, head_dim),
-            nn.ReLU(),
-            nn.Linear(head_dim, 3),
-        )
-        self.logstd_head = nn.Sequential(
-            nn.Linear(hidden_dim, head_dim),
-            nn.ReLU(),
-            nn.Linear(head_dim, 3),
-        )
-
-        self.log_std_min = float(log_std_min)
-        self.log_std_max = float(log_std_max)
-        self._init_logstd(init_log_std_bias)
+        self.gru = nn.GRU(input_dim, hidden_dim, num_layers, batch_first=True)
+        self.ln = nn.LayerNorm(hidden_dim) if use_layer_norm else None
+        self.mu = nn.Sequential(nn.Linear(hidden_dim, head_dim), nn.ReLU(), nn.Linear(head_dim, 2))
+        self.logstd = nn.Sequential(nn.Linear(hidden_dim, head_dim), nn.ReLU(), nn.Linear(head_dim, 2))
+        nn.init.zeros_(self.logstd[-1].weight)
+        nn.init.constant_(self.logstd[-1].bias, float(init_log_std_bias))
 
         with open(parameters, "r", encoding="utf-8") as f:
-            params = json.load(f)
-        self.bess = Battery(params)
-        self.ev = EV(params)
+            p = json.load(f)
+        dt = p["general"]["timestep"] / 60.0
+        self.bess = Battery(p["BESS"], dt)
+        self.ev = EV(p["EV"], dt)
+        self.register_buffer("Pnorm", torch.tensor(float(p["general"]["Pnorm"]), dtype=torch.float32))
+        self.register_buffer("gmin", torch.tensor(float(-p["Grid"]["Pmax_export"]), dtype=torch.float32))
+        self.register_buffer("export_factor", torch.tensor(float(p["Grid"].get("export_tariff_factor", 1.0)), dtype=torch.float32), persistent=False)
+        # SmartHomeEnv hardcodes the marginal PV curtailment penalty as 0.01/kWh.
+        self.register_buffer("pv_cut_cost", torch.tensor(0.01, dtype=torch.float32), persistent=False)
+        self.log_std_min, self.log_std_max = float(log_std_min), float(log_std_max)
 
-    def _init_logstd(self, init_log_std_bias: float) -> None:
-        last = self.logstd_head[-1]
-        if isinstance(last, nn.Linear):
-            nn.init.zeros_(last.weight)
-            nn.init.constant_(last.bias, float(init_log_std_bias))
+    def _enc(self, x):
+        x = x.unsqueeze(1) if x.dim() == 2 else x
+        out, _ = self.gru(x)
+        h = out[:, -1, :]
+        return self.ln(h) if self.ln is not None else h
 
-    @staticmethod
-    def _map_pv(z_pv: torch.Tensor) -> torch.Tensor:
-        return torch.exp(5.0 * (z_pv - 1.0)).clamp(0.0, 1.0)
+    def policy(self, x):
+        h = self._enc(x)
+        return self.mu(h), torch.clamp(self.logstd(h), self.log_std_min, self.log_std_max)
 
+    def _box(self, x):
+        s = _last(x)
+        bmin, bmax = self.bess.limits(s[..., 12:13])
+        emin, emax = self.ev.limits(s[..., 13:14], s[..., 14:15])
+        return torch.cat([bmin, emin], dim=-1), torch.cat([bmax, emax], dim=-1)
 
-    @staticmethod
-    def _last_obs(x: torch.Tensor) -> torch.Tensor:
-        if x.dim() == 2:
-            return x
-        if x.dim() == 3:
-            return x[:, -1, :]
-        raise ValueError(f"Expected x with 2 or 3 dims, got {x.dim()}")
+    def _pv_curtailment(self, x, be_action):
+        s = _last(x)
+        pload = s[..., 10:11] * self.Pnorm
+        ppv = torch.clamp(s[..., 11:12] * self.Pnorm, min=0.0)
+        pbess = be_action[..., 0:1] * self.bess.Pmax
+        a_ev = be_action[..., 1:2]
+        pev = torch.where(a_ev >= 0.0, a_ev * self.ev.Pmax_c, a_ev * self.ev.Pmax_d)
+        pgrid_full_pv = pload + pbess + pev - ppv
+        pcut_physical = torch.clamp(self.gmin - pgrid_full_pv, min=0.0)
 
-    @staticmethod
-    def _scale_unit(z: torch.Tensor, amin: torch.Tensor, amax: torch.Tensor) -> torch.Tensor:
-        return amin + 0.5 * (z + 1.0) * (amax - amin)
+        pbess_c = torch.clamp(pbess, min=0.0)
+        pev_c = torch.clamp(pev, min=0.0)
+        pgrid_export = torch.clamp(-pgrid_full_pv, min=0.0)
+        ppv_export_cap = torch.clamp(ppv - pload - pbess_c - pev_c, min=0.0)
+        ppv_export = torch.minimum(pgrid_export, ppv_export_cap)
 
-    def _action_bounds(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        x_last = self._last_obs(x)
-        soc_bess = x_last[..., 12:13]
-        soc_ev = x_last[..., 13:14]
-        ev_on = x_last[..., 14:15]
-        amin_b, amax_b = self.bess.limits(soc_bess)
-        amin_e, amax_e = self.ev.get_limits(soc_ev, ev_on)
-        return amin_b, amax_b, amin_e, amax_e
+        buy_price = s[..., 15:16]
+        export_value = self.export_factor * buy_price
+        cut_export = export_value < -self.pv_cut_cost
+        pcut_economic = torch.where(cut_export, ppv_export, torch.zeros_like(ppv_export))
+        pcut = torch.maximum(pcut_physical, pcut_economic)
+        eps = ppv.new_tensor(1e-12)
+        ppv_safe = ppv.clamp_min(eps)
+        return torch.where(ppv > eps, torch.clamp(pcut / ppv_safe, 0.0, 1.0), torch.zeros_like(ppv))
 
-    def _action_from_unit(self, x: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
-        amin_b, amax_b, amin_e, amax_e = self._action_bounds(x)
-        a_bess = self._scale_unit(z[..., 0:1], amin_b, amax_b)
-        a_ev = self._scale_unit(z[..., 1:2], amin_e, amax_e)
-        a_pv = self._map_pv(z[..., 2:3])
-        return torch.cat([a_bess, a_ev, a_pv], dim=-1)
+    def _action(self, x, z):
+        lo, hi = self._box(x)
+        be_action = _scale(z, lo, hi)
+        pv_action = self._pv_curtailment(x, be_action)
+        return torch.cat([be_action, pv_action], dim=-1), (hi - lo)
 
-    def _action_and_logp(self, x: torch.Tensor, raw: torch.Tensor, dist: Normal) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, x):
+        mu, _ = self.policy(x)
+        a, _ = self._action(x, torch.tanh(mu))
+        return a
+
+    def act(self, x, deterministic=False):
+        if deterministic:
+            return self.forward(x)
+        mu, log_std = self.policy(x)
+        raw = Normal(mu, log_std.exp()).rsample()
+        a, _ = self._action(x, torch.tanh(raw))
+        return a
+
+    def sample(self, x, with_mu=True):
+        mu, log_std = self.policy(x)
+        dist = Normal(mu, log_std.exp())
+        raw = dist.rsample()
         z = torch.tanh(raw)
-        amin_b, amax_b, amin_e, amax_e = self._action_bounds(x)
-
-        a_bess = self._scale_unit(z[..., 0:1], amin_b, amax_b)
-        a_ev = self._scale_unit(z[..., 1:2], amin_e, amax_e)
-        a_pv = self._map_pv(z[..., 2:3])
-        action = torch.cat([a_bess, a_ev, a_pv], dim=-1)
+        action, span = self._action(x, z)
 
         eps = raw.new_tensor(1e-6)
+        thr = raw.new_tensor(1e-3)
         logp_unit = dist.log_prob(raw) - torch.log(1.0 - z.pow(2) + eps)
-
-        span_b = torch.clamp(amax_b - amin_b, min=0.0)
-        span_e = torch.clamp(amax_e - amin_e, min=0.0)
-        active_b = span_b > eps
-        active_e = span_e > eps
-
-        logp_b = torch.where(
-            active_b,
-            logp_unit[..., 0:1] - torch.log((0.5 * span_b).clamp_min(eps)),
-            torch.zeros_like(logp_unit[..., 0:1]),
+        # If a BESS/EV box collapses (span ≈ 0), that dim is effectively
+        # deterministic and contributes 0 to the policy entropy. PV is not
+        # sampled — its log-prob is always 0.
+        per_dim = torch.where(
+            span > thr,
+            logp_unit - torch.log((0.5 * span).clamp_min(eps)),
+            torch.zeros_like(logp_unit),
         )
-        logp_e = torch.where(
-            active_e,
-            logp_unit[..., 1:2] - torch.log((0.5 * span_e).clamp_min(eps)),
-            torch.zeros_like(logp_unit[..., 1:2]),
-        )
-        logp_pv = logp_unit[..., 2:3] - torch.log(5.0 * a_pv.clamp_min(eps))
-        logp = logp_b + logp_e + logp_pv
-        return action, logp
-
-    @staticmethod
-    def _to_seq(x: torch.Tensor) -> tuple[torch.Tensor, bool]:
-        if x.dim() == 2:
-            return x.unsqueeze(1), True
-        if x.dim() == 3:
-            return x, False
-        raise ValueError(f"Expected x with 2 or 3 dims, got {x.dim()}")
-
-    def _dist_params(self, x: torch.Tensor, h0: torch.Tensor | None = None):
-        x_seq, squeezed = self._to_seq(x)
-        out, hT = self.gru(x_seq, h0)
-        mu = self.mu_head(out)
-        log_std = self.logstd_head(out)
-        log_std = torch.clamp(log_std, self.log_std_min, self.log_std_max)
-
-        if mu.dim() == 3:
-            mu = mu[:, -1, :]
-            log_std = log_std[:, -1, :]
-
-        return mu, log_std, hT
-
-    def forward(self, x: torch.Tensor, h0: torch.Tensor | None = None):
-        mu, _, hT = self._dist_params(x, h0)
-        action = self._action_from_unit(x, torch.tanh(mu))
-        return action, hT
-
-    def _project(self, x: torch.Tensor, action_raw: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        if x.dim() == 3:
-            x_last = x[:, -1, :]
-        else:
-            x_last = x
-
-        soc_bess = x_last[..., 12:13]
-        soc_ev = x_last[..., 13:14]
-        ev_on = x_last[..., 14:15]
-
-        amin_b, amax_b = self.bess.limits(soc_bess)
-        amin_e, amax_e = self.ev.get_limits(soc_ev, ev_on)
-
-        a_bess = torch.clamp(action_raw[..., 0:1], amin_b, amax_b)
-        a_ev = torch.clamp(action_raw[..., 1:2], amin_e, amax_e)
-        a_pv = torch.clamp(action_raw[..., 2:3], 0.0, 1.0)
-
-        action_proj = torch.cat([a_bess, a_ev, a_pv], dim=-1)
-
-        viol_bess = (action_raw[..., 0:1] - a_bess).abs()
-        viol_ev = (action_raw[..., 1:2] - a_ev).abs() * ev_on
-        cost = (viol_bess + viol_ev).pow(2)
-        return action_proj, cost
-
-    def sample(self, x: torch.Tensor, h0: torch.Tensor | None = None):
-        mu, log_std, hT = self._dist_params(x, h0)
-        std = torch.exp(log_std)
-        dist = Normal(mu, std)
-
-        raw = dist.rsample()
-        action, logp = self._action_and_logp(x, raw, dist)
-        action_proj, cost = self._project(x, action)
-
-        mu_action = self._action_from_unit(x, torch.tanh(mu))
-        mu_action_proj, _ = self._project(x, mu_action)
-
-        return action_proj, logp, mu_action_proj, cost
-
-
-    def sample_step(self, obs_t: torch.Tensor, h0: torch.Tensor | None = None):
-        action_proj, logp, mu_action_proj, cost = self.sample(obs_t, h0)
-        _, _, hT = self._dist_params(obs_t, h0)
-        return action_proj, logp, mu_action_proj, cost, hT
+        logp = per_dim.sum(dim=-1, keepdim=True)
+        cost = torch.zeros_like(logp)
+        mu_action = self.forward(x) if with_mu else None
+        return action, logp, mu_action, cost
 
 
 class Critic(nn.Module):
-    def __init__(self, input_dim: int, hidden_dims: list[int], head_dim: int):
+    def __init__(self, state_dim, action_dim, hidden_dim, num_layers, head_dim, use_layer_norm=False):
         super().__init__()
 
         def build():
-            layers = []
-            prev = input_dim
-            for dim in hidden_dims:
-                layers += [nn.Linear(prev, dim), nn.ReLU()]
-                prev = dim
-            layers += [nn.Linear(prev, head_dim), nn.ReLU(), nn.Linear(head_dim, 1)]
-            return nn.Sequential(*layers)
+            gru = nn.GRU(state_dim, hidden_dim, num_layers, batch_first=True)
+            ln = nn.LayerNorm(hidden_dim) if use_layer_norm else None
+            mlp = nn.Sequential(
+                nn.Linear(hidden_dim + action_dim, hidden_dim), nn.ReLU(),
+                nn.Linear(hidden_dim, head_dim), nn.ReLU(),
+                nn.Linear(head_dim, 1),
+            )
+            return gru, ln, mlp
 
-        self.q1 = build()
-        self.q2 = build()
+        self.gru1, self.ln1, self.mlp1 = build()
+        self.gru2, self.ln2, self.mlp2 = build()
 
-    def forward(self, obs: torch.Tensor, act: torch.Tensor):
-        x = torch.cat([obs, act], dim=-1)
-        return self.q1(x), self.q2(x)
+    def _q(self, gru, ln, mlp, obs, act):
+        x = obs.unsqueeze(1) if obs.dim() == 2 else obs
+        out, _ = gru(x)
+        h = out[:, -1, :]
+        if ln is not None:
+            h = ln(h)
+        return mlp(torch.cat([h, act], dim=-1))
+
+    def forward(self, obs, act):
+        return (self._q(self.gru1, self.ln1, self.mlp1, obs, act),
+                self._q(self.gru2, self.ln2, self.mlp2, obs, act))
 
 
-def load_actor(actor_cfg: dict, device=None):
-    actor = GRUActor(
-        input_dim=actor_cfg["input_dim"],
-        hidden_dim=actor_cfg.get("hidden_dim", 128),
-        num_layers=actor_cfg.get("num_layers", 1),
-        head_dim=actor_cfg["head_dim"],
-        log_std_min=actor_cfg.get("log_std_min", -20.0),
-        log_std_max=actor_cfg.get("log_std_max", 2.0),
-        init_log_std_bias=actor_cfg.get("init_log_std_bias", -2.0),
-        parameters=actor_cfg.get("parameters", "data/parameters.json"),
+def load_actor(cfg, device=None):
+    a = Actor(
+        input_dim=cfg["input_dim"],
+        hidden_dim=cfg.get("hidden_dim", 256),
+        num_layers=cfg.get("num_layers", 1),
+        head_dim=cfg.get("head_dim", 64),
+        log_std_min=cfg.get("log_std_min", -10.0),
+        log_std_max=cfg.get("log_std_max", 2.0),
+        init_log_std_bias=cfg.get("init_log_std_bias", -2.0),
+        parameters=cfg.get("parameters", "data/parameters.json"),
+        use_layer_norm=cfg.get("use_layer_norm", False),
     )
-    if device is not None:
-        actor = actor.to(device)
-    return actor
+    return a if device is None else a.to(device)
 
 
-def load_critic(critic_cfg: dict, device=None):
-    input_dim = critic_cfg.get("input_dim")
-    if input_dim is None:
-        state_dim = critic_cfg.get("state_dim")
-        action_dim = critic_cfg.get("action_dim")
-        if state_dim is None or action_dim is None:
-            raise KeyError("critic config must provide either 'input_dim' or both 'state_dim' and 'action_dim'")
-        input_dim = int(state_dim) + int(action_dim)
-
-    head_dim = critic_cfg.get("head_dim")
-    if head_dim is None:
-        hidden_dims = critic_cfg.get("hidden_dims", [])
-        if not hidden_dims:
-            raise KeyError("critic config must provide 'head_dim' or non-empty 'hidden_dims'")
-        head_dim = int(hidden_dims[-1])
-
-    critics = Critic(
-        input_dim=input_dim,
-        hidden_dims=critic_cfg["hidden_dims"],
-        head_dim=head_dim,
+def load_critic(cfg, device=None):
+    c = Critic(
+        state_dim=int(cfg["state_dim"]),
+        action_dim=int(cfg.get("action_dim", 3)),
+        hidden_dim=int(cfg.get("hidden_dim", 256)),
+        num_layers=int(cfg.get("num_layers", 1)),
+        head_dim=int(cfg.get("head_dim", 64)),
+        use_layer_norm=bool(cfg.get("use_layer_norm", False)),
     )
-    if device is not None:
-        critics = critics.to(device)
-    return critics
+    return c if device is None else c.to(device)

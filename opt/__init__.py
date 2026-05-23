@@ -4,6 +4,12 @@ import pandas as pd
 import numpy as np
 
 
+def _storage_capex(parameters):
+    if "capex_per_kwh" in parameters:
+        return float(parameters["capex_per_kwh"]) * float(parameters["Emax"])
+    return float(parameters["capex"])
+
+
 class Simulation:
     def __init__(self, start, days, parameters):
         self.timestep = parameters["timestep"]
@@ -70,7 +76,7 @@ class Battery:
         self.DoD = parameters["DoD"]
         self.η = parameters["η"]
         self.β = parameters["β"]
-        self.capex = parameters["capex"]
+        self.capex = _storage_capex(parameters)
         self.ncycles = parameters["ncycles"]
         self.soc0 = SoC
         return
@@ -85,7 +91,7 @@ class EV:
         self.DoD = parameters["DoD"]
         self.η = parameters["η"]
         self.β = parameters["β"]
-        self.capex = parameters["capex"]
+        self.capex = _storage_capex(parameters)
         self.ncycles = parameters["ncycles"]
         self.penalty = parameters["penalty"]
         self.soc_min = parameters["soc_min"]

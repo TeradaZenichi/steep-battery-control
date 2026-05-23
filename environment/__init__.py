@@ -1,20 +1,22 @@
-from datetime import timedelta
 from gymnasium import spaces
 import gymnasium as gym
 import pandas as pd
 import numpy as np
 
 
+def _storage_capex(parameters):
+    if "capex_per_kwh" in parameters:
+        return float(parameters["capex_per_kwh"]) * float(parameters["Emax"])
+    return float(parameters["capex"])
+
+
 class Simulation:
     def __init__(self, start, days, parameters):
         self.timestep = parameters["timestep"]
         self.Δt = self.timestep / 60
-        self.params = parameters
-        self.end = start + timedelta(days=days)
         self.start = start
         self.step = start
         self.days = days
-        return
 
 
 class Weather:
@@ -24,14 +26,10 @@ class Weather:
         self.df = df
         self.columns = list(df.columns)
         self.values = df.to_numpy(dtype=np.float32)
-        return
 
     def _get_obs(self):
-        if hasattr(self.sim, "t_idx"):
-            row_vals = self.values[self.sim.t_idx]
-            row = {col: float(row_vals[i]) for i, col in enumerate(self.columns)}
-        else:
-            row = self.df.loc[self.sim.step]
+        row_vals = self.values[self.sim.t_idx]
+        row = {col: float(row_vals[i]) for i, col in enumerate(self.columns)}
         obs = [
             np.clip(
                 (row[col] - self.parameters[col]["min"]) /
@@ -43,6 +41,22 @@ class Weather:
         return obs
 
 
+class Lags:
+    def __init__(self, simulation, grid, pv, load, Pnorm):
+        self.sim = simulation
+        self.grid, self.pv, self.load, self.Pnorm = grid, pv, load, Pnorm
+
+    def _get_obs(self):
+        spd = self.sim.steps_per_day
+        i, n = self.sim.t_idx, 1000.0 * self.Pnorm
+        i24, i7d = max(0, i - spd), max(0, i - 7 * spd)
+        return [
+            float(self.grid[i24]), float(self.grid[i7d]),
+            float(self.pv[i24]) / n, float(self.pv[i7d]) / n,
+            float(self.load[i24]) / n, float(self.load[i7d]) / n,
+        ]
+
+
 class Grid:
     def __init__(self, parameters, df, simulation):
         self.sim = simulation
@@ -51,17 +65,9 @@ class Grid:
         self.Pmin = -parameters["Pmax_export"]
         self.export_tariff_factor = parameters.get("export_tariff_factor", 1.0)
         self.penalty = parameters["net_penalty"]
-        self.history = []
-
-    def reset(self):
-        self.history = []
-        return
 
     def step(self, power):
-        if hasattr(self.sim, "t_idx"):
-            tariff_t = self.df[self.sim.t_idx]
-        else:
-            tariff_t = self.df[self.sim.step]
+        tariff_t = self.df[self.sim.t_idx]
         import_power = max(power, 0.0)
         export_power = max(-power, 0.0)
         cost = (import_power - self.export_tariff_factor * export_power) * tariff_t * self.sim.Δt
@@ -70,66 +76,31 @@ class Grid:
             penalty = self.penalty * (power - self.Pmax) * self.sim.Δt
         if power < self.Pmin:
             penalty = self.penalty * (self.Pmin - power) * self.sim.Δt
-        self.history.append((power, cost, penalty))
         return power, cost, penalty
 
 
 class LoadEnv():
-    def __init__(self, parameters, df, simulation):
-        self.parameters = parameters
+    def __init__(self, df, simulation):
         self.sim = simulation
-        self.history = []
         self.df = df
-        return
-
-    def reset(self):
-        self.history = []
-        return
 
     def step(self):
-        if hasattr(self.sim, "t_idx"):
-            Pload = self.df[self.sim.t_idx] / 1000  # kW
-        else:
-            Pload = self.df[self.sim.step] / 1000  # kW
-        self.history.append(Pload)
+        Pload = self.df[self.sim.t_idx] / 1000  # kW
         return Pload, 0
 
-    def _get_obs(self):
-        if hasattr(self.sim, "t_idx"):
-            return self.df[self.sim.t_idx]
-        return self.df[self.sim.step]
-
-
 class PVEnv():
-    def __init__(self, parameters, df, simulation):
-        self.parameters = parameters
+    def __init__(self, df, simulation):
         self.sim = simulation
-        self.history = []
         self.df = df
-        return
-
-    def reset(self):
-        self.history = []
-        return
 
     def step(self, action):
-        if hasattr(self.sim, "t_idx"):
-            Ppv = self.df[self.sim.t_idx] / 1000  # kW
-        else:
-            Ppv = self.df[self.sim.step] / 1000  # kW
+        Ppv = self.df[self.sim.t_idx] / 1000  # kW
         PPV = Ppv * (1 - action)
 
         # Teacher-like small curtailment penalty: 0.01 * χPV * Ppv * Δt
         pv_cost = 0.01 * action * Ppv * self.sim.Δt
 
-        self.history.append((Ppv, PPV, action, pv_cost))
         return PPV, pv_cost
-
-    def _get_obs(self):
-        if hasattr(self.sim, "t_idx"):
-            return self.df[self.sim.t_idx]
-        return self.df[self.sim.step]
-
 
 class BatteryEnv():
     def __init__(self, parameters, SoC, simulation):
@@ -139,21 +110,16 @@ class BatteryEnv():
         self.DoD = parameters["DoD"]
         self.η = parameters["η"]
         self.β = parameters["β"]
-        self.capex = parameters["capex"]
+        self.capex = _storage_capex(parameters)
         self.soc0 = SoC
         self.soc = SoC
         self.E = self.soc * self.Emax
         self.ncycles = parameters["ncycles"]
-        self.ramp_penalty = parameters["ramp_penalty"]
         self.soc_power = parameters["soc_power_curve_pu"]
-        self.history = []   #(command, action, soc, energy)
-        return
 
     def reset(self):
         self.soc = self.soc0
         self.E = self.soc * self.Emax
-        self.history = []
-        return
 
     def step(self, action):
         idx = int(np.clip(np.searchsorted(self.soc_power["soc"], self.soc) - 1, 0, len(self.soc_power["soc"]) - 1))
@@ -172,7 +138,6 @@ class BatteryEnv():
             self.E = max(self.E + P * self.sim.Δt / self.η, Emin)
 
         self.soc = np.clip(self.E / self.Emax, 0.0, 1.0)
-        self.history.append((Pcmd, P, self.soc, self.E))
 
         cost = (self.capex / (self.Emax * self.ncycles)) * abs(P) * self.sim.Δt
         return P, cost
@@ -181,11 +146,40 @@ class BatteryEnv():
 class EVEnv():
     def __init__(self, parameters, df, tariff, simulation):
         self.sim = simulation
-        self.df = df  # expects columns: ev_conn, ev_arrival, ev_departure
         self.ev_conn_arr = df["ev_conn"].to_numpy(dtype=np.int8)
         self.ev_arrival_arr = df["ev_arrival"].to_numpy(dtype=np.float32)
-        self.ev_departure_arr = df["ev_departure"].to_numpy(dtype=np.float32)
-        self.grid_tariff = tariff
+        self.arrival_idx_arr = np.full(len(self.ev_conn_arr), -1, dtype=np.int32)
+        current_arrival = -1
+        prev_conn = 0
+        for idx, conn_raw in enumerate(self.ev_conn_arr):
+            conn = int(conn_raw)
+            if conn in (1, 2) and prev_conn == 0:
+                current_arrival = idx
+            if conn in (1, 2):
+                self.arrival_idx_arr[idx] = current_arrival
+            else:
+                current_arrival = -1
+            prev_conn = conn
+        self.departure_idx_arr = np.full(len(self.ev_conn_arr), -1, dtype=np.int32)
+        next_departure = -1
+        for idx in range(len(self.ev_conn_arr) - 1, -1, -1):
+            conn = int(self.ev_conn_arr[idx])
+            if conn == 2:
+                next_departure = idx
+            if conn in (1, 2):
+                self.departure_idx_arr[idx] = next_departure
+            else:
+                next_departure = -1
+        ev = self.ev_conn_arr.astype(np.int32)
+        prev = np.concatenate([[0], ev[:-1]])
+        is_arrival = (prev == 0) & ((ev == 1) | (ev == 2))
+        arrivals = np.where(is_arrival)[0]
+        n = len(ev)
+        self.next_arrival_idx_arr = np.full(n, -1, dtype=np.int32)
+        if len(arrivals) > 0:
+            j = np.searchsorted(arrivals, np.arange(n), side="left")
+            valid = j < len(arrivals)
+            self.next_arrival_idx_arr[valid] = arrivals[j[valid]]
         self.grid_tariff_arr = np.asarray(tariff, dtype=np.float32)
 
         self.Pmax_c = parameters["Pmax_c"]
@@ -194,15 +188,13 @@ class EVEnv():
         self.DoD = parameters["DoD"]
         self.η = parameters["η"]
         self.β = parameters["β"]
-        self.capex = parameters["capex"]
+        self.capex = _storage_capex(parameters)
         self.ncycles = parameters["ncycles"]
 
-        # Teacher-like SoC min penalty (SEV_min) and threshold
         self.penalty = parameters["penalty"]
         self.soc_min = parameters["soc_min"]
         self.soc_critical = parameters["soc_critical"]
-        self.fast_tariff = parameters["fast_tariff"] # this a tariff multiplier to grid tariff during fast charging 
-
+        self.fast_tariff = parameters["fast_tariff"] 
         self.soc_power = parameters["soc_power_curve_pu"]
 
         self.prev_conn = 0
@@ -211,17 +203,11 @@ class EVEnv():
         self.E = self.soc * self.Emax
         self.status = "disconnected"
 
-        self.history = []  #(command, P, soc, E, status)
-        return
-
     def reset(self):
-        # Teacher sets EEV[start] = Emax; observation masks EV SoC at start/arrival if desired
         self.soc = 1.0
         self.E = self.Emax
         self.status = "disconnected"
         self.prev_conn = 0
-        self.history = []
-        return
 
     def step(self, action):
         if action >= 0:
@@ -232,13 +218,9 @@ class EVEnv():
         cost = 0.0
 
         t = self.sim.step
-        if hasattr(self.sim, "t_idx"):
-            idx_t = self.sim.t_idx
-            conn_t = int(self.ev_conn_arr[idx_t])
-            tariff_t = float(self.grid_tariff_arr[idx_t])
-        else:
-            conn_t = int(self.df["ev_conn"].loc[t])
-            tariff_t = float(self.grid_tariff.loc[t])
+        idx_t = self.sim.t_idx
+        conn_t = int(self.ev_conn_arr[idx_t])
+        tariff_t = float(self.grid_tariff_arr[idx_t])
 
         connected_t = conn_t in (1, 2)
         connected_prev = int(self.prev_conn) in (1, 2)
@@ -248,23 +230,17 @@ class EVEnv():
 
         Emin = self.Emax * (1 - self.DoD)
 
-        # Disconnected: HOLD energy (Teacher-like), P=0
         if conn_t == 0:
             P = 0.0
             self.status = "disconnected"
 
-        # Start step: if connected, Teacher forces PEV=0 and does not apply trip jump at start
         elif is_start and connected_t:
             P = 0.0
             self.status = "arriving"
 
-        # Arrival: apply trip consumption jump and force P=0
         elif is_arrival:
             P = 0.0
-            if hasattr(self.sim, "t_idx"):
-                trip = float(self.ev_arrival_arr[idx_t])
-            else:
-                trip = float(self.df["ev_arrival"].loc[t])
+            trip = float(self.ev_arrival_arr[idx_t])
             E_trip = self.Emax * trip
             E_dep = float(self.E)  # HOLD: energia do departure anterior
             Ecrit = float(self.soc_critical) * self.Emax
@@ -298,7 +274,6 @@ class EVEnv():
             self.status = "arriving"
 
 
-        # Departure step: force P=0, apply self-discharge if previously connected
         elif conn_t == 2:
             P = 0.0
 
@@ -307,7 +282,6 @@ class EVEnv():
 
             self.status = "departing"
 
-        # Connected (normal): self-discharge + charge/discharge
         else:
             idx = int(np.clip(np.searchsorted(self.soc_power["soc"], self.soc) - 1, 0, len(self.soc_power["soc"]) - 1))
 
@@ -326,8 +300,6 @@ class EVEnv():
 
         self.soc = float(np.clip(self.E / self.Emax, 0.0, 1.0))
 
-        # Teacher-like SoC min shortfall penalty only during normal connected control.
-        # Departure is no longer penalized directly; arrival already accounts expected recharge cost.
         if self.status == "connected":
             sev = max(0.0, self.Emax * self.soc_min - self.E)
             cost += self.penalty * sev * self.sim.Δt
@@ -335,7 +307,6 @@ class EVEnv():
         # Degradation
         cost += (self.capex / (self.Emax * self.ncycles)) * abs(P) * self.sim.Δt
 
-        self.history.append((command, P, self.soc, self.E, self.status))
         self.prev_conn = conn_t
 
         return P, cost
@@ -355,11 +326,10 @@ class SmartHomeEnv(gym.Env):
         self.sim.end_idx = min(len(self.timestamps), self.sim.t_idx + self.sim.steps_per_day * self.sim.days)
 
         self.bess = BatteryEnv(parameters["BESS"], BESS_SoC, simulation=self.sim)
-        self.load = LoadEnv(parameters["Load"], df["electricity_demand_rate_W"].to_numpy(dtype=np.float32), simulation=self.sim)
-        self.pv = PVEnv(parameters["PV"], df["produced_electricity_rate_W"].to_numpy(dtype=np.float32), simulation=self.sim)
+        self.load = LoadEnv(df["electricity_demand_rate_W"].to_numpy(dtype=np.float32), simulation=self.sim)
+        self.pv = PVEnv(df["produced_electricity_rate_W"].to_numpy(dtype=np.float32), simulation=self.sim)
 
-        # EV now uses ev_conn, ev_arrival, ev_departure (Teacher-like)
-        self.ev = EVEnv(parameters["EV"], df[["ev_conn", "ev_arrival", "ev_departure"]], df[tariff], simulation=self.sim)
+        self.ev = EVEnv(parameters["EV"], df[["ev_conn", "ev_arrival"]], df[tariff], simulation=self.sim)
 
         self.grid = Grid(parameters["Grid"], df[tariff].to_numpy(dtype=np.float32), simulation=self.sim)
 
@@ -370,6 +340,7 @@ class SmartHomeEnv(gym.Env):
         self.weather = Weather(parameters["general"]["state_normalization"], weather_df, simulation=self.sim)
 
         self.Pnorm = parameters["general"]["Pnorm"]
+        self.lags = Lags(self.sim, self.grid.df, self.pv.df, self.load.df, self.Pnorm)
 
         self.operation = pd.DataFrame(columns=[
             "bess_cmd", "ev_cmd", "pv_cmd",
@@ -436,6 +407,8 @@ class SmartHomeEnv(gym.Env):
 
         info = {
             "energy_cost": energy_cost,
+            "bess_cost": bess_cost,
+            "ev_cost": ev_cost,
             "penalty": penalty,
             "pv_cost": pv_cost,
             "pgrid": PGrid,
@@ -462,14 +435,12 @@ class SmartHomeEnv(gym.Env):
 
         if "start" in options:
             self.sim.start = pd.Timestamp(options["start"])
-            self.sim.end = self.sim.start + timedelta(days=self.sim.days)
             self.sim.step = self.sim.start
         else:
             self.sim.step = self.sim.start
 
         if "days" in options:
             self.sim.days = options["days"]
-            self.sim.end = self.sim.start + timedelta(days=self.sim.days)
 
         self.sim.t_idx = self.ts_to_idx[pd.Timestamp(self.sim.step)]
         self.sim.end_idx = min(len(self.timestamps), self.sim.t_idx + self.sim.steps_per_day * self.sim.days)
@@ -478,22 +449,12 @@ class SmartHomeEnv(gym.Env):
             self.bess.soc0 = float(options["bess_soc"])
 
         self.bess.reset()
-        self.load.reset()
-        self.grid.reset()
-        self.pv.reset()
         self.ev.reset()
-
         self.state = self._get_observation()
         return self.state, {}
 
     def close(self):
-        self.load.history.clear()
-        self.pv.history.clear()
-        self.bess.history.clear()
-        self.ev.history.clear()
-        self.grid.history.clear()
         self.state = None
-        return
 
     def _get_observation(self):
         observation = [
@@ -531,5 +492,41 @@ class SmartHomeEnv(gym.Env):
         tariff_obs = [self.grid.df[self.sim.t_idx]]
         weather_obs = self.weather._get_obs()
         observations = observation + power_obs + tariff_obs + weather_obs
+        observations.extend(self._extra_features(ev_connected))
+        observations.extend(self.lags._get_obs())
 
         return np.array(observations, dtype=np.float32)
+
+    def _extra_features(self, ev_connected: bool) -> list[float]:
+        """Extra timing features without exposing future energy demand.
+        """
+        spd = int(self.sim.steps_per_day)
+        i = int(self.sim.t_idx)
+        lo = max(0, i - spd)
+        past_tar = self.grid.df[lo:i + 1]
+        if past_tar.size > 1:
+            t_now = float(self.grid.df[i])
+            t_min, t_max = float(past_tar.min()), float(past_tar.max())
+            tar_pct = (t_now - t_min) / (t_max - t_min) if t_max > t_min else 0.5
+        else:
+            tar_pct = 0.5
+
+        win = max(1, int(60 // self.sim.timestep))
+        lo2 = max(0, i - win + 1)
+        past_pv = self.pv.df[lo2:i + 1]
+        pv_ema = float(past_pv.mean()) / 1000.0 / self.Pnorm if past_pv.size else 0.0
+
+        scale = 12.0 * 60.0 / self.sim.timestep
+        if ev_connected:
+            arr_idx = int(self.ev.arrival_idx_arr[i])
+            dep_idx = int(self.ev.departure_idx_arr[i])
+            t_since = min(1.0, max(0, i - arr_idx) / scale) if arr_idx >= 0 else 0.0
+            t_until_dep = min(1.0, max(0, dep_idx - i) / scale) if dep_idx >= 0 else 0.0
+            t_until_arr = 0.0
+        else:
+            nxt = int(self.ev.next_arrival_idx_arr[i])
+            t_since = 0.0
+            t_until_dep = 0.0
+            t_until_arr = min(1.0, max(0, nxt - i) / scale) if nxt >= 0 else 1.0
+
+        return [float(tar_pct), float(pv_ema), float(t_since), float(t_until_dep), float(t_until_arr)]

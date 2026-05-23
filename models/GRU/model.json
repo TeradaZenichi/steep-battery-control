@@ -1,16 +1,17 @@
 {
     "actor": {
-        "input_dim": 23,
+        "input_dim": 34,
         "hidden_dim": 256,
         "num_layers": 1,
         "head_dim": 64,
-        "output_dim": 3,
-        "parameters": "data/parameters.json"
+        "use_layer_norm": true
     },
     "critic": {
-        "state_dim": 23,
+        "state_dim": 34,
         "action_dim": 3,
-        "hidden_dims": [256, 256],
-        "head_dim": 256
+        "hidden_dim": 256,
+        "num_layers": 1,
+        "head_dim": 64,
+        "use_layer_norm": true
     }
 }

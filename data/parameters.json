@@ -1,39 +1,32 @@
 {
   "general": {
     "timestep": 5,
-    "simulation_duration": 24,
-    "simulation_days": 1,
     "Pnorm": 10,
     "state_normalization": {
-      "Pmax": 10,
       "drybulb_C": { "min": -14.0, "max": 42.2 },
       "relhum_percent": { "min": 38.0, "max": 101.0 },
       "Global Horizontal Radiation": { "min": 0.0, "max": 911.2 },
       "dni_Wm2": { "min": 0.0, "max": 869.5 },
       "dhi_Wm2": { "min": 0.0, "max": 461.6 },
-      "Wind Speed (m/s)": { "min": 0.0, "max": 359.0 },
-      "wdir_deg": { "min": 0.0, "max": 16.0 },
-      "tariff_base": 1.0
+      "Wind Speed (m/s)": { "min": 0.0, "max": 20.0 },
+      "wdir_deg": { "min": 0.0, "max": 359.0 }
     }
   },
   "Grid": {
     "Pmax_import": 10,
     "Pmax_export": 2,
     "export_tariff_factor": 0.2,
-    "net_penalty": 5,
-    "tariff_column": "tar_tou"
+    "net_penalty": 5
   },
   "BESS": {
     "Pmax": 5,
-    "Emax": 5,
+    "Emax": 10,
     "DoD": 0.8,
     "η": 0.95,
     "β": 0.0004,
-    "soc_min": 0.1,
-    "soc_max": 0.9,
-    "capex": 987,
+    "capex_per_kwh": 150,
+    "capex": 1500,
     "ncycles": 6000,
-    "ramp_penalty": 0.05,
     "soc_power_curve_pu": {
       "soc": [0.10, 0.20, 0.40, 0.60, 0.80, 0.90],
       "charge_pu":    [1.00, 1.00, 1.00, 0.95, 0.70, 0.40],
@@ -54,17 +47,11 @@
     "η": 0.92,
     "β": 0.0004,
     "soc_min": 0.5,
-    "soc_max": 1.0,
-    "soc_init": 0.5,
-    "soh_init": 1.0,
     "penalty": 0.05,
-    "column": "ev_status",
-    "capex": 370,
+    "capex": 6000,
     "ncycles": 671,
-    "ramp_penalty": 0.0001,
     "soc_critical": 0.2,
     "fast_tariff": 3.0,
-    "penalty_coef": 1.0,
     "soc_power_curve_pu": {
       "soc": [0.00, 0.10, 0.30, 0.60, 0.85, 1.00],
       "charge_pu":    [1.00, 1.00, 1.00, 0.90, 0.60, 0.30],
