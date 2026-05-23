@@ -53,7 +53,7 @@ _model = importlib.import_module(MODEL_MODULE)
 load_actor = _model.load_actor
 load_critic = _model.load_critic
 
-TARIFFS = ["tar_s"]
+TARIFFS = ["tar_s", "tar_w", "tar_sw", "tar_flat", "tar_tou"]
 
 
 def _qualifies(es, min_reward, min_bess):

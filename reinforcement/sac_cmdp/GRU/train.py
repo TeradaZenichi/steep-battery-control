@@ -31,7 +31,7 @@ from reinforcement.sac_cmdp.utils import (
 from models.GRU.model import load_actor, load_critic
 from tools import EpisodeBar, UpdateBar, episode_bars, update_train_postfix
 
-TARIFFS = ["tar_s"]
+TARIFFS = ["tar_s", "tar_w", "tar_sw", "tar_flat", "tar_tou"]
 
 
 def _active_costs(cmdp_cfg):

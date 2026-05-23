@@ -2,7 +2,7 @@
     "train": {
         "seed": 42,
         "days": 7,
-        "train_episodes": 150,
+        "train_episodes": 100,
         "warmup_episodes": 5,
         "evaluate_every": 1,
         "eval_workers": 6,
@@ -28,8 +28,8 @@
         "actor_update_every": 32,
         "actor_update_start_episode": 10,
         "grad_clip": true,
-        "early_stop_patience": 70,
-        "min_episodes_before_early_stop": 180,
+        "early_stop_patience": 30,
+        "min_episodes_before_early_stop": 50,
         "sota": {
             "ensemble_size": 2,
             "redq_m": 2,
@@ -233,8 +233,15 @@
     "test": [],
     "plot": [],
     "test_io": {
-        "tariffs": ["tar_s"],
-        "checkpoints": ["best", "best_robust", "best_worst", "last"],
+        "tariffs": [
+            "tar_s"
+        ],
+        "checkpoints": [
+            "best",
+            "best_robust",
+            "best_worst",
+            "last"
+        ],
         "save_monthly_summary": true,
         "save_plot_operation": true,
         "plot_operation_days": 7,
