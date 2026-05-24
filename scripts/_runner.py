@@ -19,6 +19,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 ALL_TARIFFS = "tar_s,tar_w,tar_sw,tar_flat,tar_tou"
 TAR_S_ONLY = "tar_s"
+TAR_SW_ONLY = "tar_sw"
 
 
 def patch_config(config_path: Path, **kv) -> None:
