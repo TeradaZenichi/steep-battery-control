@@ -476,10 +476,9 @@ class SmartHomeEnv(gym.Env):
         is_arrival_obs = ev_connected and (int(self.ev.prev_conn) == 0) and (not is_start_obs)
         ev_controllable = (conn_t == 1) and (not is_start_obs) and (not is_arrival_obs)
 
-        if ev_controllable:
-            ev_soc_obs = float(self.ev.soc)
-        else:
-            ev_soc_obs = 0.0
+        # Expose persisted EV SoC during disconnection (last-known value); the
+        # ev_controllable flag tells the agent whether it can act on it.
+        ev_soc_obs = float(self.ev.soc)
 
         power_obs = [
             (self.load.df[self.sim.t_idx] / 1000) / self.Pnorm,

@@ -24,6 +24,7 @@ Run:
 import json
 import sys
 import importlib
+import os
 from pathlib import Path
 
 import numpy as np
@@ -38,6 +39,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(ALGO_ROOT))
 
 from environment import SmartHomeEnv
+from environment.shaping import AnticipatoryShapingWrapper
 from reinforcement.sac_penalty.utils import (
     SafetyLayer, Hyperparameters, ReplayBuffer,
     Temperature, soft_update, alpha_step,
@@ -53,7 +55,11 @@ _model = importlib.import_module(MODEL_MODULE)
 load_actor = _model.load_actor
 load_critic = _model.load_critic
 
-TARIFFS = ["tar_s", "tar_w", "tar_sw", "tar_flat", "tar_tou"]
+_DEFAULT_TARIFFS = ["tar_s", "tar_w", "tar_sw", "tar_flat", "tar_tou"]
+TARIFFS = os.environ.get("RUN_TARIFFS", ",".join(_DEFAULT_TARIFFS)).split(",")
+CONFIG_NAME = os.environ.get("CONFIG_NAME", "config.json")
+RUN_SUFFIX = os.environ.get("RUN_SUFFIX", "")
+EVAL_ACTOR_MODE = os.environ.get("EVAL_ACTOR_MODE", "ema").lower()
 
 
 def _qualifies(es, min_reward, min_bess):
@@ -64,7 +70,7 @@ def _qualifies(es, min_reward, min_bess):
 
 
 def train_tariff(tariff: str):
-    with open(ALGO_ROOT / "config.json", encoding="utf-8") as f:
+    with open(ALGO_ROOT / CONFIG_NAME, encoding="utf-8") as f:
         cfg = json.load(f)
     with open(MODEL_ROOT / "model.json", encoding="utf-8") as f:
         model_cfg = json.load(f)
@@ -105,6 +111,8 @@ def train_tariff(tariff: str):
     )
     anchor = KLAnchor(beta=0.0,  # starts disabled; turned on at transition
                        decay=sota.get("kl_decay", 0.998))
+    best_anchor = KLAnchor(beta=0.0, decay=1.0)
+    best_anchor_model = load_actor(model_cfg["actor"], device=device)
 
     opt_actor = torch.optim.Adam(actor.parameters(), lr=hp.actor_lr)
     opt_critic = torch.optim.Adam(ensemble.parameters(), lr=hp.critic_lr)
@@ -117,7 +125,7 @@ def train_tariff(tariff: str):
 
     episodes = EpisodeGen(cfg, str(PROJECT_ROOT / "data"), seed=hp.seed)
 
-    out_dir = PROJECT_ROOT / "Results" / "train" / "reinforcement" / "sac_penalty" / ARCH_NAME / tariff
+    out_dir = PROJECT_ROOT / "paper" / "train" / "sac_penalty" / ARCH_NAME / f"{tariff}{RUN_SUFFIX}"
     eval_runner = EvalRunner(
         actor_module=MODEL_MODULE, actor_cfg=model_cfg["actor"],
         parameters=env_params, tariff=tariff, history_len=hp.history_len,
@@ -176,7 +184,7 @@ def train_tariff(tariff: str):
     step_count = [0]
     m_target = sota.get("redq_m", 2)
     tqdm.write(
-        f"[setup] {tariff} GRU safe_rollout={safe_rollout} "
+        f"[setup] {tariff} {ARCH_NAME} safe_rollout={safe_rollout} "
         f"anchor[min_reward={min_reward}, min_bess={min_bess}, "
         f"patience={patience}, min_ep={phase1_min_episodes}, "
         f"max_ep={phase1_max_episodes}, lr_factor={phase2_actor_lr_factor}, "
@@ -208,12 +216,16 @@ def train_tariff(tariff: str):
         with open(out_dir / f"{label}_meta.json", "w", encoding="utf-8") as f:
             json.dump(meta, f, indent=2)
 
+    def refresh_best_anchor(job):
+        actor_state = job["snapshot"]["actor"] if EVAL_ACTOR_MODE == "live" else job["snapshot"]["ema"]
+        best_anchor_model.load_state_dict(actor_state)
+        best_anchor.snapshot(best_anchor_model)
+
     def transition_to_phase2(ep, reason=""):
         """Reset PID, set KL anchor from best qualifying EMA, keep opt_actor.
 
-        Per design analysis: opt_actor.state is NOT cleared (avoids Adam
-        first-step spike from m1/m2 reset). lam integral is reset because
-        phase 2 starts a new constraint regime.
+        opt_actor.state is kept to avoid an Adam first-step spike on transition.
+        lam integral is reset since phase 2 starts a new constraint regime.
         """
         state["phase"] = 2
         state["transition_ep"] = ep
@@ -235,7 +247,7 @@ def train_tariff(tariff: str):
             tqdm.write(
                 f"[phase2] {tariff} ep {ep} -> anchor set "
                 f"(reward={state['best_qualifying_reward']:.2f}, "
-                f"from ep {state['best_qualifying_ep']}, β={anchor.beta}, {reason})"
+                f"from ep {state['best_qualifying_ep']}, beta={anchor.beta}, {reason})"
             )
         else:
             anchor.beta = 0.0  # no qualifying policy → falls back to v7-like behavior
@@ -325,6 +337,8 @@ def train_tariff(tariff: str):
             es = job["summary"]
             last_eval_summary = es
             improved = early_stop.update(job["episode"], es["mean_reward"])
+            if improved:
+                refresh_best_anchor(job)
             for label, metric in (
                 ("best", "mean_reward"),
                 ("best_robust", "robust_reward"),
@@ -342,7 +356,7 @@ def train_tariff(tariff: str):
                 f"mean={es['mean_reward']:.2f}  best={early_stop.best:.2f}  "
                 f"bess={es.get('bess_abs_power_mean', float('nan')):.3f}  "
                 f"phase={state['phase']}  patience={state['evals_since_best']}"
-                + ("  ★" if improved else "")
+                + ("  *" if improved else "")
             )
             row = {
                 "episode": job["episode"],
@@ -383,10 +397,15 @@ def train_tariff(tariff: str):
             break
 
         envs = {
-            stream: SmartHomeEnv(episodes.load(stream), env_params,
-                                  start=episodes.sample(stream), days=hp.days,
-                                  BESS_SoC=np.random.uniform(0.1, 0.9),
-                                  tariff=tariff, track_operation=False)
+            stream: AnticipatoryShapingWrapper(
+                SmartHomeEnv(episodes.load(stream), env_params,
+                              start=episodes.sample(stream), days=hp.days,
+                              BESS_SoC=np.random.uniform(0.1, 0.9),
+                              tariff=tariff, track_operation=False),
+                params=env_params, gamma=hp.gamma,
+                omega=cfg["train"].get("shaping_omega", 0.0),
+                typical_drop=cfg["train"].get("shaping_typical_drop", 0.137),
+            )
             for stream in ("cy", "wy")
         }
         audit.open()
@@ -414,7 +433,8 @@ def train_tariff(tariff: str):
                                         opt_actor, kl_anchor=anchor,
                                         grad_clip=hp.grad_clip,
                                         project_q=project_actor_q,
-                                        proj_penalty_coef=proj_penalty_coef_cfg)
+                                        proj_penalty_coef=proj_penalty_coef_cfg,
+                                        best_anchor=best_anchor)
                 al_info = alpha_step(temp, ainfo.pop("logp"), target_entropy[0], opt_alpha)
                 ld_info = lam.step(ainfo.pop("viol"))
                 ema_actor.update(actor)
@@ -442,15 +462,17 @@ def train_tariff(tariff: str):
         if (ep + 1) % hp.evaluate_every == 0:
             while len(async_eval.pending) >= async_eval.max_pending:
                 finish_evals(async_eval.collect(wait=True, max_items=1))
+            snap = snapshot()
             ema_state = {k: v.detach().cpu().clone() for k, v in ema_actor.state_dict().items()}
+            eval_state = snap["actor"] if EVAL_ACTOR_MODE == "live" else ema_state
             ctx = {"train_reward": train_reward, "agg": audit.aggregate()}
-            async_eval.submit(ep, ema_state, snapshot(), ctx)
+            async_eval.submit(ep, eval_state, snap, ctx)
             eval_submitted = True
             tqdm.write(f"[submit] {tariff} ep {ep:4d} (pending={len(async_eval.pending)})")
             if (ep + 1) % safe_eval_every == 0:
                 while len(async_safe_eval.pending) >= async_safe_eval.max_pending:
                     finish_safe_evals(async_safe_eval.collect(wait=True, max_items=1))
-                async_safe_eval.submit(ep, ema_state, snapshot(), ctx)
+                async_safe_eval.submit(ep, eval_state, snap, ctx)
                 tqdm.write(f"[submit_safe] {tariff} ep {ep:4d} (pending={len(async_safe_eval.pending)})")
 
         agg = audit.aggregate()
@@ -470,6 +492,7 @@ def train_tariff(tariff: str):
     finish_safe_evals(async_safe_eval.drain())
     audit.flush(force=True)
     safe_audit.flush(force=True)
+    (out_dir / ".train_done").touch()
     eval_runner.close()
     safe_eval_runner.close()
 

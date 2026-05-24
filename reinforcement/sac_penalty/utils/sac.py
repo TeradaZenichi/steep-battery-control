@@ -4,6 +4,19 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+def _corrcoef_1d(x, y):
+    x = x.detach().flatten()
+    y = y.detach().flatten()
+    if x.numel() < 2 or y.numel() < 2:
+        return torch.tensor(float("nan"), device=x.device)
+    x = x - x.mean()
+    y = y - y.mean()
+    denom = x.norm() * y.norm()
+    if denom <= 1e-12:
+        return torch.tensor(float("nan"), device=x.device)
+    return (x * y).sum() / denom
+
+
 class Temperature(nn.Module):
     def __init__(self, init_alpha=0.1):
         super().__init__()
@@ -43,6 +56,8 @@ def critic_step_ens(ensemble, actor, batch, temperature, opt, grad_clip=True, m=
         backup = rew + gamma_pow * (1.0 - done) * (q_next - temperature.alpha * logp_next)
     backup = backup.clone()
     q_all = ensemble.all_q(obs, act)
+    q_mean = q_all.mean(dim=0)
+    q_return_corr = _corrcoef_1d(q_mean, rew)
     loss = sum(F.smooth_l1_loss(q_all[i], backup) for i in range(q_all.shape[0]))
     opt.zero_grad(set_to_none=True)
     loss.backward()
@@ -54,14 +69,15 @@ def critic_step_ens(ensemble, actor, batch, temperature, opt, grad_clip=True, m=
         "critic_main_loss": float(loss.detach()),
         "q1_mean": float(q_all[0].mean().detach()),
         "q2_mean": float(q_all[-1].mean().detach()),
-        "q_mean": float(q_all.mean().detach()),
+        "q_mean": float(q_mean.mean().detach()),
+        "q_return_corr": float(q_return_corr.detach()),
         "backup_mean": float(backup.mean().detach()),
     }
 
 
 def actor_step_ens(actor, ensemble, safety, batch, temperature, lam, opt,
                    kl_anchor=None, grad_clip=True, project_q=False,
-                   proj_penalty_coef=0.0):
+                   proj_penalty_coef=0.0, best_anchor=None):
     obs = batch["obs"]
     action_pi, logp_pi, _, _ = actor.sample(obs, with_mu=False)
     action_safe, viol = safety.project(obs, action_pi)
@@ -83,6 +99,11 @@ def actor_step_ens(actor, ensemble, safety, batch, temperature, lam, opt,
         loss = loss + kl_anchor.beta * kl_val
         info["kl"] = float(kl_val.detach())
         info["kl_beta"] = float(kl_anchor.beta)
+
+    if best_anchor is not None and best_anchor.anchor is not None:
+        with torch.no_grad():
+            best_kl = best_anchor.kl(obs, actor)
+        info["kl_from_best"] = float(best_kl.detach())
 
     opt.zero_grad(set_to_none=True)
     loss.backward()

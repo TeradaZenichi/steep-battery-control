@@ -7,6 +7,7 @@ Run:
     python reinforcement/sac_cmdp/GRU/train.py
 """
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -22,16 +23,23 @@ sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(ALGO_ROOT))
 
 from environment import SmartHomeEnv
+from environment.shaping import AnticipatoryShapingWrapper
 from reinforcement.sac_cmdp.utils import (
     SafetyLayer, Hyperparameters, ReplayBuffer, Temperature, CostLambda,
     soft_update, reward_critic_step, cost_critic_step, actor_step,
     alpha_step, lambda_step, EpisodeGen, Audit, AsyncEval, EvalRunner,
     collect_streams, cost_tensor, EMA,
 )
-from models.GRU.model import load_actor, load_critic
+import importlib
+MODEL_MODULE = f"models.{ARCH_NAME}.model"
+_model = importlib.import_module(MODEL_MODULE)
+load_actor = _model.load_actor
+load_critic = _model.load_critic
 from tools import EpisodeBar, UpdateBar, episode_bars, update_train_postfix
 
-TARIFFS = ["tar_s", "tar_w", "tar_sw", "tar_flat", "tar_tou"]
+RUN_SUFFIX = os.environ.get("RUN_SUFFIX", "")
+_DEFAULT_TARIFFS = ["tar_s", "tar_w", "tar_sw", "tar_flat", "tar_tou"]
+TARIFFS = os.environ.get("RUN_TARIFFS", ",".join(_DEFAULT_TARIFFS)).split(",")
 
 
 def _active_costs(cmdp_cfg):
@@ -93,9 +101,9 @@ def train_tariff(tariff: str):
     )
 
     episodes = EpisodeGen(cfg, str(PROJECT_ROOT / "data"), seed=hp.seed)
-    out_dir = PROJECT_ROOT / "Results" / "train" / "reinforcement" / "sac_cmdp" / ARCH_NAME / tariff
+    out_dir = PROJECT_ROOT / "paper" / "train" / "sac_cmdp" / ARCH_NAME / f"{tariff}{RUN_SUFFIX}"
     eval_runner = EvalRunner(
-        actor_module="models.GRU.model", actor_cfg=model_cfg["actor"],
+        actor_module=MODEL_MODULE, actor_cfg=model_cfg["actor"],
         parameters=env_params, tariff=tariff, history_len=hp.history_len,
         project_root=str(PROJECT_ROOT), n_workers=cfg["train"].get("eval_workers", 4),
     )
@@ -194,10 +202,15 @@ def train_tariff(tariff: str):
     for ep, pbar in episode_bars(hp.train_episodes, hp.warmup_episodes, tariff):
         finish_evals(async_eval.collect())
         envs = {
-            stream: SmartHomeEnv(
-                episodes.load(stream), env_params, start=episodes.sample(stream),
-                days=hp.days, BESS_SoC=np.random.uniform(0.1, 0.9),
-                tariff=tariff, track_operation=False,
+            stream: AnticipatoryShapingWrapper(
+                SmartHomeEnv(
+                    episodes.load(stream), env_params, start=episodes.sample(stream),
+                    days=hp.days, BESS_SoC=np.random.uniform(0.1, 0.9),
+                    tariff=tariff, track_operation=False,
+                ),
+                params=env_params, gamma=hp.gamma,
+                omega=cfg["train"].get("shaping_omega", 0.0),
+                typical_drop=cfg["train"].get("shaping_typical_drop", 0.137),
             )
             for stream in ("cy", "wy")
         }
@@ -254,7 +267,8 @@ def train_tariff(tariff: str):
             while len(async_eval.pending) >= async_eval.max_pending:
                 finish_evals(async_eval.collect(wait=True, max_items=1))
             state = snapshot()
-            async_eval.submit(ep, state["ema"], state, {"train_reward": train_reward, "agg": audit.aggregate()})
+            # Eval uses live actor (EMA still saved in checkpoint for inference).
+            async_eval.submit(ep, state["actor"], state, {"train_reward": train_reward, "agg": audit.aggregate()})
             eval_submitted = True
             tqdm.write(f"[submit] {tariff} ep {ep:4d} (pending={len(async_eval.pending)})")
 
@@ -274,6 +288,7 @@ def train_tariff(tariff: str):
 
     finish_evals(async_eval.drain())
     audit.flush(force=True)
+    (out_dir / ".train_done").touch()
     eval_runner.close()
 
 

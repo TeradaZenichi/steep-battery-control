@@ -2,7 +2,7 @@
     "train": {
         "seed": 42,
         "days": 7,
-        "train_episodes": 100,
+        "train_episodes": 80,
         "warmup_episodes": 5,
         "evaluate_every": 1,
         "eval_workers": 6,
@@ -16,7 +16,7 @@
         "history_len": 96,
         "n_step": 36,
         "update_every_steps": 16,
-        "gamma": 0.997,
+        "gamma": 0.999,
         "tau": 0.005,
         "actor_lr": 0.0001,
         "critic_lr": 0.0001,
@@ -28,8 +28,8 @@
         "actor_update_every": 32,
         "actor_update_start_episode": 10,
         "grad_clip": true,
-        "early_stop_patience": 30,
-        "min_episodes_before_early_stop": 50,
+        "early_stop_patience": 15,
+        "min_episodes_before_early_stop": 30,
         "sota": {
             "ensemble_size": 2,
             "redq_m": 2,
@@ -47,10 +47,10 @@
             "safe_eval_every": 5,
             "anchor_strategy": "joint_patience",
             "anchor_min_reward": -52.0,
-            "anchor_min_bess_power": 0.15,
+            "anchor_min_bess_power": 0.2,
             "anchor_patience": 8,
             "phase1_min_episodes": 12,
-            "phase1_max_episodes": 60,
+            "phase1_max_episodes": 40,
             "phase_transition_reset_pid": true,
             "phase_transition_reset_actor_opt": false,
             "phase2_actor_lr_factor": 0.25,
@@ -58,7 +58,9 @@
             "anchor_confirm_evals": 2,
             "phase2_target_entropy_offset": 0.5,
             "anchor_dynamic": true
-        }
+        },
+        "shaping_omega": 0.3,
+        "shaping_typical_drop": 0.137
     },
     "val": [
         {

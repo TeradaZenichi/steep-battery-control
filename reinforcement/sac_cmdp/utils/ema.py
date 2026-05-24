@@ -1,5 +1,4 @@
-"""Polyak-averaged copy of a model. Use the EMA copy for eval to smooth out
-late-training noise without affecting the training-actor dynamics."""
+"""Polyak-averaged copy of a model — useful for smoothed eval."""
 import copy
 import torch
 

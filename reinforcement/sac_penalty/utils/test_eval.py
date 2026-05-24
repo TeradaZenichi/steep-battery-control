@@ -1,11 +1,8 @@
-"""Lean annual test runner for trained actors.
-
-Monthly episodes are evaluated in full for metrics. Weekly operation traces are
-saved separately for plotting, with both raw and safety-projected actions.
-"""
+"""Annual test: monthly metrics + weekly operation traces, raw and safety-projected."""
 from __future__ import annotations
 
 import csv
+import os
 import gzip
 import importlib
 import json
@@ -219,15 +216,20 @@ def run_test(algo_root: Path):
     io = cfg.get("test_io", {})
     checkpoints = io.get("checkpoints", ["best", "best_robust", "best_worst", "last"])
     modes = ["raw", "safe"]
-    tariffs = io.get("tariffs", ["tar_s"])
+    suffix = os.environ.get("RUN_SUFFIX", "")
+    env_tariffs = os.environ.get("RUN_TARIFFS")
+    if env_tariffs:
+        tariffs = env_tariffs.split(",")
+    else:
+        tariffs = io.get("tariffs", ["tar_s"])
     runs = cfg.get("test") or _default_monthly_runs()
     plot_days = int(io.get("plot_operation_days", 7))
     save_plot = bool(io.get("save_plot_operation", True))
     history_len = int(cfg["train"].get("history_len", 96))
 
     for tariff in tariffs:
-        train_dir = PROJECT_ROOT / "Results" / "train" / "reinforcement" / "sac_penalty" / arch_name / tariff
-        out_dir = PROJECT_ROOT / "Results" / "test" / "reinforcement" / "sac_penalty" / arch_name / tariff
+        train_dir = PROJECT_ROOT / "paper" / "train" / "sac_penalty" / arch_name / f"{tariff}{suffix}"
+        out_dir = PROJECT_ROOT / "paper" / "test" / "sac_penalty" / arch_name / f"{tariff}{suffix}"
         op_dir = out_dir / "operations"
         out_dir.mkdir(parents=True, exist_ok=True)
         op_dir.mkdir(parents=True, exist_ok=True)
@@ -285,3 +287,4 @@ def run_test(algo_root: Path):
                 writer.writerows(aggregate_rows)
             with open(out_dir / "summary_overall.json", "w", encoding="utf-8") as f:
                 json.dump(aggregate_rows, f, indent=2)
+        (out_dir / ".test_done").touch()

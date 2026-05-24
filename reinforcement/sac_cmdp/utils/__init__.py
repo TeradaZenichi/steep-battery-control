@@ -20,6 +20,7 @@ from .audit import Audit
 from .eval import AsyncEval, EvalRunner, summarize
 from .rollout import collect_episode, collect_streams
 from .ema import EMA
+from .test_eval import run_test
 
 __all__ = [
     "SafetyLayer",
@@ -31,4 +32,5 @@ __all__ = [
     "EpisodeGen", "Audit", "AsyncEval", "EvalRunner", "summarize",
     "collect_episode", "collect_streams",
     "EMA",
+    "run_test",
 ]

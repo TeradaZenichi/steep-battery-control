@@ -1,9 +1,4 @@
-"""Per-unit device limits as a function of SoC. Used by actor for action scaling.
-
-Single source of truth: methods (supervised, reinforcement/*) reuse these
-primitives directly. Keep this file free of method-specific logic; safety
-projection layers live in each method's utils.
-"""
+"""Battery and EV per-unit limits as a function of SoC. Shared across methods."""
 import torch.nn as nn
 import torch
 

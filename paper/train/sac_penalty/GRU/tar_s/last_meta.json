@@ -1,0 +1,22 @@
+{
+  "architecture": "GRU",
+  "tariff": "tar_s",
+  "episode": 30,
+  "metric": "last_eval",
+  "value": -60.975808931980886,
+  "train_reward": -676.634380502277,
+  "phase": 1,
+  "summary": {
+    "mean_reward": -60.975808931980886,
+    "worst_reward": -107.88889877948895,
+    "robust_reward": -103.15779845230827,
+    "energy_cost_mean": 0.015754740495024778,
+    "bess_cost_mean": 0.0003336579368994383,
+    "ev_cost_mean": 0.014109858638755897,
+    "pv_cost_mean": 4.7679133072775965e-05,
+    "grid_penalty_mean": 7.411981161106884e-10,
+    "bess_abs_power_mean": 0.16015580532919596,
+    "ev_abs_power_mean": 0.42136055853639665,
+    "pv_cmd_mean": 0.018539615957125333
+  }
+}
