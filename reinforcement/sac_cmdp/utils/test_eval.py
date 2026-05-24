@@ -8,6 +8,7 @@ import importlib
 import json
 from calendar import monthrange
 from collections import deque
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 import numpy as np
@@ -21,6 +22,7 @@ from reinforcement.sac_cmdp.utils.safety import SafetyLayer
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
+_WORKER = {}
 
 
 def _read_json(path: Path):
@@ -185,6 +187,49 @@ def _eval_run(run, tariff, actor, history_len, params, mode, save_operation=Fals
     return _finish_metrics(metrics), rows
 
 
+def _init_eval_worker(arch_name, checkpoint, model_cfg, params_path, tariff, history_len, mode):
+    torch.set_num_threads(1)
+    try:
+        torch.set_num_interop_threads(1)
+    except RuntimeError:
+        pass
+    params = _read_json(params_path)
+    actor, _ = _load_actor(arch_name, checkpoint, model_cfg, params_path)
+    _WORKER.clear()
+    _WORKER.update({
+        "actor": actor,
+        "params": params,
+        "tariff": tariff,
+        "history_len": history_len,
+        "mode": mode,
+    })
+
+
+def _eval_run_worker(payload):
+    run, save_plot, plot_days = payload
+    metrics, _ = _eval_run(
+        run, _WORKER["tariff"], _WORKER["actor"], _WORKER["history_len"],
+        _WORKER["params"], _WORKER["mode"],
+    )
+    op_rows = []
+    if save_plot:
+        _, op_rows = _eval_run(
+            run, _WORKER["tariff"], _WORKER["actor"], _WORKER["history_len"],
+            _WORKER["params"], _WORKER["mode"],
+            save_operation=True, operation_days=plot_days,
+        )
+    return run["name"], metrics, op_rows
+
+
+def _write_operation(op_path, op_rows):
+    if not op_rows:
+        return
+    with gzip.open(op_path, "wt", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=list(op_rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(op_rows)
+
+
 def _aggregate(rows):
     rewards = np.asarray([r["reward"] for r in rows], dtype=np.float64)
     tail = min(2, len(rewards))
@@ -226,6 +271,7 @@ def run_test(algo_root: Path):
     plot_days = int(io.get("plot_operation_days", 7))
     save_plot = bool(io.get("save_plot_operation", True))
     history_len = int(cfg["train"].get("history_len", 96))
+    workers = int(os.environ.get("TEST_WORKERS", io.get("test_workers", 4)))
 
     for tariff in tariffs:
         train_dir = PROJECT_ROOT / "paper" / "train" / "sac_cmdp" / arch_name / f"{tariff}{suffix}"
@@ -240,32 +286,54 @@ def run_test(algo_root: Path):
             ckpt_path = train_dir / f"{ckpt}.pt"
             if not ckpt_path.exists():
                 continue
-            actor, _ = _load_actor(arch_name, ckpt_path, model_cfg, params_path)
             for mode in modes:
                 rows_for_agg = []
-                for run in tqdm(runs, desc=f"{arch_name} {tariff} {ckpt} {mode}", dynamic_ncols=True):
-                    metrics, _ = _eval_run(run, tariff, actor, history_len, params, mode)
-                    row = {
-                        "architecture": arch_name,
-                        "tariff": tariff,
-                        "checkpoint": ckpt,
-                        "mode": mode,
-                        "scenario": run["name"],
-                        **metrics,
-                    }
-                    monthly_rows.append(row)
-                    rows_for_agg.append(row)
-
-                    if save_plot:
-                        _, op_rows = _eval_run(
-                            run, tariff, actor, history_len, params, mode,
-                            save_operation=True, operation_days=plot_days,
-                        )
-                        op_path = op_dir / f"{run['name']}_{ckpt}_{mode}.csv.gz"
-                        with gzip.open(op_path, "wt", newline="", encoding="utf-8") as f:
-                            writer = csv.DictWriter(f, fieldnames=list(op_rows[0].keys()))
-                            writer.writeheader()
-                            writer.writerows(op_rows)
+                desc = f"{arch_name} {tariff} {ckpt} {mode}"
+                if workers > 1 and len(runs) > 1:
+                    with ProcessPoolExecutor(
+                        max_workers=workers,
+                        initializer=_init_eval_worker,
+                        initargs=(arch_name, ckpt_path, model_cfg, params_path, tariff, history_len, mode),
+                    ) as pool:
+                        futures = [
+                            pool.submit(_eval_run_worker, (run, save_plot, plot_days))
+                            for run in runs
+                        ]
+                        for fut in tqdm(as_completed(futures), total=len(futures), desc=desc, dynamic_ncols=True):
+                            scenario, metrics, op_rows = fut.result()
+                            row = {
+                                "architecture": arch_name,
+                                "tariff": tariff,
+                                "checkpoint": ckpt,
+                                "mode": mode,
+                                "scenario": scenario,
+                                **metrics,
+                            }
+                            rows_for_agg.append(row)
+                            if save_plot:
+                                _write_operation(op_dir / f"{scenario}_{ckpt}_{mode}.csv.gz", op_rows)
+                    rows_for_agg.sort(key=lambda r: r["scenario"])
+                    monthly_rows.extend(rows_for_agg)
+                else:
+                    actor, _ = _load_actor(arch_name, ckpt_path, model_cfg, params_path)
+                    for run in tqdm(runs, desc=desc, dynamic_ncols=True):
+                        metrics, _ = _eval_run(run, tariff, actor, history_len, params, mode)
+                        row = {
+                            "architecture": arch_name,
+                            "tariff": tariff,
+                            "checkpoint": ckpt,
+                            "mode": mode,
+                            "scenario": run["name"],
+                            **metrics,
+                        }
+                        monthly_rows.append(row)
+                        rows_for_agg.append(row)
+                        if save_plot:
+                            _, op_rows = _eval_run(
+                                run, tariff, actor, history_len, params, mode,
+                                save_operation=True, operation_days=plot_days,
+                            )
+                            _write_operation(op_dir / f"{run['name']}_{ckpt}_{mode}.csv.gz", op_rows)
 
                 aggregate_rows.append({
                     "architecture": arch_name,

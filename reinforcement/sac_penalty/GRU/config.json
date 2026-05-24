@@ -59,7 +59,7 @@
             "phase2_target_entropy_offset": 0.5,
             "anchor_dynamic": true
         },
-        "shaping_omega": 0.3,
+        "shaping_omega": 0.0,
         "shaping_typical_drop": 0.137
     },
     "val": [

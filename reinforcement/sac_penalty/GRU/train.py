@@ -55,8 +55,7 @@ _model = importlib.import_module(MODEL_MODULE)
 load_actor = _model.load_actor
 load_critic = _model.load_critic
 
-_DEFAULT_TARIFFS = ["tar_s", "tar_w", "tar_sw", "tar_flat", "tar_tou"]
-TARIFFS = os.environ.get("RUN_TARIFFS", ",".join(_DEFAULT_TARIFFS)).split(",")
+TARIFFS = [t.strip() for t in os.environ.get("TARIFFS", "tar_s").split(",") if t.strip()]
 CONFIG_NAME = os.environ.get("CONFIG_NAME", "config.json")
 RUN_SUFFIX = os.environ.get("RUN_SUFFIX", "")
 EVAL_ACTOR_MODE = os.environ.get("EVAL_ACTOR_MODE", "ema").lower()
@@ -125,7 +124,7 @@ def train_tariff(tariff: str):
 
     episodes = EpisodeGen(cfg, str(PROJECT_ROOT / "data"), seed=hp.seed)
 
-    out_dir = PROJECT_ROOT / "paper" / "train" / "sac_penalty" / ARCH_NAME / f"{tariff}{RUN_SUFFIX}"
+    out_dir = PROJECT_ROOT / "Results" / "train" / "reinforcement" / "sac_penalty" / ARCH_NAME / f"{tariff}{RUN_SUFFIX}"
     eval_runner = EvalRunner(
         actor_module=MODEL_MODULE, actor_cfg=model_cfg["actor"],
         parameters=env_params, tariff=tariff, history_len=hp.history_len,
@@ -224,8 +223,9 @@ def train_tariff(tariff: str):
     def transition_to_phase2(ep, reason=""):
         """Reset PID, set KL anchor from best qualifying EMA, keep opt_actor.
 
-        opt_actor.state is kept to avoid an Adam first-step spike on transition.
-        lam integral is reset since phase 2 starts a new constraint regime.
+        Per design analysis: opt_actor.state is NOT cleared (avoids Adam
+        first-step spike from m1/m2 reset). lam integral is reset because
+        phase 2 starts a new constraint regime.
         """
         state["phase"] = 2
         state["transition_ep"] = ep
@@ -492,7 +492,6 @@ def train_tariff(tariff: str):
     finish_safe_evals(async_safe_eval.drain())
     audit.flush(force=True)
     safe_audit.flush(force=True)
-    (out_dir / ".train_done").touch()
     eval_runner.close()
     safe_eval_runner.close()
 
