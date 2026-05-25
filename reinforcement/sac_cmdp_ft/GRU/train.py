@@ -60,6 +60,14 @@ def train_tariff(tariff: str):
     np.random.seed(hp.seed)
 
     actor = load_actor(model_cfg["actor"], device=device)
+    # Optional behavior cloning initialization for FT mode.
+    bc_init_path = cfg["train"].get("bc_init_checkpoint")
+    if bc_init_path:
+        bc_full = PROJECT_ROOT / bc_init_path
+        bc_state = torch.load(bc_full, map_location=device)
+        actor_state = bc_state["actor"] if isinstance(bc_state, dict) and "actor" in bc_state else bc_state
+        actor.load_state_dict(actor_state)
+        tqdm.write(f"[init] loaded BC actor from {bc_full}")
     ema_actor = EMA(actor, tau=cfg["train"].get("ema_tau", 0.99))
     reward_critic = load_critic(model_cfg["critic"], device=device)
     reward_target = load_critic(model_cfg["critic"], device=device)
@@ -97,7 +105,7 @@ def train_tariff(tariff: str):
     )
 
     episodes = EpisodeGen(cfg, str(PROJECT_ROOT / "data"), seed=hp.seed)
-    out_dir = PROJECT_ROOT / "paper" / "train" / "sac_cmdp" / ARCH_NAME / f"{tariff}{RUN_SUFFIX}"
+    out_dir = PROJECT_ROOT / "paper" / "train" / "sac_cmdp_ft" / ARCH_NAME / f"{tariff}{RUN_SUFFIX}"
     eval_runner = EvalRunner(
         actor_module="models.GRU.model", actor_cfg=model_cfg["actor"],
         parameters=env_params, tariff=tariff, history_len=hp.history_len,

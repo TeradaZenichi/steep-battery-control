@@ -1,7 +1,9 @@
 {
     "seed": 42,
     "solver": "gurobi",
-    "tariffs": ["tar_s"],
+    "tariffs": [
+        "tar_w"
+    ],
     "training": {
         "epochs": 300,
         "patience": 20,
@@ -14,13 +16,87 @@
         "loss_dims": 2
     },
     "runs": [
-        {"name": "cy_jan", "dataset": "data/Simulation_CY_Cur_HP__PV5000-HB5000.csv", "date": "2000-01-01 00:00:00", "days": 10, "soc": 0.5},
-        {"name": "cy_apr", "dataset": "data/Simulation_CY_Cur_HP__PV5000-HB5000.csv", "date": "2000-04-05 00:00:00", "days": 10, "soc": 0.5},
-        {"name": "cy_jul", "dataset": "data/Simulation_CY_Cur_HP__PV5000-HB5000.csv", "date": "2000-07-10 00:00:00", "days": 10, "soc": 0.5},
-        {"name": "cy_sep", "dataset": "data/Simulation_CY_Cur_HP__PV5000-HB5000.csv", "date": "2000-09-15 00:00:00", "days": 10, "soc": 0.5},
-        {"name": "wy_jan", "dataset": "data/Simulation_WY_Cur_HP__PV5000-HB5000.csv", "date": "2000-01-20 00:00:00", "days": 10, "soc": 0.5},
-        {"name": "wy_apr", "dataset": "data/Simulation_WY_Cur_HP__PV5000-HB5000.csv", "date": "2000-04-25 00:00:00", "days": 10, "soc": 0.5},
-        {"name": "wy_jul", "dataset": "data/Simulation_WY_Cur_HP__PV5000-HB5000.csv", "date": "2000-07-30 00:00:00", "days": 10, "soc": 0.5},
-        {"name": "wy_sep", "dataset": "data/Simulation_WY_Cur_HP__PV5000-HB5000.csv", "date": "2000-09-10 00:00:00", "days": 10, "soc": 0.5}
-    ]
+        {
+            "name": "cy_jan",
+            "dataset": "data/Simulation_CY_Cur_HP__PV5000-HB5000.csv",
+            "date": "2000-01-01 00:00:00",
+            "days": 10,
+            "soc": 0.5
+        },
+        {
+            "name": "cy_apr",
+            "dataset": "data/Simulation_CY_Cur_HP__PV5000-HB5000.csv",
+            "date": "2000-04-05 00:00:00",
+            "days": 10,
+            "soc": 0.5
+        },
+        {
+            "name": "cy_jul",
+            "dataset": "data/Simulation_CY_Cur_HP__PV5000-HB5000.csv",
+            "date": "2000-07-10 00:00:00",
+            "days": 10,
+            "soc": 0.5
+        },
+        {
+            "name": "cy_sep",
+            "dataset": "data/Simulation_CY_Cur_HP__PV5000-HB5000.csv",
+            "date": "2000-09-15 00:00:00",
+            "days": 10,
+            "soc": 0.5
+        },
+        {
+            "name": "wy_jan",
+            "dataset": "data/Simulation_WY_Cur_HP__PV5000-HB5000.csv",
+            "date": "2000-01-20 00:00:00",
+            "days": 10,
+            "soc": 0.5
+        },
+        {
+            "name": "wy_apr",
+            "dataset": "data/Simulation_WY_Cur_HP__PV5000-HB5000.csv",
+            "date": "2000-04-25 00:00:00",
+            "days": 10,
+            "soc": 0.5
+        },
+        {
+            "name": "wy_jul",
+            "dataset": "data/Simulation_WY_Cur_HP__PV5000-HB5000.csv",
+            "date": "2000-07-30 00:00:00",
+            "days": 10,
+            "soc": 0.5
+        },
+        {
+            "name": "wy_sep",
+            "dataset": "data/Simulation_WY_Cur_HP__PV5000-HB5000.csv",
+            "date": "2000-09-10 00:00:00",
+            "days": 10,
+            "soc": 0.5
+        }
+    ],
+    "hpo": {
+        "enabled": false,
+        "n_trials": 30,
+        "epochs": 80,
+        "patience": 10,
+        "search_space": {
+            "lr": [
+                1e-05,
+                0.01
+            ],
+            "batch_size": [
+                128,
+                256,
+                512
+            ],
+            "weight_decay": [
+                0.0,
+                0.001
+            ],
+            "history_len": [
+                48,
+                96,
+                144
+            ]
+        }
+    }
 }

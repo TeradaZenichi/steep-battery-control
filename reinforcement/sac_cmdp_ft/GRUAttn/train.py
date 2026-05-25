@@ -4,7 +4,7 @@ Clean baseline inspired by Lagrangian SAC with separate reward and cost
 critics. No elite replay, KL anchor, actor BC, canary, or phase transition.
 
 Run:
-    python reinforcement/sac_cmdp/GRU/train.py
+    python reinforcement/sac_cmdp/GRUAttn/train.py
 """
 import json
 import os
@@ -30,12 +30,16 @@ from reinforcement.sac_cmdp.utils import (
     alpha_step, lambda_step, EpisodeGen, Audit, AsyncEval, EvalRunner,
     collect_streams, cost_tensor, EMA,
 )
-from models.GRU.model import load_actor, load_critic
+import importlib
+MODEL_MODULE = f"models.{ARCH_NAME}.model"
+_model = importlib.import_module(MODEL_MODULE)
+load_actor = _model.load_actor
+load_critic = _model.load_critic
 from tools import EpisodeBar, UpdateBar, episode_bars, update_train_postfix
 
 RUN_SUFFIX = os.environ.get("RUN_SUFFIX", "")
 _DEFAULT_TARIFFS = ["tar_s", "tar_w", "tar_sw", "tar_flat", "tar_tou"]
-TARIFFS = [t.strip() for t in os.environ.get("RUN_TARIFFS", ",".join(_DEFAULT_TARIFFS)).split(",") if t.strip()]
+TARIFFS = os.environ.get("RUN_TARIFFS", ",".join(_DEFAULT_TARIFFS)).split(",")
 
 
 def _active_costs(cmdp_cfg):
@@ -60,6 +64,14 @@ def train_tariff(tariff: str):
     np.random.seed(hp.seed)
 
     actor = load_actor(model_cfg["actor"], device=device)
+    # Optional behavior cloning initialization for FT mode.
+    bc_init_path = cfg["train"].get("bc_init_checkpoint")
+    if bc_init_path:
+        bc_full = PROJECT_ROOT / bc_init_path
+        bc_state = torch.load(bc_full, map_location=device)
+        actor_state = bc_state["actor"] if isinstance(bc_state, dict) and "actor" in bc_state else bc_state
+        actor.load_state_dict(actor_state)
+        tqdm.write(f"[init] loaded BC actor from {bc_full}")
     ema_actor = EMA(actor, tau=cfg["train"].get("ema_tau", 0.99))
     reward_critic = load_critic(model_cfg["critic"], device=device)
     reward_target = load_critic(model_cfg["critic"], device=device)
@@ -97,9 +109,9 @@ def train_tariff(tariff: str):
     )
 
     episodes = EpisodeGen(cfg, str(PROJECT_ROOT / "data"), seed=hp.seed)
-    out_dir = PROJECT_ROOT / "paper" / "train" / "sac_cmdp" / ARCH_NAME / f"{tariff}{RUN_SUFFIX}"
+    out_dir = PROJECT_ROOT / "paper" / "train" / "sac_cmdp_ft" / ARCH_NAME / f"{tariff}{RUN_SUFFIX}"
     eval_runner = EvalRunner(
-        actor_module="models.GRU.model", actor_cfg=model_cfg["actor"],
+        actor_module=MODEL_MODULE, actor_cfg=model_cfg["actor"],
         parameters=env_params, tariff=tariff, history_len=hp.history_len,
         project_root=str(PROJECT_ROOT), n_workers=cfg["train"].get("eval_workers", 4),
     )
@@ -263,8 +275,7 @@ def train_tariff(tariff: str):
             while len(async_eval.pending) >= async_eval.max_pending:
                 finish_evals(async_eval.collect(wait=True, max_items=1))
             state = snapshot()
-            # Ablation: evaluate the live actor. EMA is still tracked/saved in
-            # checkpoints, but eval no longer mixes gamma effects with EMA lag.
+            # Eval uses live actor (EMA still saved in checkpoint for inference).
             async_eval.submit(ep, state["actor"], state, {"train_reward": train_reward, "agg": audit.aggregate()})
             eval_submitted = True
             tqdm.write(f"[submit] {tariff} ep {ep:4d} (pending={len(async_eval.pending)})")
@@ -285,8 +296,8 @@ def train_tariff(tariff: str):
 
     finish_evals(async_eval.drain())
     audit.flush(force=True)
-    eval_runner.close()
     (out_dir / ".train_done").touch()
+    eval_runner.close()
 
 
 def main():

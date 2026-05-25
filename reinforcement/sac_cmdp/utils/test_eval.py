@@ -253,6 +253,7 @@ def _aggregate(rows):
 def run_test(algo_root: Path):
     algo_root = Path(algo_root)
     arch_name = algo_root.name
+    method_name = algo_root.parent.name
     model_root = PROJECT_ROOT / "models" / arch_name
     cfg = _read_json(algo_root / "config.json")
     model_cfg = _read_json(model_root / "model.json")
@@ -274,8 +275,8 @@ def run_test(algo_root: Path):
     workers = int(os.environ.get("TEST_WORKERS", io.get("test_workers", 4)))
 
     for tariff in tariffs:
-        train_dir = PROJECT_ROOT / "paper" / "train" / "sac_cmdp" / arch_name / f"{tariff}{suffix}"
-        out_dir = PROJECT_ROOT / "paper" / "test" / "sac_cmdp" / arch_name / f"{tariff}{suffix}"
+        train_dir = PROJECT_ROOT / "paper" / "train" / method_name / arch_name / f"{tariff}{suffix}"
+        out_dir = PROJECT_ROOT / "paper" / "test" / method_name / arch_name / f"{tariff}{suffix}"
         op_dir = out_dir / "operations"
         out_dir.mkdir(parents=True, exist_ok=True)
         op_dir.mkdir(parents=True, exist_ok=True)

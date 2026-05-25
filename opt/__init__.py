@@ -163,6 +163,35 @@ class Teacher:
         def _is_connected(v):
             return int(v) in (1, 2)
 
+        # Departure must carry enough energy for the next trip plus the target
+        # arrival reserve used by SmartHomeEnv's fast-charging accounting.
+        # This keeps the MILP teacher idealized, but aligns its EV feasibility
+        # target with the closed-loop simulator.
+        ev_departure_soc_req = {}
+        times = list(self.Ωt)
+        for i, t in enumerate(times):
+            if int(self.ev.df["ev_conn"].loc[t]) != 2:
+                continue
+
+            base_req = float(self.ev.df["ev_departure"].loc[t])
+            next_trip = None
+            for j in range(i + 1, len(times)):
+                tj = times[j]
+                tprev = times[j - 1]
+                conn_j = int(self.ev.df["ev_conn"].loc[tj])
+                conn_prev = int(self.ev.df["ev_conn"].loc[tprev])
+                if _is_connected(conn_j) and (not _is_connected(conn_prev)):
+                    next_trip = float(self.ev.df["ev_arrival"].loc[tj])
+                    break
+
+            if next_trip is None:
+                ev_departure_soc_req[t] = base_req
+            else:
+                ev_departure_soc_req[t] = max(
+                    base_req,
+                    min(1.0, next_trip + float(self.ev.soc_min)),
+                )
+
         # Objective
         def objective_rule(model):
             energy_cost = sum(
@@ -308,7 +337,7 @@ class Teacher:
         def ev_departure_rule(model, t):
             conn_t = int(self.ev.df["ev_conn"].loc[t])
             if conn_t == 2:
-                return model.EEV[t] >= self.ev.Emax * float(self.ev.df["ev_departure"].loc[t])
+                return model.EEV[t] >= self.ev.Emax * float(ev_departure_soc_req.get(t, self.ev.df["ev_departure"].loc[t]))
             return pyo.Constraint.Skip
 
         m.ev_departure = pyo.Constraint(m.Ωt, rule=ev_departure_rule)
