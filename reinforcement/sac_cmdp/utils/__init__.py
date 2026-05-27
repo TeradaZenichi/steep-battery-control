@@ -21,6 +21,7 @@ from .eval import AsyncEval, EvalRunner, summarize
 from .rollout import collect_episode, collect_streams
 from .ema import EMA
 from .test_eval import run_test
+from .demos import save_episode, load_prior_buffer, merge_batches
 
 __all__ = [
     "SafetyLayer",
@@ -33,4 +34,5 @@ __all__ = [
     "collect_episode", "collect_streams",
     "EMA",
     "run_test",
+    "save_episode", "load_prior_buffer", "merge_batches",
 ]
