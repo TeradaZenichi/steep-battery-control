@@ -58,7 +58,7 @@
         },
         "shaping_omega": 0.0,
         "shaping_typical_drop": 0.137,
-        "bc_init_checkpoint": "paper/train/supervised/TCN/tar_sw/best.pth"
+        "bc_init_checkpoint": "paper/train/supervised/TCN/tar_flat/best.pth"
     },
     "val": [
         {

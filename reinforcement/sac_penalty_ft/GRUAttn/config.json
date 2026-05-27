@@ -21,9 +21,9 @@
         "actor_lr": 5e-05,
         "critic_lr": 0.0001,
         "alpha_lr": 0.0001,
-        "lambda_lr": 0.0,
-        "init_lambda": 0.0,
-        "violation_budget": 0.02,
+        "lambda_lr": 0.0003,
+        "init_lambda": 0.1,
+        "violation_budget": 0.005,
         "reward_scale": 0.1,
         "actor_update_every": 32,
         "actor_update_start_episode": 20,
@@ -35,11 +35,11 @@
             "redq_m": 2,
             "ema_tau": 0.99,
             "pid_K_P": 0.0,
-            "pid_K_I": 0.0,
+            "pid_K_I": 0.05,
             "pid_K_D": 0.0,
-            "lambda_max": 0.0,
+            "lambda_max": 2.0,
             "kl_beta": 0.03,
-            "kl_decay": 0.998,
+            "kl_decay": 0.95,
             "safe_rollout": false,
             "project_actor_q": false,
             "project_target_q": false,
@@ -62,7 +62,13 @@
         },
         "shaping_omega": 0.0,
         "shaping_typical_drop": 0.137,
-        "bc_init_checkpoint": null
+        "bc_init_checkpoint": {
+            "tar_s":    "paper/train/supervised/GRUAttn/tar_s/best.pth",
+            "tar_w":    "paper/train/supervised/GRUAttn/tar_w/best.pth",
+            "tar_sw":   "paper/train/supervised/GRUAttn/tar_sw/best.pth",
+            "tar_flat": "paper/train/supervised/GRUAttn/tar_flat/best.pth",
+            "tar_tou":  "paper/train/supervised/GRUAttn/tar_tou/best.pth"
+        }
     },
     "val": [
         {

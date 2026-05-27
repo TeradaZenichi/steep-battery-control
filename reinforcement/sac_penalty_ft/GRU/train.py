@@ -86,7 +86,12 @@ def train_tariff(tariff: str):
     # ---- Modules ----
     actor = load_actor(model_cfg["actor"], device=device)
     # Optional behavior cloning initialization for FT mode.
-    bc_init_path = cfg["train"].get("bc_init_checkpoint")
+    # Accepts either a single path (legacy) or a per-tariff dict.
+    bc_init_cfg = cfg["train"].get("bc_init_checkpoint")
+    if isinstance(bc_init_cfg, dict):
+        bc_init_path = bc_init_cfg.get(tariff)
+    else:
+        bc_init_path = bc_init_cfg
     if bc_init_path:
         bc_full = PROJECT_ROOT / bc_init_path
         bc_state = torch.load(bc_full, map_location=device)
@@ -170,7 +175,7 @@ def train_tariff(tariff: str):
     target_entropy = [hp.target_entropy]
 
     state = {
-        "phase": 2 if cfg["train"].get("bc_init_checkpoint") else 1,
+        "phase": 2 if bc_init_path else 1,
         "best_qualifying_reward": -1e9,
         "best_qualifying_state": None,
         "best_qualifying_ep": -1,
@@ -192,7 +197,7 @@ def train_tariff(tariff: str):
     step_count = [0]
 
     # In FT mode, the BC actor itself serves as the initial KL anchor.
-    if cfg["train"].get("bc_init_checkpoint"):
+    if bc_init_path:
         anchor.snapshot(actor)
         anchor.beta = phase2_kl_beta
         ema_actor.model.load_state_dict(actor.state_dict())
