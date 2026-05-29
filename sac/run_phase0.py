@@ -50,9 +50,9 @@ def _run_dir(method: str, seed: int) -> Path:
     return PROJECT_ROOT / "paper" / "train" / method / ARCH / f"{TARIFF}{_suffix(seed)}"
 
 
-def train(seeds):
+def train(seeds, methods):
     t0 = time.time()
-    plan = [(m, s) for m in METHODS for s in seeds]
+    plan = [(m, s) for m in methods for s in seeds]
     todo = [(m, s) for m, s in plan if not (_run_dir(m, s) / ".train_done").exists()]
     print(f"[phase0] {len(plan)} (method,seed) cells; {len(plan)-len(todo)} already done; {len(todo)} to run "
           f"(~{len(todo)*2.75:.0f}h serial)\n", flush=True)
@@ -65,11 +65,12 @@ def train(seeds):
         print(f"<<< {method} seed{seed}: rc={rc}  (elapsed {time.time()-t0:.0f}s)\n", flush=True)
 
 
-def analyze(seeds):
+def analyze(seeds, methods):
     import pandas as pd, numpy as np
     print("\n=== Phase 0 drift characterization (tar_sw/GRU, ent=-2) ===")
     print(f"{'method':<16}{'seeds':>10}{'drift each':>26}{'mean':>8}{'std':>7}{'end mean':>10}")
-    for method, label in METHODS.items():
+    for method in methods:
+        label = METHODS[method]
         drifts, ends = [], []
         for s in seeds:
             f = _run_dir(method, s) / "audit_training.csv"
@@ -89,14 +90,19 @@ def analyze(seeds):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--seeds", default="42,7,13")
+    ap.add_argument("--methods", default=",".join(METHODS), help="subset of: " + ",".join(METHODS))
     ap.add_argument("--analyze-only", action="store_true")
     args = ap.parse_args()
     seeds = [int(s) for s in args.seeds.split(",") if s.strip()]
+    methods = [m.strip() for m in args.methods.split(",") if m.strip()]
+    bad = [m for m in methods if m not in METHODS]
+    if bad:
+        raise SystemExit(f"unknown methods {bad}; choose from {list(METHODS)}")
     if args.analyze_only:
-        analyze(seeds); return
+        analyze(seeds, methods); return
     _ensure_configs()
-    train(seeds)
-    analyze(seeds)
+    train(seeds, methods)
+    analyze(seeds, methods)
 
 
 if __name__ == "__main__":
