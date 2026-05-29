@@ -83,8 +83,9 @@ def train_tariff(algo_root: Path, arch_name: str, exp_name: str, tariff: str, ru
     rlpd_on = bool(rlpd_cfg.get("enabled", False))
     costs_cfg = _active_costs(tcfg)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    torch.manual_seed(hp.seed)
-    np.random.seed(hp.seed)
+    seed = int(os.environ.get("RUN_SEED", hp.seed))
+    torch.manual_seed(seed)
+    np.random.seed(seed)
 
     actor = load_actor(model_cfg["actor"], device=device)
     bc_path = _resolve_bc_init(tcfg.get("bc_init"), arch_name, tariff)
@@ -146,7 +147,7 @@ def train_tariff(algo_root: Path, arch_name: str, exp_name: str, tariff: str, ru
         bs_online = hp.batch_size - bs_prior
         tqdm.write(f"[rlpd] {tariff}: prior={prior_buffer.size} split online {bs_online}/prior {bs_prior}")
 
-    episodes = EpisodeGen(cfg, str(PROJECT_ROOT / "data"), seed=hp.seed)
+    episodes = EpisodeGen(cfg, str(PROJECT_ROOT / "data"), seed=seed)
     out_dir = PROJECT_ROOT / "paper" / "train" / exp_name / arch_name / f"{tariff}{run_suffix}"
     eval_runner = EvalRunner(actor_module=f"models.{arch_name}.model", actor_cfg=model_cfg["actor"],
                              parameters=env_params, tariff=tariff, history_len=hp.history_len,

@@ -40,6 +40,7 @@ VARIANTS = {
     "hp_ctrl": {},
     "hp_ent2": {"target_entropy": -2.0},
     "hp_ent2_g99_rs03": {"target_entropy": -2.0, "gamma": 0.99, "reward_scale": 0.3},
+    "hp_shaped": {"target_entropy": -2.0, "shaping_bess_omega": 0.2},  # = hp_ent2 + PBRS Φ_bess
 }
 
 
