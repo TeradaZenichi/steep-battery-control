@@ -14,7 +14,7 @@
         "buffer_size": 200000,
         "batch_size": 512,
         "history_len": 96,
-        "n_step": 36,
+        "n_step": 3,
         "update_every_steps": 16,
         "gamma": 0.999,
         "tau": 0.002,
@@ -64,7 +64,7 @@
                 "RB",
                 "RBS"
             ],
-            "prior_ratio": 0.5,
+            "prior_ratio": 0.25,
             "prior_capacity": null
         }
     },

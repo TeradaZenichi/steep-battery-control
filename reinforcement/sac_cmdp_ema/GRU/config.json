@@ -14,7 +14,7 @@
         "buffer_size": 200000,
         "batch_size": 512,
         "history_len": 96,
-        "n_step": 3,
+        "n_step": 36,
         "update_every_steps": 16,
         "gamma": 0.999,
         "tau": 0.002,
@@ -58,15 +58,8 @@
         },
         "shaping_omega": 0.0,
         "shaping_typical_drop": 0.137,
-        "rlpd": {
-            "demos_root": "paper/demos",
-            "sources": [
-                "RB",
-                "RBS"
-            ],
-            "prior_ratio": 0.25,
-            "prior_capacity": null
-        }
+        "backup_via_ema": true,
+        "ema_backup_tau": 0.995
     },
     "val": [
         {

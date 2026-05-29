@@ -2,8 +2,10 @@
     "train": {
         "seed": 42,
         "days": 7,
-        "train_episodes": 60,
+        "train_episodes": 80,
         "warmup_episodes": 5,
+        "min_episodes_before_early_stop": 30,
+        "early_stop_patience": 15,
         "evaluate_every": 1,
         "eval_workers": 6,
         "max_pending_evals": 2,
@@ -14,20 +16,33 @@
         "buffer_size": 200000,
         "batch_size": 512,
         "history_len": 96,
-        "n_step": 3,
-        "update_every_steps": 16,
+        "n_step": 36,
+        "update_every_steps": 4,
+        "actor_update_every": 8,
+        "actor_update_start_episode": 10,
         "gamma": 0.999,
-        "tau": 0.002,
+        "tau": 0.005,
         "actor_lr": 0.0001,
-        "critic_lr": 5e-05,
+        "critic_lr": 0.0001,
         "alpha_lr": 0.0003,
         "reward_scale": 0.1,
-        "actor_update_every": 32,
-        "actor_update_start_episode": 10,
         "grad_clip": true,
-        "early_stop_patience": 15,
-        "min_episodes_before_early_stop": 30,
         "ema_tau": 0.99,
+        "shaping_omega": 0.0,
+        "shaping_typical_drop": 0.137,
+        "shaping_bess_omega": 0.0,
+        "safety": "penalty",
+        "ema_backup": false,
+        "bc_init": null,
+        "rlpd": {
+            "enabled": false,
+            "prior_ratio": 0.5,
+            "sources": [
+                "RB",
+                "RBS"
+            ],
+            "demos_root": "paper/demos"
+        },
         "cmdp": {
             "safe_rollout": false,
             "costs": {
@@ -55,17 +70,6 @@
                     "lambda_max": 0.5
                 }
             }
-        },
-        "shaping_omega": 0.0,
-        "shaping_typical_drop": 0.137,
-        "rlpd": {
-            "demos_root": "paper/demos",
-            "sources": [
-                "RB",
-                "RBS"
-            ],
-            "prior_ratio": 0.25,
-            "prior_capacity": null
         }
     },
     "val": [
@@ -239,5 +243,23 @@
         }
     ],
     "test": [],
-    "plot": []
+    "plot": [],
+    "test_io": {
+        "checkpoints": [
+            "best",
+            "best_robust",
+            "best_worst",
+            "last"
+        ],
+        "tariffs": [
+            "tar_s",
+            "tar_w",
+            "tar_sw",
+            "tar_flat",
+            "tar_tou"
+        ],
+        "save_plot_operation": true,
+        "plot_operation_days": 7,
+        "test_workers": 4
+    }
 }

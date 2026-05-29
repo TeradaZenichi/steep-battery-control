@@ -8,12 +8,14 @@ Experiment tuple: (label, method, tariffs, seed, shaping_omega, suffix)
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -57,7 +59,7 @@ def _all_test_done(method: str, arch: str, tariffs: list[str], suffix: str) -> b
 
 
 def run_experiments(arch: str, experiments: list[tuple]) -> None:
-    valid = {"GRU", "GRUAttn", "MHA", "TCN"}
+    valid = {"GRU", "MHA", "TCN"}
     if arch not in valid:
         raise ValueError(f"unknown arch={arch}; expected one of {valid}")
 
@@ -299,6 +301,52 @@ def _expand_ft_experiments(experiments: list[tuple]) -> list[tuple]:
     return out
 
 
+def _sha256(path: Path) -> str | None:
+    if not path.exists():
+        return None
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _read_json_safe(path: Path):
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def _write_ft_provenance(method: str, arch: str, tariff: str, suffix: str,
+                         bc_ckpt: Path, seed: int, omega: float, bc_L: int) -> None:
+    """Persist the full teacher->BC->FT chain next to the FT checkpoints so the
+    run is auditable: which BC initialized it, its hash, the BC dataset/HPO
+    metadata, and a hash of the MILP teacher code that generated the BC data."""
+    out_dir = PROJECT_ROOT / "paper" / "train" / method / arch / f"{tariff}{suffix}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    sup_dir = _supervised_train_dir(arch, tariff)
+    prov = {
+        "method": method,
+        "arch": arch,
+        "tariff": tariff,
+        "suffix": suffix,
+        "seed": seed,
+        "shaping_omega": omega,
+        "history_len": bc_L,
+        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+        "bc_init_checkpoint": bc_ckpt.relative_to(PROJECT_ROOT).as_posix(),
+        "bc_init_sha256": _sha256(bc_ckpt),
+        "bc_dataset_meta": _read_json_safe(sup_dir / "dataset_meta.json"),
+        "bc_best_params": _read_json_safe(sup_dir / "best_params.json"),
+        "teacher_code_sha256": _sha256(PROJECT_ROOT / "opt" / "__init__.py"),
+        "env_params_sha256": _sha256(PROJECT_ROOT / "data" / "parameters.json"),
+    }
+    (out_dir / "provenance.json").write_text(
+        json.dumps(prov, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    print(f"  wrote provenance.json (bc={prov['bc_init_checkpoint']} sha={str(prov['bc_init_sha256'])[:12]})")
+
+
 def run_experiments_ft(arch: str, experiments: list[tuple]) -> None:
     """Chained supervised + FT runner.
 
@@ -307,7 +355,7 @@ def run_experiments_ft(arch: str, experiments: list[tuple]) -> None:
     supervised artifact and then triggers train+test. Assumes
     run_supervised(arch, ...) has been called for all tariffs in advance.
     """
-    valid = {"GRU", "GRUAttn", "MHA", "TCN"}
+    valid = {"GRU", "MHA", "TCN"}
     if arch not in valid:
         raise ValueError(f"unknown arch={arch}; expected one of {valid}")
 
@@ -364,6 +412,8 @@ def run_experiments_ft(arch: str, experiments: list[tuple]) -> None:
                 continue
         else:
             print("  train artifacts present, skipping training")
+
+        _write_ft_provenance(method, arch, tariff, suffix, bc_ckpt, seed, omega, bc_L)
 
         if not test_done:
             rc = run_with_env(

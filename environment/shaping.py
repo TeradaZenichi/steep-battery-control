@@ -1,6 +1,10 @@
-"""Potential-based reward shaping (Ng-Harada-Russell) for EV fast-charging cost.
+"""Potential-based reward shaping (Ng-Harada-Russell).
 
-Adds γ·Φ(s') − Φ(s) to the reward; preserves the optimal policy.
+Adds γ·Φ(s') − Φ(s) to the reward; preserves the optimal policy (policy
+invariance theorem). Two independent, opt-in potentials:
+  - Φ_ev   (weight `omega`)      : anticipatory EV fast-charge risk.
+  - Φ_bess (weight `bess_omega`) : value of stored BESS energy given the
+    current price context — guides PV-surplus arbitrage. Off by default.
 """
 from __future__ import annotations
 
@@ -8,6 +12,7 @@ from __future__ import annotations
 OBS_BESS_SOC     = 12
 OBS_EV_SOC       = 13
 OBS_EV_CTRL      = 14
+OBS_TAR_PCT      = 23
 OBS_T_UNTIL_DEP  = 26
 OBS_T_UNTIL_ARR  = 27
 
@@ -20,10 +25,12 @@ class AnticipatoryShapingWrapper:
     """
 
     def __init__(self, env, params, gamma: float, omega: float,
-                 typical_drop: float = 0.137):
+                 typical_drop: float = 0.137, bess_omega: float = 0.0):
         self.env = env
         self.gamma = float(gamma)
         self.omega = float(omega)
+        self.bess_omega = float(bess_omega)
+        self._active = (self.omega != 0.0) or (self.bess_omega != 0.0)
 
         # Pre-compute constants from params for fast Φ evaluation.
         ev          = params["EV"]
@@ -46,12 +53,12 @@ class AnticipatoryShapingWrapper:
 
     def reset(self, **kwargs):
         obs, info = self.env.reset(**kwargs)
-        self._phi_prev = 0.0 if self.omega == 0.0 else self._phi(obs)
+        self._phi_prev = 0.0 if not self._active else self._phi(obs)
         return obs, info
 
     def step(self, action):
         obs, raw_r, done, truncated, info = self.env.step(action)
-        if self.omega == 0.0:
+        if not self._active:
             return obs, raw_r, done, truncated, info
         terminal = bool(done or truncated)
         phi_new = 0.0 if terminal else self._phi(obs)
@@ -65,7 +72,28 @@ class AnticipatoryShapingWrapper:
         return getattr(self.env, name)
 
     def _phi(self, obs) -> float:
+        return self._phi_ev(obs) + self._phi_bess(obs)
+
+    def _phi_bess(self, obs) -> float:
+        """Value of currently stored BESS energy, weighted by price context.
+
+        Higher when SoC is high and the current price is low (cheap energy worth
+        holding for a later, more expensive period). γ·Φ(s')−Φ(s) then rewards
+        charging while cheap and is near-neutral when discharging while expensive.
+        Any Φ preserves the optimal policy (Ng-Harada-Russell), so this proxy is
+        safe regardless of calibration.
+        """
+        if self.bess_omega == 0.0:
+            return 0.0
+        bess_soc = float(obs[OBS_BESS_SOC])
+        tar_pct  = float(obs[OBS_TAR_PCT])               # 0=cheapest, 1=priciest (last 24h)
+        usable_kwh = max(0.0, bess_soc - self._bess_floor) * self._emax_bess
+        return self.bess_omega * usable_kwh * (1.0 - tar_pct)
+
+    def _phi_ev(self, obs) -> float:
         """Anticipatory potential — more negative means more upcoming FC risk."""
+        if self.omega == 0.0:
+            return 0.0
         last_soc      = float(obs[OBS_EV_SOC])
         ev_ctrl       = float(obs[OBS_EV_CTRL]) > 0.5
         bess_soc      = float(obs[OBS_BESS_SOC])
