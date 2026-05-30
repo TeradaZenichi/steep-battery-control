@@ -130,33 +130,43 @@ class Actor(nn.Module):
 
 
 class Critic(nn.Module):
-    def __init__(self, state_dim, action_dim, hidden_dim, num_layers, head_dim, use_layer_norm=False):
+    def __init__(self, state_dim, action_dim, hidden_dim, num_layers, head_dim,
+                 use_layer_norm=False, dropout_rate=0.0, n_critics=2):
         super().__init__()
+        p = float(dropout_rate)
 
         def build():
             gru = nn.GRU(state_dim, hidden_dim, num_layers, batch_first=True)
             ln = nn.LayerNorm(hidden_dim) if use_layer_norm else None
-            mlp = nn.Sequential(
-                nn.Linear(hidden_dim + action_dim, hidden_dim), nn.ReLU(),
-                nn.Linear(hidden_dim, head_dim), nn.ReLU(),
-                nn.Linear(head_dim, 1),
-            )
-            return gru, ln, mlp
+            layers = [nn.Linear(hidden_dim + action_dim, hidden_dim), nn.ReLU()]
+            if p > 0: layers.append(nn.Dropout(p))
+            layers += [nn.Linear(hidden_dim, head_dim), nn.ReLU()]
+            if p > 0: layers.append(nn.Dropout(p))
+            layers += [nn.Linear(head_dim, 1)]
+            return gru, ln, nn.Sequential(*layers)
 
-        self.gru1, self.ln1, self.mlp1 = build()
-        self.gru2, self.ln2, self.mlp2 = build()
+        self.n_critics = int(n_critics)
+        self.grus = nn.ModuleList(); self.lns = nn.ModuleList(); self.mlps = nn.ModuleList()
+        for _ in range(self.n_critics):
+            gru, ln, mlp = build()
+            self.grus.append(gru)
+            self.lns.append(ln if ln is not None else nn.Identity())
+            self.mlps.append(mlp)
+        # Backward-compatible aliases for num_heads==2 (so old code with .gru1/.gru2 still works).
+        if self.n_critics == 2:
+            self.gru1, self.ln1, self.mlp1 = self.grus[0], self.lns[0], self.mlps[0]
+            self.gru2, self.ln2, self.mlp2 = self.grus[1], self.lns[1], self.mlps[1]
 
     def _q(self, gru, ln, mlp, obs, act):
         x = obs.unsqueeze(1) if obs.dim() == 2 else obs
         out, _ = gru(x)
         h = out[:, -1, :]
-        if ln is not None:
+        if ln is not None and not isinstance(ln, nn.Identity):
             h = ln(h)
         return mlp(torch.cat([h, act], dim=-1))
 
     def forward(self, obs, act):
-        return (self._q(self.gru1, self.ln1, self.mlp1, obs, act),
-                self._q(self.gru2, self.ln2, self.mlp2, obs, act))
+        return tuple(self._q(self.grus[i], self.lns[i], self.mlps[i], obs, act) for i in range(self.n_critics))
 
 
 def load_actor(cfg, device=None):
@@ -182,5 +192,7 @@ def load_critic(cfg, device=None):
         num_layers=int(cfg.get("num_layers", 1)),
         head_dim=int(cfg.get("head_dim", 64)),
         use_layer_norm=bool(cfg.get("use_layer_norm", False)),
+        dropout_rate=float(cfg.get("dropout_rate", 0.0)),
+        n_critics=int(cfg.get("n_critics", 2)),
     )
     return c if device is None else c.to(device)

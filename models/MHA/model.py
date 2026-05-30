@@ -37,7 +37,7 @@ class Actor(BaseActor):
 
 class Critic(nn.Module):
     def __init__(self, state_dim, action_dim, hidden_dim, num_layers, head_dim,
-                 num_heads=4, dropout=0.05, use_layer_norm=False):
+                 num_heads=4, dropout=0.05, use_layer_norm=False, n_critics=2):
         super().__init__()
 
         def build():
@@ -50,7 +50,7 @@ class Critic(nn.Module):
                 nn.Dropout(float(dropout)),
                 nn.Linear(hidden_dim, hidden_dim),
             )
-            ln = nn.LayerNorm(hidden_dim) if use_layer_norm else None
+            ln = nn.LayerNorm(hidden_dim) if use_layer_norm else nn.Identity()
             mlp = nn.Sequential(
                 nn.Linear(hidden_dim + action_dim, hidden_dim), nn.ReLU(),
                 nn.Linear(hidden_dim, head_dim), nn.ReLU(),
@@ -58,8 +58,16 @@ class Critic(nn.Module):
             )
             return proj, attn, ff, ln, mlp
 
-        self.proj1, self.attn1, self.ff1, self.ln1, self.mlp1 = build()
-        self.proj2, self.attn2, self.ff2, self.ln2, self.mlp2 = build()
+        self.n_critics = int(n_critics)
+        self.projs = nn.ModuleList(); self.attns = nn.ModuleList()
+        self.ffs = nn.ModuleList(); self.lns = nn.ModuleList(); self.mlps = nn.ModuleList()
+        for _ in range(self.n_critics):
+            proj, attn, ff, ln, mlp = build()
+            self.projs.append(proj); self.attns.append(attn); self.ffs.append(ff)
+            self.lns.append(ln); self.mlps.append(mlp)
+        if self.n_critics == 2:
+            self.proj1, self.attn1, self.ff1, self.ln1, self.mlp1 = self.projs[0], self.attns[0], self.ffs[0], self.lns[0], self.mlps[0]
+            self.proj2, self.attn2, self.ff2, self.ln2, self.mlp2 = self.projs[1], self.attns[1], self.ffs[1], self.lns[1], self.mlps[1]
 
     def _q(self, proj, attn, ff, ln, mlp, obs, act):
         x = obs.unsqueeze(1) if obs.dim() == 2 else obs
@@ -67,15 +75,13 @@ class Critic(nn.Module):
         h, _ = attn(z, z, z, need_weights=False)
         h = h + ff(h)
         h = h[:, -1, :]
-        if ln is not None:
+        if ln is not None and not isinstance(ln, nn.Identity):
             h = ln(h)
         return mlp(torch.cat([h, act], dim=-1))
 
     def forward(self, obs, act):
-        return (
-            self._q(self.proj1, self.attn1, self.ff1, self.ln1, self.mlp1, obs, act),
-            self._q(self.proj2, self.attn2, self.ff2, self.ln2, self.mlp2, obs, act),
-        )
+        return tuple(self._q(self.projs[i], self.attns[i], self.ffs[i], self.lns[i], self.mlps[i], obs, act)
+                     for i in range(self.n_critics))
 
 
 def load_actor(cfg, device=None):
@@ -105,5 +111,6 @@ def load_critic(cfg, device=None):
         num_heads=int(cfg.get("num_heads", 4)),
         dropout=float(cfg.get("dropout", 0.05)),
         use_layer_norm=bool(cfg.get("use_layer_norm", False)),
+        n_critics=int(cfg.get("n_critics", 2)),
     )
     return c if device is None else c.to(device)

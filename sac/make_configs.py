@@ -16,7 +16,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent          # .../sac
 PROJECT_ROOT = ROOT.parent
-ARCHS = ["GRU"]                                  # add "MHA", "TCN" to scale out
+ARCHS = ["GRU", "MHA", "TCN"]                    # full grid (3 encoders)
 
 
 def _val_list():
@@ -43,6 +43,10 @@ BASE_TRAIN = {
     "n_step": 36, "update_every_steps": 4, "actor_update_every": 8, "actor_update_start_episode": 10,
     "gamma": 0.999, "tau": 0.005, "actor_lr": 1e-4, "critic_lr": 1e-4, "alpha_lr": 3e-4,
     "reward_scale": 0.1, "grad_clip": True, "ema_tau": 0.99,
+    "precision": "bf16",  # "fp32" | "bf16" | "fp16" (Ampere recommends bf16 - no GradScaler needed)
+    "droq_dropout": 0.0,  # 0 = vanilla twin Q; >0 = DroQ-style dropout in critic MLP (e.g., 0.01)
+    "n_critics": 2,       # 2 = twin Q (default); 4 = REDQ-light (4 critics, take subset min for target)
+    "m_target": None,     # None = use all critics; integer = REDQ subset min size (e.g., 2 of 4)
     "shaping_omega": 0.0, "shaping_typical_drop": 0.137, "shaping_bess_omega": 0.0,
     # switches
     "safety": "cmdp", "ema_backup": False, "bc_init": None,
@@ -76,6 +80,8 @@ EXPERIMENTS = {
     "u_cmdp_rlpd": {"n_step": 3, "rlpd": {"enabled": True, "prior_ratio": 0.25}},
     "u_cmdp_ema": {"ema_backup": True},
     "u_cmdp_shaped": {"shaping_bess_omega": 0.2},
+    "u_cmdp_droq": {"droq_dropout": 0.01},   # DroQ-style anti-drift: dropout in critic MLP
+    "u_cmdp_redq": {"n_critics": 4, "m_target": 2},   # REDQ-light: 4 critics, target = min of random 2
     "u_cmdp_ft": {"bc_init": BC_INIT, **FT_PROFILE},
     "u_penalty_ft": {"safety": "penalty", "bc_init": BC_INIT, **FT_PROFILE},
 }
@@ -84,7 +90,10 @@ TRAIN_PY = '''"""Auto-generated thin entrypoint — unified SAC trainer."""
 import sys
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
+# Walk up until we find the project root (depth-agnostic: works for sac/<exp>/<arch>/ and sac/ablation/<exp>/<arch>/).
+PROJECT_ROOT = Path(__file__).resolve().parent
+while not (PROJECT_ROOT / "sac" / "common" / "trainer.py").exists():
+    PROJECT_ROOT = PROJECT_ROOT.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from sac.common.trainer import run_train
@@ -97,7 +106,9 @@ TEST_PY = '''"""Auto-generated thin entrypoint — reuses the shared annual test
 import sys
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
+PROJECT_ROOT = Path(__file__).resolve().parent
+while not (PROJECT_ROOT / "sac" / "common" / "trainer.py").exists():
+    PROJECT_ROOT = PROJECT_ROOT.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from reinforcement.sac_cmdp.utils.test_eval import run_test

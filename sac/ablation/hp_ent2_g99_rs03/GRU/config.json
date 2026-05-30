@@ -1,0 +1,141 @@
+{
+    "train": {
+        "seed": 42,
+        "days": 7,
+        "train_episodes": 50,
+        "warmup_episodes": 5,
+        "min_episodes_before_early_stop": 50,
+        "early_stop_patience": 50,
+        "evaluate_every": 1,
+        "eval_workers": 6,
+        "max_pending_evals": 2,
+        "target_entropy": -2.0,
+        "init_alpha": 0.3,
+        "log_std_min": -10.0,
+        "log_std_max": 2.0,
+        "buffer_size": 200000,
+        "batch_size": 512,
+        "history_len": 96,
+        "n_step": 36,
+        "update_every_steps": 4,
+        "actor_update_every": 8,
+        "actor_update_start_episode": 10,
+        "gamma": 0.99,
+        "tau": 0.005,
+        "actor_lr": 0.0001,
+        "critic_lr": 0.0001,
+        "alpha_lr": 0.0003,
+        "reward_scale": 0.3,
+        "grad_clip": true,
+        "ema_tau": 0.99,
+        "precision": "bf16",
+        "droq_dropout": 0.0,
+        "shaping_omega": 0.0,
+        "shaping_typical_drop": 0.137,
+        "shaping_bess_omega": 0.0,
+        "safety": "cmdp",
+        "ema_backup": false,
+        "bc_init": null,
+        "rlpd": {
+            "enabled": false,
+            "prior_ratio": 0.5,
+            "sources": [
+                "RB",
+                "RBS"
+            ],
+            "demos_root": "paper/demos"
+        },
+        "cmdp": {
+            "safe_rollout": false,
+            "costs": {
+                "ev": {
+                    "enabled": true,
+                    "target_soc": 0.5,
+                    "t_remain_floor": 0.05,
+                    "budget": 0.01,
+                    "lambda_init": 0.1,
+                    "lambda_lr": 0.0003,
+                    "lambda_max": 10.0
+                },
+                "grid": {
+                    "enabled": false,
+                    "budget": 0.0,
+                    "lambda_init": 0.1,
+                    "lambda_lr": 0.0003,
+                    "lambda_max": 10.0
+                },
+                "pv": {
+                    "enabled": false,
+                    "budget": 0.01,
+                    "lambda_init": 0.05,
+                    "lambda_lr": 0.0001,
+                    "lambda_max": 0.5
+                }
+            }
+        }
+    },
+    "val": [
+        {
+            "name": "val_cy_01",
+            "dataset": "data/Simulation_CY_Cur_HP__PV5000-HB5000.csv",
+            "date": "2000-01-01 00:00:00",
+            "days": 7,
+            "soc": 0.2
+        },
+        {
+            "name": "val_cy_04",
+            "dataset": "data/Simulation_CY_Cur_HP__PV5000-HB5000.csv",
+            "date": "2000-04-01 00:00:00",
+            "days": 7,
+            "soc": 0.2
+        },
+        {
+            "name": "val_cy_07",
+            "dataset": "data/Simulation_CY_Cur_HP__PV5000-HB5000.csv",
+            "date": "2000-07-01 00:00:00",
+            "days": 7,
+            "soc": 0.2
+        },
+        {
+            "name": "val_cy_10",
+            "dataset": "data/Simulation_CY_Cur_HP__PV5000-HB5000.csv",
+            "date": "2000-10-01 00:00:00",
+            "days": 7,
+            "soc": 0.2
+        },
+        {
+            "name": "val_wy_04",
+            "dataset": "data/Simulation_WY_Cur_HP__PV5000-HB5000.csv",
+            "date": "2000-04-01 00:00:00",
+            "days": 7,
+            "soc": 0.5
+        },
+        {
+            "name": "val_wy_10",
+            "dataset": "data/Simulation_WY_Cur_HP__PV5000-HB5000.csv",
+            "date": "2000-10-01 00:00:00",
+            "days": 7,
+            "soc": 0.5
+        }
+    ],
+    "test": [],
+    "plot": [],
+    "test_io": {
+        "checkpoints": [
+            "best",
+            "best_robust",
+            "best_worst",
+            "last"
+        ],
+        "tariffs": [
+            "tar_s",
+            "tar_w",
+            "tar_sw",
+            "tar_flat",
+            "tar_tou"
+        ],
+        "save_plot_operation": true,
+        "plot_operation_days": 7,
+        "test_workers": 4
+    }
+}

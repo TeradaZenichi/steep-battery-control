@@ -27,6 +27,7 @@ import os
 import sys
 from pathlib import Path
 
+import contextlib
 import numpy as np
 import torch
 from tqdm import tqdm
@@ -39,11 +40,11 @@ from environment import SmartHomeEnv
 from environment.shaping import AnticipatoryShapingWrapper
 from reinforcement.sac_cmdp.utils import (
     SafetyLayer, Hyperparameters, ReplayBuffer, Temperature, CostLambda,
-    soft_update, actor_step, alpha_step, lambda_step,
+    soft_update, alpha_step, lambda_step,
     EpisodeGen, Audit, AsyncEval, EvalRunner, collect_streams, cost_tensor, EMA,
     load_prior_buffer, merge_batches,
 )
-from sac.common.updates import reward_critic_step, cost_critic_step
+from sac.common.updates import reward_critic_step, cost_critic_step, actor_step
 from sac.common.tools import EpisodeBar, UpdateBar, episode_bars, update_train_postfix
 
 _DEFAULT_TARIFFS = ["tar_s", "tar_w", "tar_sw", "tar_flat", "tar_tou"]
@@ -72,6 +73,14 @@ def train_tariff(algo_root: Path, arch_name: str, exp_name: str, tariff: str, ru
     with open(algo_root / "config.json", encoding="utf-8") as f:
         cfg = json.load(f)
     model_cfg = json.load(open(PROJECT_ROOT / "models" / arch_name / "model.json", encoding="utf-8"))
+    droq_dropout = float(cfg["train"].get("droq_dropout", 0.0))
+    if droq_dropout > 0:
+        model_cfg["critic"]["dropout_rate"] = droq_dropout
+    n_critics = int(cfg["train"].get("n_critics", 2))
+    m_target = cfg["train"].get("m_target")   # None = use all; integer = REDQ subset min
+    m_target = int(m_target) if m_target else None
+    if n_critics != 2:
+        model_cfg["critic"]["n_critics"] = n_critics
     model_cfg["actor"]["parameters"] = str(PROJECT_ROOT / "data" / "parameters.json")
     env_params = json.load(open(model_cfg["actor"]["parameters"], encoding="utf-8"))
 
@@ -83,6 +92,14 @@ def train_tariff(algo_root: Path, arch_name: str, exp_name: str, tariff: str, ru
     rlpd_on = bool(rlpd_cfg.get("enabled", False))
     costs_cfg = _active_costs(tcfg)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    precision = str(tcfg.get("precision", "fp32")).lower()
+    if precision == "bf16" and device.type == "cuda":
+        amp_ctx = lambda: torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+    elif precision == "fp16" and device.type == "cuda":
+        amp_ctx = lambda: torch.autocast(device_type="cuda", dtype=torch.float16)
+    else:
+        amp_ctx = contextlib.nullcontext
+        precision = "fp32"
     seed = int(os.environ.get("RUN_SEED", hp.seed))
     torch.manual_seed(seed)
     np.random.seed(seed)
@@ -164,7 +181,8 @@ def train_tariff(algo_root: Path, arch_name: str, exp_name: str, tariff: str, ru
     step_count = [0]
     tqdm.write(f"[setup] {exp_name}/{arch_name} {tariff}: safety={safety_mode} costs={list(costs_cfg)} "
                f"ema_backup={ema_backup} rlpd={rlpd_on} shaping_bess={shaping_bess_omega} "
-               f"UTD=1/{hp.update_every_steps} bc_init={'yes' if bc_path else 'no'}")
+               f"UTD=1/{hp.update_every_steps} bc_init={'yes' if bc_path else 'no'} precision={precision} "
+               f"droq_dropout={droq_dropout} n_critics={n_critics} m_target={m_target}")
 
     def immediate_costs(o, a):
         if not costs_cfg:
@@ -251,18 +269,19 @@ def train_tariff(algo_root: Path, arch_name: str, exp_name: str, tariff: str, ru
             batch = sample_batch()
             if batch is None:
                 return
-            row = reward_critic_step(reward_critic, reward_target, backup_actor, batch, temp, opt_reward, grad_clip=hp.grad_clip)
-            for n in costs_cfg:
-                row.update(cost_critic_step(n, cost_critics[n], cost_targets[n], backup_actor, batch, opt_cost[n], grad_clip=hp.grad_clip))
-            if ep >= hp.actor_update_start_episode and step_count[0] % hp.actor_update_every == 0:
-                ainfo = actor_step(actor, reward_critic, cost_critics, lambdas, batch, temp, opt_actor, grad_clip=hp.grad_clip)
-                q_costs = ainfo.pop("q_costs")
-                row.update(ainfo)
-                row.update(alpha_step(temp, ainfo.pop("logp"), hp.target_entropy, opt_alpha))
-                for n, qc in q_costs.items():
-                    li = lambda_step(lambdas[n], qc, opt_lambda[n])
-                    row[f"{n}_lambda_value"] = li["lambda_value"]
-                ema_actor.update(actor)
+            with amp_ctx():
+                row = reward_critic_step(reward_critic, reward_target, backup_actor, batch, temp, opt_reward, grad_clip=hp.grad_clip, m_target=m_target)
+                for n in costs_cfg:
+                    row.update(cost_critic_step(n, cost_critics[n], cost_targets[n], backup_actor, batch, opt_cost[n], grad_clip=hp.grad_clip, m_target=m_target))
+                if ep >= hp.actor_update_start_episode and step_count[0] % hp.actor_update_every == 0:
+                    ainfo = actor_step(actor, reward_critic, cost_critics, lambdas, batch, temp, opt_actor, grad_clip=hp.grad_clip, m_actor=m_target)
+                    q_costs = ainfo.pop("q_costs")
+                    row.update(ainfo)
+                    row.update(alpha_step(temp, ainfo.pop("logp"), hp.target_entropy, opt_alpha))
+                    for n, qc in q_costs.items():
+                        li = lambda_step(lambdas[n], qc, opt_lambda[n])
+                        row[f"{n}_lambda_value"] = li["lambda_value"]
+                    ema_actor.update(actor)
             soft_update(reward_critic, reward_target, hp.tau)
             for n in costs_cfg:
                 soft_update(cost_critics[n], cost_targets[n], hp.tau)

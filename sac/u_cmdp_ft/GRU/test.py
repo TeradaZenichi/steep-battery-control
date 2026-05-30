@@ -2,7 +2,9 @@
 import sys
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
+PROJECT_ROOT = Path(__file__).resolve().parent
+while not (PROJECT_ROOT / "sac" / "common" / "trainer.py").exists():
+    PROJECT_ROOT = PROJECT_ROOT.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from reinforcement.sac_cmdp.utils.test_eval import run_test

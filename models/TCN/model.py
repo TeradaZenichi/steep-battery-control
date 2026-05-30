@@ -76,12 +76,12 @@ class Actor(BaseActor):
 
 class Critic(nn.Module):
     def __init__(self, state_dim, action_dim, hidden_dim, num_layers, head_dim,
-                 kernel_size=3, dropout=0.05, use_layer_norm=False):
+                 kernel_size=3, dropout=0.05, use_layer_norm=False, n_critics=2):
         super().__init__()
 
         def build():
             enc = TemporalEncoder(state_dim, hidden_dim, num_layers, kernel_size, dropout)
-            ln = nn.LayerNorm(hidden_dim) if use_layer_norm else None
+            ln = nn.LayerNorm(hidden_dim) if use_layer_norm else nn.Identity()
             mlp = nn.Sequential(
                 nn.Linear(hidden_dim + action_dim, hidden_dim), nn.ReLU(),
                 nn.Linear(hidden_dim, head_dim), nn.ReLU(),
@@ -89,20 +89,24 @@ class Critic(nn.Module):
             )
             return enc, ln, mlp
 
-        self.enc1, self.ln1, self.mlp1 = build()
-        self.enc2, self.ln2, self.mlp2 = build()
+        self.n_critics = int(n_critics)
+        self.encs = nn.ModuleList(); self.lns = nn.ModuleList(); self.mlps = nn.ModuleList()
+        for _ in range(self.n_critics):
+            enc, ln, mlp = build()
+            self.encs.append(enc); self.lns.append(ln); self.mlps.append(mlp)
+        if self.n_critics == 2:
+            self.enc1, self.ln1, self.mlp1 = self.encs[0], self.lns[0], self.mlps[0]
+            self.enc2, self.ln2, self.mlp2 = self.encs[1], self.lns[1], self.mlps[1]
 
     def _q(self, enc, ln, mlp, obs, act):
         h = enc(obs)
-        if ln is not None:
+        if ln is not None and not isinstance(ln, nn.Identity):
             h = ln(h)
         return mlp(torch.cat([h, act], dim=-1))
 
     def forward(self, obs, act):
-        return (
-            self._q(self.enc1, self.ln1, self.mlp1, obs, act),
-            self._q(self.enc2, self.ln2, self.mlp2, obs, act),
-        )
+        return tuple(self._q(self.encs[i], self.lns[i], self.mlps[i], obs, act)
+                     for i in range(self.n_critics))
 
 
 def load_actor(cfg, device=None):
@@ -132,5 +136,6 @@ def load_critic(cfg, device=None):
         kernel_size=int(cfg.get("kernel_size", 3)),
         dropout=float(cfg.get("dropout", 0.05)),
         use_layer_norm=bool(cfg.get("use_layer_norm", False)),
+        n_critics=int(cfg.get("n_critics", 2)),
     )
     return c if device is None else c.to(device)
