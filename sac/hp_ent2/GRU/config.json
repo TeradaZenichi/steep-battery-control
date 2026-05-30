@@ -120,10 +120,7 @@
     "plot": [],
     "test_io": {
         "checkpoints": [
-            "best",
-            "best_robust",
-            "best_worst",
-            "last"
+            "best"
         ],
         "tariffs": [
             "tar_s",

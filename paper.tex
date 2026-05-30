@@ -1,0 +1,1777 @@
+\documentclass[preprint,12pt, 3p]{elsarticle}
+
+
+\usepackage[hidelinks, pageanchor=false]{hyperref}
+\usepackage[caption=false, font=scriptsize, labelfont=sf, textfont=sf]{subfig}
+\usepackage[most]{tcolorbox}
+\usepackage[utf8]{inputenc}
+\usepackage{algpseudocode}
+\usepackage[T1]{fontenc}
+\usepackage{longtable}
+\usepackage{algorithm}
+\usepackage{orcidlink}
+\usepackage{tabularx}
+\usepackage{graphicx}
+\usepackage{multicol} 
+\usepackage{etoolbox}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{amssymb}
+\usepackage{amsmath}
+\usepackage{lineno}
+\usepackage{lipsum}
+\usepackage{float}
+\usepackage{xurl}
+
+\usepackage{subfig}
+
+% \makenomenclature
+% \renewcommand\nomgroup[1]{%
+%     \item[\bfseries
+%         \ifstrequal{#1}{C}{Variables:}{%
+%         \ifstrequal{#1}{B}{Parameters:}{%
+%         \ifstrequal{#1}{A}{Sets:}{%
+%         \ifstrequal{#1}{D}{Functions:}{}}}}
+%     ]
+% }
+
+\usepackage[intoc]{nomencl}
+\usepackage{ifthen}
+\makenomenclature
+\renewcommand\nomgroup[1]{%
+  \item[\bfseries
+    \ifthenelse{\equal{#1}{A}}{Sets and indices}{%
+    \ifthenelse{\equal{#1}{B}}{System parameters (shared)}{%
+    \ifthenelse{\equal{#1}{C}}{Environment parameters}{%
+    \ifthenelse{\equal{#1}{D}}{Machine learning parameters}{%
+    \ifthenelse{\equal{#1}{E}}{System variables (shared)}{%
+    \ifthenelse{\equal{#1}{F}}{Optimization model variables}{%
+    \ifthenelse{\equal{#1}{G}}{Environment variables}{%
+    \ifthenelse{\equal{#1}{H}}{Machine learning variables}{}}}}}}}}%
+  ]%
+}
+
+\renewcommand{\nomlabelwidth}{1.7cm}
+\newcommand{\nomenclspace}[0]{\vspace{1pt}}
+
+\usepackage[acronym, nonumberlist, style=list]{glossaries}
+\renewcommand{\glsnamefont}[1]{\textbf{#1}}
+
+\AtBeginEnvironment{flalign}{\footnotesize}
+\AtBeginEnvironment{multline}{\footnotesize}
+\AtBeginEnvironment{align}{\footnotesize}
+\AtBeginEnvironment{equation}{\footnotesize}
+
+
+\input{B-acronyms}
+
+
+\journal{Applied Energy}
+\renewcommand{\nomlabelwidth}{2cm}
+
+
+
+\begin{document}
+
+\begin{frontmatter}
+
+
+\title{Constrained Neural Network Control with Safe Action Projection for Residential Energy Management under Dynamic Tariffs}
+
+
+\author[unicamp]{Lucas Zenichi Terada~\orcidlink{0000-0002-3554-9947}}
+\author[emib]{Charlotte Verhaeghe~\orcidlink{0000-0002-3359-0153}}
+\author[emib]{Stijn Verbeke~\orcidlink{0000-0003-4250-8200}}
+\author[inesctec]{\\Ricardo J. Bessa~\orcidlink{0000-0002-3808-0427}}
+\author[unicamp]{Marcos J. Rider~\orcidlink{0000-0001-5484-1161}}
+
+\affiliation[unicamp]{organization={Department of Systems and Energy (DSE), School of Electrical and Computer Engineering (FEEC), Universidade Estadual de Campinas (UNICAMP)},
+    city={Campinas},
+    postcode={13083-852},
+    state={São Paulo},
+    country={Brazil}
+}
+
+\affiliation[emib]{organization={Energy and Materials in Infrastructure and Buildings (EMIB), University of Antwerp},
+    addressline={Campus Groenenborger, Groenenborgerlaan 171},
+    city={Antwerp},
+    postcode={2020},
+    country={Belgium}
+}
+\affiliation[inesctec]{organization={Institute for Systems and Computer Engineering, Technology and Science (INESC TEC), Campus da FEUP},
+    addressline={Rua Dr. Roberto Frias},
+    city={Porto},
+    postcode={4200-465},
+    country={Portugal}
+}
+
+
+
+
+\begin{abstract}
+
+
+
+\end{abstract}
+
+
+\glsresetall
+
+\begin{graphicalabstract}
+    % \includegraphics[width=\textwidth]{1-Abstract.pdf}
+\end{graphicalabstract}
+
+
+
+\begin{highlights}
+    \item Safe deep RL for home PV, battery and EV control across five tariff schemes
+    \item From-scratch SAC peaks early then drifts to a worse converged policy
+    \item Penalty and CMDP safety formulations both fail to remove the drift
+    \item Behavior-cloning warm-start from a MILP teacher mitigates the drift
+    \item Warm-started controller gives the largest cost cut over rule-based baselines
+    
+\end{highlights}
+
+\glsresetall
+
+%% Keywords
+\begin{keyword}
+Smart home energy management \sep Safe reinforcement learning \sep
+Behavior cloning \sep Constrained Markov decision process \sep
+Soft actor-critic \sep Battery and electric vehicle scheduling
+\end{keyword}
+
+
+\end{frontmatter}
+
+
+\begin{scriptsize}
+\begin{multicols}{2}
+    \setlist[description]{leftmargin=!, labelwidth=2cm}
+    \glsnogroupskiptrue
+    \printglossary[type=\acronymtype]
+    \glsnogroupskiptrue
+    \setlist[description]{style=standard} 
+\end{multicols}
+\end{scriptsize}
+
+
+
+% \linenumbers
+
+\section{Introduction}
+
+% Problem statement (Tier 1.3) — leads the introduction with a concrete gap
+Residential energy systems that combine photovoltaic generation, battery storage, electric vehicles, and grid interaction require real-time control under uncertainty, intermittent renewables, dynamic tariffs, and state-dependent operational limits. Two learning paradigms have emerged as candidates for this problem: imitation learning from optimization-based teachers, which transfers near-optimal decisions but cannot adapt beyond the demonstrated regime, and reinforcement learning, which adapts online but struggles with sparse safety-critical signals such as electric vehicle fast-charging cost. The literature treats these paradigms separately, with limited comparison under a common environment, multiple tariff structures, multiple neural architectures, and explicit feasibility handling. This paper addresses that gap with a controlled study under a common environment, with explicit safety projection and dual feasibility regularization, across five tariff schemes and three neural architectures. We find that from-scratch \gls{SAC} reaches a strong early peak and then drifts to a worse converged regime, and that this critic drift resists the stabilizers we test --- a constrained-\gls{MDP} formulation, an anticipatory potential-based reward shaping derived from the physical structure of the system, prior-data injection, and a lagged target policy. Behavior-cloning warm-start from a mixed-integer-linear-programming teacher, followed by constrained fine-tuning, is what mitigates the drift and yields the strongest controller, reducing operating cost over rule-based heuristics across tariffs.
+% TIER 2.7 (quantitative anchor): once results are in, replace the last sentence above with a quantitative claim, e.g. "Across five tariff schemes, the proposed framework reduces operating cost by X% over a rule-based baseline while keeping fast-charging events below Y% of timesteps."
+
+% Smart homes
+The adoption of energy-related smart home technologies and distributed solar generation is transforming residential electricity systems, with implications for managing household demand, local generation, and grid interaction. Effective device communication is essential for integrating and operating \glspl{DER}. In 2024, 70\% of European Union citizens aged 16 to 74 used at least one \gls{IoT} device, and 14\% had an internet-connected energy management system (EMS)~\cite{eurostat_iot_individuals_2025}. Additionally, 13 European Union countries reached 80\% smart meter penetration by 2022~\cite{ec_smart_grids_meters_2026}. \Glspl{SHEMS} monitor and control residential energy use, supporting energy savings through coordinated management of household loads and devices~\cite{hendron2021modeling}.
+
+% Distributed Energy Resources
+The growing adoption of distributed energy resources is shifting households from passive consumers to active participants in electricity systems, as they can now produce, consume, and manage electricity via interconnected technologies~\cite{iea_unlocking_der_2022,nrel_demand_side_opportunity_2021}. This shift is driven by rapid growth in behind-the-meter resources, especially \gls{PV} generation and \glspl{BESS}. By the end of 2024, global cumulative \gls{PV} capacity is expected to exceed 2.2~TW, with over 600~GW of new \gls{PV} systems commissioned that year~\cite{ieapvps_snapshot_2025}. The \gls{IEA} projects that distributed solar \gls{PV} will represent 42\% of total \gls{PV} expansion from 2025 to 2030~\cite{iea_renewable_progress_tracker}. For energy storage, the \gls{IEA} reported that \gls{BESS} was the fastest-growing commercially available energy technology in 2023, with 42~GW added globally and deployment more than doubling year-on-year~\cite{iea_batteries_secure_transitions_2024}. Consequently, household energy management is becoming more complex and requires coordinated strategies to efficiently manage demand, local generation, storage, and grid exchange.
+
+% Electric Vehicles
+\Glspl{EV} add flexibility to electricity demand in residential settings. According to the \Gls{IEA}, global electric car sales exceeded 17 million in 2024, representing over 20\% of all new cars sold worldwide~\cite{iea_global_ev_outlook_2025}. This growth is supported by the addition of more than 1.3 million public charging points globally in 2024~\cite{iea_ev_charging_2025}. In homes, \gls{EV} charging increases the complexity of energy management, as it must be coordinated with other loads, \gls{PV} generation, \gls{BESS}, and grid exchange. \Glspl{SHEMS} can coordinate \gls{EV} charging with other devices, improving system operation and supporting more efficient outcomes for consumers, utilities, and grid operators~\cite{nrel_residential_ev_hems_2021}.
+
+% Grid tarif
+In addition to the growing diversity of household energy resources, residential energy management is strongly influenced by utility tariff structures, as pricing schemes affect the economic value of load scheduling, storage use, and \gls{EV} charging. Residential tariffs are moving past static models. For example,~\cite{ansarin2020economic-403} compares flat-rate, time-of-use, and real-time pricing, while~\cite{schumacher2021self-sustainable-1fc} proposes a dynamic hourly tariff for Brazil. The review in~\cite{hseler2024promoting-c33} highlights the role of real-time tariffs in encouraging residential demand response. Therefore, tariffs affected by external factors such as weather should be viewed as potential scenarios aligned with the shift toward dynamic pricing, rather than as current market standards.
+
+% Home energy management Systems
+\Glspl{SHEMS} are associated with the evolution of smart homes, in which communication, automation, and control technologies support residential electricity management~\cite{zipperer2013electric}. The literature treats these systems as coordination and decision-making tools rather than passive monitors, since they manage multiple devices, objectives, and sources of uncertainty in the household environment~\cite{beaudin2015home}. Operationally, \glspl{SHEMS} support scheduling, feedback, and device coordination, with the potential to improve energy efficiency and the performance of the household energy system~\cite{hendron2021modeling}.
+
+
+\gls{SHEMS} literature divides naturally by decision horizon and methodological approach. Fig.~\ref{fig:taxonomy} shows the taxonomy used in this work, separating planning from real-time operation studies and emphasizing learning-based methods (supervised and reinforcement learning).
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.6\linewidth]{2-Taxonomy.pdf}
+    \caption{Taxonomy of \gls{SHEMS} algorithms}
+    \label{fig:taxonomy}
+\end{figure}
+
+
+% Horizon approach
+In \glspl{SHEMS}, the decision horizon distinguishes planning from real-time operation approaches. Planning includes ahead-of-time scheduling and resource sizing, while real-time operation involves continuous or periodic updates of control actions. Planning-based \glspl{SHEMS} typically formulate energy management as an optimization problem over a set horizon, scheduling appliances and resources in advance based on forecasts, constraints, and user requirements. For example,~\cite{elazab2021mixed} presents an offline scheduling framework for an isolated smart home with \gls{PV}, battery storage, and diesel generators to reduce fuel consumption. Similarly,~\cite{jafari2026optimizing} proposes daily and weekly scheduling models for smart appliances under different electricity pricing schemes, considering both grid-only and grid-connected \gls{PV} setups.
+
+
+% Real-time operation
+In contrast to planning, real-time \gls{SHEMS} studies focus on online management of household resources, updating decisions during operation to address uncertainty, system dynamics, and new information. This is especially important in homes with \glspl{DER}, where demand, generation, storage, user behavior, and price signals vary and require ongoing adaptation. Real-time operation is a key research area in \glspl{SHEMS}, particularly where fixed schedules cannot address the changing nature of household energy management. Real-time \gls{SHEMS} studies are generally grouped into rule-based, optimization-based, and learning-based approaches.
+
+As shown in Fig.~\ref{fig:taxonomy}, real-time \gls{SHEMS} studies fall into rule-based, optimization-based, and learning-based categories. These differ in how they generate control actions and adapt to uncertainty and changing residential conditions. Learning-based methods are gaining attention for their potential to enable data-driven decision-making in complex household energy management.
+
+% Rule-based
+Rule-based approaches use predefined logical rules to determine real-time control actions, incorporating expert knowledge, heuristics, or user preferences. For example,~\cite{kawakami2014evaluation-5b7} presents a distributed IF-THEN rule-based \gls{SHEMS} using the Rete algorithm, while~\cite{keshtkar2016adaptive-e08} combines rule-based methods and wireless sensors to adapt thermostat control to user preferences. Similarly,~\cite{krishna2018fuzzy-71b} applies fuzzy logic to coordinate loads and \gls{BESS} use based on grid availability, \gls{BESS} status, load type, and time of day. These studies show that rule-based methods are valued for their interpretability, simplicity, and ease of implementation, but may be less effective in highly uncertain or complex environments.
+
+% Optimization-based
+Optimization-based approaches generate real-time control actions by solving decision problems that consider system constraints, operational goals, and updated information. For instance,~\cite{godina2018model-dd4} applies model predictive control to manage residential air conditioning in the context of demand response and photovoltaic generation. In broader real-time contexts,~\cite{paul2020real-time-2b8,chatterjee2023multi-objective-ef1} develop multiobjective optimization schemes to minimize electricity costs and user discomfort, using Lyapunov-based methods for online decisions. Other work extends this paradigm to coordinated management of multiple residential resources within operational and economic constraints, including centralized and MILP-based formulations~\cite{seal2023centralized-90d,gomes2023milp-based-c2e} and integrated real-time coordination strategies~\cite{tifoura2025home-d26,teng2025integrating-1fd}. Optimization-based methods provide a systematic, constraint-aware approach to real-time household energy management, at the cost of substantial modeling and computational effort.
+
+
+Learning-based approaches are a promising direction for real-time \gls{SHEMS}. This work focuses on supervised learning, including behavior cloning and reinforcement learning.
+
+% Behavior cloning (Imitation learning)
+\subsection{Supervised learning and behavior cloning}
+
+In learning-based real-time \gls{SHEMS}, supervised methods learn control policies from historical or reference operational data. A common approach uses an optimization model as an expert to generate state--action pairs and then trains a learner to reproduce these decisions at lower computational cost during online operation. The paradigm has been explored in broader energy applications, but its use in \glspl{SHEMS} remains limited~\cite{su2025accelerating-965,cao2023fast-d37}. In residential settings,~\cite{dinh2022supervised-learning-based-5bd} trains \glspl{DNN} on \gls{MILP} optimal outputs from historical data and applies them in real time to control \gls{BESS} and \gls{RES}. Similarly,~\cite{huy2023real-time-2cb} uses offline \gls{MILP} solutions to collect optimal actions for \gls{BESS} and \gls{EV}, which DNNs then learn for near-optimal real-time scheduling. Real-time supervised learning in \gls{SHEMS} is thus a promising but underexplored direction, especially when contrasted with the much larger body of reinforcement learning research.
+
+
+% Reinforcement Learning
+\subsection{Reinforcement Learning}
+
+
+Reinforcement learning approaches treat real-time energy management as a sequential decision-making problem, where control policies are learned through interaction with the environment. In \gls{SHEMS} research, reinforcement learning is widely explored as a data-driven alternative for real-time decisions, including multi-agent and deep reinforcement learning for residential energy management~\cite{xu2020multi-agent-ca4,yu2020deep-565}. Recent studies further investigate reinforcement-learning-based smart home control under dynamic conditions~\cite{chen2021user-98f,wu2024smart-6aa}.
+
+These methods have been applied to various combinations of residential resources, such as \gls{PV} generation, \gls{BESS}, and \gls{EV}, extending real-time control to integrated household energy management~\cite{abdelaal2021integration-d54,kim2025real-time-979}. The integration of \glspl{EV} has received particular attention in reinforcement-learning-based \glspl{SHEMS}, further broadening the scope of real-time residential coordination~\cite{yuan2026reinforcement-dd1,spantideas2025autonomous-dfb}.
+
+Recent studies have explored various reinforcement learning structures, including parallel and multi-agent strategies~\cite{zhang2026parallel-e48,abishu2025multiagent-b59}, as well as autonomous and offline-guided schemes for real-time residential energy management~\cite{aldahmashi2024real-time-078,xiong2026offline-67f}. Additional deep reinforcement learning implementations further demonstrate the methodological diversity and growing importance of this field in \gls{SHEMS}~\cite{lissa2021deep-fe8,rehman2026iot-4dc}. However, most reinforcement learning studies still focus on specific resource combinations, individual tariff settings, or isolated methodologies, limiting broader comparative assessments.
+
+Most closely related to the present work,~\cite{yuan2026reinforcement-dd1} also formulate residential energy management as a \gls{CMDP} solved with a Lagrangian \gls{SAC}, integrating \gls{PV}, storage, \gls{EV}, and HVAC, and emphasize heterogeneous battery degradation and stochastic \gls{EV} behaviour. Their contribution is largely \emph{environmental}: a richer degradation and behaviour model under a single dynamic-pricing scenario. Our focus is complementary and orthogonal, centering on the \emph{learnability} of the control policy itself. Rather than refining the environment models, we show that a from-scratch Lagrangian \gls{SAC} exhibits a critic-drift instability that standard stabilizers do not remove, and that a behavior-cloning warm-start from a \gls{MILP} teacher is required to reliably reach the strongest controller. We further contrast penalty- and constraint-based safety formulations across three neural encoders and five tariff regimes, under an explicit physics-aware feasibility projection --- dimensions not addressed in~\cite{yuan2026reinforcement-dd1}.
+
+% Gaps
+\subsection{Research Gaps}
+
+Tables~\ref{tab:opt_baselines} and~\ref{tab:learning_comparative} provide a comparative mapping of the literature reviewed. Table~\ref{tab:opt_baselines} summarizes optimization-based and rule-based approaches, considered as reference baselines for the learning methods discussed in this work. Table~\ref{tab:learning_comparative} positions learning-based approaches, including supervised behavior cloning and reinforcement learning, alongside the proposed framework. The comparison considers temporal resolution, energy resources, control variables, methodological approach, neural architecture, safety treatment, tariff structure, evaluation criteria, and reproducibility. While the literature addresses significant aspects of this problem, it often does so in a fragmented manner. For example,~\cite{9585298} utilizes optimal solutions from a \gls{MILP} model for imitation learning, whereas~\cite{XU2024122915} employs offline optimal solutions to guide reinforcement learning for energy storage control. In \gls{SHEMS},~\cite{XIONG20243501} applies \gls{SAC} to real-time storage control under a \gls{ToU} tariff. According to a recent study published in Scientific Reports, research on smart home energy management has generally focused on applying optimization, imitation, or reinforcement learning in isolation, or on testing policies within limited-resource and system setups. The authors note that integrating optimization-based teaching, behavior cloning, and reinforcement learning into a single, unified framework for energy management in smart homes is still a relatively unexplored area.
+
+Furthermore, gaps persist in safety, architectural comparison, and evaluation. The study in~\cite{CEUSTERS2023101202} emphasizes the importance of safety layers and explicit constraints in multi-energy systems, yet many learning-based \gls{SHEMS} studies do not report a dedicated feasibility layer and instead rely solely on action clipping. This limitation is particularly relevant in systems with \gls{BESS} and \gls{EV}, where admissible actions depend on state of charge, availability, power limits, and degradation. Additionally, recent reviews on reinforcement learning for \gls{SHEMS} identify challenges related to safety, scalability, validation in real applications, and comparability across studies~\cite{en17246420}. These gaps motivate the present work, which integrates a \gls{MILP} teacher, behavior cloning, \gls{SAC}-based reinforcement learning, physics-constrained action projection, dual feasibility regularization, and the comparison of multiple neural architectures under a multi-tariff protocol for real-time residential operation with \gls{PV}, \gls{BESS}, \gls{EV}, and grid interaction.
+
+% Comparative Table A — non-learning baselines
+\begin{table*}[t]
+\centering
+\footnotesize
+\caption{Optimization-based and rule-based real-time SHEMS approaches considered as reference baselines.}
+\label{tab:opt_baselines}
+\begin{tabular}{@{}llllllll@{}}
+\toprule
+\textbf{Ref.} & \textbf{Step} & \textbf{Res.} & \textbf{Ctrl.} & \textbf{Method} & \textbf{Tariff} & \textbf{Eval.} & \textbf{Reprod.} \\
+\midrule
+
+\cite{seal2023centralized-90d}
+& 15m & P,B,E,G & B,E,H & MPC & ToU,FiT & MC,TIT & H \\
+
+\cite{gomes2023milp-based-c2e}
+& 15m & P,B,H,L,G & B,H,G & MILP-MPC & ToU,SP & C,EC,CO$_2$,RMSE & H \\
+
+\cite{tifoura2025home-d26}
+& 1m & P,B,L,G & P,B,G & PSO & -- & C,EC,CO$_2$,SS & H \\
+
+\cite{teng2025integrating-1fd}
+& -- & P,B,E,H,I & H & MPC & -- & C,EC,Comf,Acc & L \\
+
+\cite{abdelaal2021integration-d54}
+& 5m & P,B,E,L,G & E,L & RB & HP & C,EC,PAR,Deg & M \\
+
+\cite{rehman2026iot-4dc}
+& -- & P,B,G & L & RB & HP,SP & C,CO$_2$,Comp & M \\
+
+\bottomrule
+\end{tabular}
+
+\vspace{2pt}
+\begin{minipage}{0.98\textwidth}
+\footnotesize
+\textbf{Resources.} P = photovoltaic; B = battery energy storage; E = electric vehicle; H = HVAC; L = load; G = grid; I = ICT.
+
+\textbf{Methods.} RB = rule-based; MPC = model predictive control; MILP-MPC = mixed-integer linear MPC; PSO = particle swarm optimization.
+
+\textbf{Tariffs.} HP = hourly pricing; SP = selling price; ToU = time-of-use; FiT = feed-in tariff.
+
+\textbf{Evaluation.} C = cost; EC = energy consumption; Comf = comfort; Acc = accuracy; Comp = computational performance; Deg = degradation; PAR = peak-to-average ratio; SS = self-sufficiency; MC = monthly cost; TIT = time-in-target; RMSE = root mean squared error.
+
+\textbf{Reproducibility.} H, M, L = high, medium, low. -- = not reported, not applicable, or no explicit mechanism, depending on column.
+\end{minipage}
+\end{table*}
+
+% Comparative Table B — learning-based
+\begin{table*}[t]
+\centering
+\scriptsize
+\caption{Learning-based real-time SHEMS approaches and the proposed framework.}
+\label{tab:learning_comparative}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{@{}llllllllll@{}}
+\toprule
+\textbf{Ref.} & \textbf{Step} & \textbf{Res.} & \textbf{Ctrl.} & \textbf{Method} & \textbf{NN} & \textbf{Safety} & \textbf{Tariff} & \textbf{Eval.} & \textbf{Reprod.} \\
+\midrule
+
+\cite{dinh2022supervised-learning-based-5bd}
+& 1h & P,B,L,G & P,B & BC & GRU & -- & HP,SP & C,MAPE,T & H \\
+
+\cite{huy2023real-time-2cb}
+& 1h & P,B,E,L,G & B,E & BC & GRU & -- & HP,SP & C,EC,MAE,MAPE & H \\
+
+\cite{xu2020multi-agent-ca4}
+& 1h & P,B,E,G & B,E & BC+MADDPG & MLP & Clip & ToU,SP & Desc & M \\
+
+\cite{yu2020deep-565}
+& 1h & DG,B,H,L,G & B,H & DDPG & MLP & -- & HP,SP & C,EC,Comf,Conv & H \\
+
+\cite{chen2021user-98f}
+& 1h & P,B,L,G & B,L & MORL & -- & -- & HP & C,Comf & H \\
+
+\cite{wu2024smart-6aa}
+& 1m & P,B,E,H,L,G & B,E,H,L & SAC & MLP & -- & BM+AS & C,EC,Comf,Acc & M \\
+
+\cite{kim2025real-time-979}
+& 1h & E,H,L,G & E,H,L & TD3 & TRF & -- & HP,SP & C,EC,Acc,Conv & M \\
+
+\cite{yuan2026reinforcement-dd1}
+& 1h & P,B,E,H,L,G & B,E,H & LSAC & -- & Dual & DAP,SP & C,EC,Comf,Deg & M \\
+
+\cite{spantideas2025autonomous-dfb}
+& 1h & P,W,B,G & B,H & DDPG & LSTM & -- & DAP,SP & MAE,Comp & H$^{\ddagger}$ \\
+
+\cite{zhang2026parallel-e48}
+& 1h & P,B,H,L & B,L & PPO & FCN & -- & ToU,FiT & Desc & M \\
+
+\cite{abishu2025multiagent-b59}
+& -- & H,G,I & H & MADDPG & MLP-AC & -- & ToU & C,EC,Comf,Conv & M \\
+
+\cite{aldahmashi2024real-time-078}
+& 15m & P,B,E,H,L,G & B,E,H,L & PPO & MLP-AC & -- & HP,SP & C,EC,Conv & M \\
+
+\cite{xiong2026offline-67f}
+& 30m & P,B,E,H,L,G & B,E,H,L & RIQL & Q-NET & -- & ToU & C,EC,Comf & M \\
+
+\cite{lissa2021deep-fe8}
+& 5m & P,H & H & DQN & MLP & -- & -- & C,EC,Comf,SS & M \\
+
+\cite{XIONG20243501}
+& 1h & B,L,G & B & SAC & -- & -- & ToU & C & M \\
+
+\cite{en16155689}
+& -- & P,B,E,G & E,P,B & PPO & -- & -- & -- & C,Deg & M \\
+
+\cite{10142173}
+& -- & B,R,L,G & B & RL & -- & Constr & -- & C,Deg,SoC & M \\
+
+TW
+& 5m & P,B,E,G & P,B,E(V2G) & BC+SAC(P,C)+$\Phi$ & Suite$^\dagger$ & Proj+Dual & Flat,ToU,Sol,Wnd,SW & C\$,Gap,Viol,Stat & H$^{\ddagger}$ \\
+
+\bottomrule
+\end{tabular}%
+}
+
+\vspace{2pt}
+\begin{minipage}{0.98\textwidth}
+\scriptsize
+\textbf{Resources.} P = photovoltaic; B = battery energy storage; E = electric vehicle; H = HVAC; L = load; G = grid; I = ICT; W = wind turbine; DG = distributed generation; R = renewable source.
+
+\textbf{Methods.} BC = behavior cloning (supervised learning from expert demonstrations); RL = reinforcement learning; DDPG = deep deterministic policy gradient; MADDPG = multi-agent DDPG; PPO = proximal policy optimization; SAC = soft actor--critic; TD3 = twin delayed DDPG; DQN = deep Q-network; MORL = multi-objective RL; RIQL = risk-informed Q-learning; LSAC = Lagrangian SAC; SAC(P,C) = penalty-based and CMDP-Lagrangian SAC variants; $\Phi$ = anticipatory potential-based reward shaping.
+
+\textbf{Neural networks.} MLP = multilayer perceptron; GRU = gated recurrent unit; LSTM = long short-term memory; FCN = fully connected network; TRF = transformer; MLP-AC = MLP actor--critic; Q-NET = Q-network; Suite$^\dagger$ = GRU, multi-head attention (MHA), and temporal convolutional network (TCN).
+
+\textbf{Safety.} Clip = action clipping or projection; Proj = physics-aware projection on state-dependent feasibility limits; Dual = dual-variable or constraint-based mechanism; Constr = explicit constraint handling.
+
+\textbf{Tariffs.} HP = hourly pricing; SP = selling price; ToU = time-of-use; FiT = feed-in tariff; DAP = day-ahead pricing; BM+AS = balancing market plus ancillary services; Flat = flat constant tariff; Sol = solar-availability-dependent dynamic; Wnd = wind-availability-dependent dynamic; SW = combined solar--wind-availability-dependent dynamic.
+
+\textbf{Evaluation.} C = cost; C\$ = cost in absolute monetary or energy units (e.g., \$/year, kWh/year); EC = energy consumption; Comf = comfort; Acc = accuracy; Comp = computational performance; Conv = convergence; Deg = degradation; Gap = optimality gap; Viol = feasibility violation or projection residual; Stat = statistical testing; Desc = descriptive evaluation.
+
+\textbf{Reproducibility.} H, M, L = high, medium, low. $\ddagger$ = source code publicly available. -- = not reported, not applicable, or no explicit mechanism, depending on column.
+\end{minipage}
+\end{table*}
+
+
+
+
+
+
+% Contribution
+\subsection{Contributions}
+
+This paper studies safe \gls{SHEMS} operation with \gls{PV}, \gls{BESS}, \gls{EV}, and grid interaction, and asks how reliably reinforcement learning controllers can be trained for it under realistic constraints and dynamic tariffs. Its central finding is that from-scratch deep reinforcement learning hits a \emph{critic-drift ceiling} on this task --- policies reach a strong early peak and then degrade --- that standard stabilizers do not remove, and that behavior-cloning warm-start from a \gls{MILP} teacher is what reliably mitigates it, yielding the strongest controller across tariff regimes. The main contributions are:
+
+\begin{itemize}
+    \item We characterize a critic-drift instability of from-scratch \gls{SAC} on residential energy control: across two safety-handling formulations, three encoders, and five tariffs, learned policies reach an early high-performing peak and then drift to a markedly worse converged regime. We report both peak and converged performance to quantify this gap, rather than the peak alone.
+
+    \item We compare a penalty-based \gls{SAC} variant, where feasibility violations enter the reward, against a constrained \gls{MDP} (\gls{CMDP}) formulation with separate cost critics and a Lagrangian dual per constraint, under an identical environment, hyperparameters, and evaluation protocol --- isolating how the safety-handling formulation interacts with the drift and with the tariff regime.
+
+    \item We evaluate, as controlled ablations, three stabilizers intended to remove the drift from scratch: an anticipatory potential-based reward shaping $\Phi(s)$ derived from the physical structure of the system (last-known \gls{EV} \gls{SoC}, time-to-arrival, available \gls{BESS} reserve) via a Ng--Harada--Russell transformation; prior-data injection from rule-based demonstrations; and a lagged target policy in the Bellman backup. We show that none fully closes the gap from scratch.
+
+    \item We show that behavior-cloning warm-start from the \gls{MILP} teacher, followed by constrained \gls{SAC} fine-tuning, mitigates the drift and yields the strongest controller, with the largest cost reduction over the rule-based baselines across tariffs.
+
+    \item All learned policies are evaluated through a safety projection enforcing state-dependent power limits of \gls{BESS}, \gls{EV}, and \gls{PV}, and are compared against rule-based heuristic baselines (a naive and a smart rule-based controller) in absolute operating cost (\$/year), cost reduction, and feasibility-violation rate, across five tariff structures (flat, \gls{ToU}, and solar-, wind-, and combined-renewable dynamic signals) and three neural encoders (\gls{GRU}, multi-head attention, \gls{TCN}).
+\end{itemize}
+
+% TIER 2.7 (quantitative anchor): once the multi-seed grid is in, add concrete
+% numbers to contributions 1 and 4, e.g. "the peak exceeds the converged policy
+% by X% on average" and "warm-start reduces cost over RBS by Y% vs Z% for the
+% best from-scratch variant".
+
+% TIER 2.4 (organization paragraph): add immediately after this list, e.g.
+%   "The remainder of the paper is organized as follows. Section 2 presents
+%   the system model and MDP formulation. Section 3 details the learning
+%   framework, including the MILP teacher, behavior cloning, the two SAC
+%   variants, and the anticipatory shaping. Section 4 describes the
+%   experimental setup. Section 5 reports the results across architectures
+%   and tariffs. Section 6 discusses implications and Section 7 concludes."
+
+
+
+\section{System model and problem formulation}
+\label{sec:system_model}
+
+This section presents the proposed system for the real-time residential energy management with distributed energy resources. The framework combines a simulation environment, an optimization-based teacher and learning-based controllers for sequential decision-making with different tariff signals. The environment models the interactions among residential demand, photovoltaic generation, a stationary \gls{BESS}, an \gls{EV}, and the distribution grid. An \gls{MILP} formulation is used to generate expert actions under perfect-foresight assumptions, which are then used for behavior cloning. Subsequently, reinforcement learning is applied to improve the policy through direct interaction with the environment. To preserve operational feasibility, the actor output is constrained by state-dependent device limits, while an additional safety projection is used to enforce grid exchange limits during validation and testing. The complete framework is evaluated under five tariff profiles: a flat tariff, a time-of-use \gls{ToU} tariff, and three renewable-dependent dynamic tariffs based on solar, wind, and combined solar-wind availability. Figure~\ref{fig:methodology} summarizes the main components of the proposed methodology and their interconnections. This section details the simulation environment (Section~\ref{subsec:environment}) and the formal control problem (Section~\ref{subsec:problem_formalization}); the learning framework and the experimental setup follow in Sections~\ref{sec:learning_framework} and~\ref{sec:experimental_setup}.
+
+
+
+\subsection{Environment}\label{subsec:environment}
+
+The environment models a residential energy system comprising uncontrollable demand, photovoltaic generation, a \gls{BESS}, an \gls{EVSE}, and grid exchange. At each time step \(t \in \Omega_t\), the simulator processes control actions for the \gls{BESS}, \gls{EV}, and \gls{PV} inverter, applies device-level constraints, updates internal energy states, and calculates the resulting grid power and operating cost. Exogenous inputs consist of residential demand, available photovoltaic generation, weather variables, electric vehicle availability, and the tariff signal \(\zeta_t\).
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\textwidth]{1-Methodology.pdf}
+    \caption{Overview of the proposed smart-home energy management framework.}
+    \label{fig:methodology}
+\end{figure}
+
+The environment is assessed using five tariff profiles: a flat constant tariff, a \gls{ToU} tariff, and three renewable-dependent dynamic signals, denoted as \(\zeta_t^{s}\), \(\zeta_t^{w}\), and \(\zeta_t^{sw}\). These signals correspond to solar availability, wind availability, and their combined contribution, respectively. The tariff signals influence the grid-exchange cost and consequently alter the economic incentives perceived by the controller.
+
+Operationally, the simulator translates the applied actions into physically realized power outputs by considering power and energy limits, conversion efficiencies, self-discharge, photovoltaic curtailment, and electric vehicle connection conditions. This transition yields the subsequent observation, updated internal states, and the one-step reward utilized by the learning algorithms.
+
+\subsubsection{Load model}
+
+Residential demand was modeled in EnergyPlus considering a four-person household. Given the time index $t$, the residential load is denoted by $P_t^D$.
+
+\subsubsection{PV model}
+
+PV generation was also obtained using EnergyPlus. The PV system is coupled to a smart inverter that enables curtailment. The control is represented by $a^{\text{PV}}_t \in [0,1]$, which denotes the curtailed fraction, as in \eqref{eq:pv_curtailment}:
+
+\begin{flalign}\label{eq:pv_curtailment}
+    & p_t^\text{PV} = P_t^\text{PV} \cdot (1 - a_t^\text{PV}) & \forall t \in \Omega_t
+\end{flalign}
+
+where $p_t^\text{PV}$ is the applied \gls{PV} power, $P_t^\text{PV}$ is the available \gls{PV} power at time $t$, and $\Omega_t$ is the time set describing the episode.
+
+\subsubsection{Battery model}\label{sec:battery-model-env}
+
+The \gls{BESS} operation is commanded by a normalized action $a_t^{\text{BESS}} \in [-1,1]$, where positive values represent charging and negative values represent discharging. The power command is obtained from $a_t^{\text{BESS}}$ as in \eqref{eq:bess_command}:
+
+\begin{flalign}\label{eq:bess_command}
+    & p_t^{\text{BESS,cmd}} = a_t^{\text{BESS}}\,\overline{P^{\text{BESS}}} & \forall t \in \Omega_t
+\end{flalign}
+
+The environment enforces a minimum admissible energy level associated with the depth of discharge, as in \eqref{eq:bess_emin}:
+
+\begin{flalign}\label{eq:bess_emin}
+    & \underline{E^{\text{BESS}}} = \overline{E^{\text{BESS}}}\,(1-\text{DoD}^{\text{BESS}}) &
+\end{flalign}
+
+In addition, stored energy undergoes self-discharge prior to the application of the command, as in \eqref{eq:bess_self_discharge}:
+
+\begin{flalign}\label{eq:bess_self_discharge}
+    & e_t^{\text{BESS}} \leftarrow e_t^{\text{BESS}}\,(1-\beta^{\text{BESS}}\,\Delta t) & \forall t \in \Omega_t
+\end{flalign}
+
+A feasibility clipping stage then limits the command to the available energy at time $t$: \eqref{eq:bess_energy_clip}:
+
+\begin{flalign}\label{eq:bess_energy_clip}
+    & \left\{
+    \begin{array}{ll}
+        p_t^{\text{BESS,clip}} = \min\Bigl\{p_t^{\text{BESS,cmd}},\, \dfrac{\overline{E^{\text{BESS}}}-e_t^{\text{BESS}}}{\Delta t\,\eta^{\text{BESS}}}\Bigr\}
+        & \text{if } p_t^{\text{BESS,cmd}} > 0 \\[6pt]
+        p_t^{\text{BESS,clip}} = \max\Bigl\{p_t^{\text{BESS,cmd}},\, \dfrac{\underline{E^{\text{BESS}}}-e_t^{\text{BESS}}}{\Delta t}\,\eta^{\text{BESS}}\Bigr\}
+        & \text{if } p_t^{\text{BESS,cmd}} < 0 \\[6pt]
+        p_t^{\text{BESS,clip}} = 0
+        & \text{if } p_t^{\text{BESS,cmd}} = 0
+    \end{array}
+    \right.
+    & \forall t \in \Omega_t
+\end{flalign}
+
+Finally, the clipped power is processed by a nonlinear function that relates charging and discharging power limits to the \gls{SoC} of the \gls{BESS}. The function is described based on Fig.~\ref{fig:bess-soc-pmax} and is applied as in \eqref{eq:bess_soc_limit}:
+
+\begin{flalign}\label{eq:bess_soc_limit}
+    & p_t^{\text{BESS}} = f^{\text{BESS}}\Bigl(p_t^{\text{BESS,clip}},\,\text{SoC}_t^{\text{BESS}}\Bigr) & \forall t \in \Omega_t
+\end{flalign}
+
+where $f^{\text{BESS}}(\cdot)$ enforces \gls{SoC}-dependent limits through two pu curves, one for charging and one for discharging, as in \eqref{eq:bess_soc_pmax}:
+
+\begin{flalign}\label{eq:bess_soc_pmax}
+    & \left\{
+    \begin{array}{ll}
+        p_t^{\text{BESS}} = \min\Bigl\{p_t^{\text{BESS,clip}},\,\overline{P^{\text{BESS}}}\,f_c(\text{SoC}_t^{\text{BESS}})\Bigr\}
+        & \text{if } p_t^{\text{BESS,clip}} > 0 \\[6pt]
+        p_t^{\text{BESS}} = \max\Bigl\{p_t^{\text{BESS,clip}},\,-\overline{P^{\text{BESS}}}\,f_d(\text{SoC}_t^{\text{BESS}})\Bigr\}
+        & \text{if } p_t^{\text{BESS,clip}} < 0 \\[6pt]
+        p_t^{\text{BESS}} = 0
+        & \text{if } p_t^{\text{BESS,clip}} = 0
+    \end{array}
+    \right.
+    & \forall t \in \Omega_t
+\end{flalign}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.5\linewidth]{3-BESS_SoC_Pmax.pdf}
+    \caption{Function $f^{\text{BESS}}(\cdot)$ for \gls{SoC}-dependent power limiting.}
+    \label{fig:bess-soc-pmax}
+\end{figure}
+
+Stored energy evolves with the applied power. For charging: \eqref{eq:bess_energy_charge} as follows:
+
+\begin{flalign}\label{eq:bess_energy_charge}
+    & e_{t+1}^{\text{BESS}} = \min\Bigl\{\overline{E^{\text{BESS}}},\, e_t^{\text{BESS}} + p_t^{\text{BESS}}\,\Delta t\,\eta^{\text{BESS}}\Bigr\} & \forall t \in \Omega_t
+\end{flalign}
+
+For discharging: \eqref{eq:bess_energy_discharge} as follows:
+
+\begin{flalign}\label{eq:bess_energy_discharge}
+    & e_{t+1}^{\text{BESS}} = \max\Bigl\{\underline{E^{\text{BESS}}},\, e_t^{\text{BESS}} + \dfrac{p_t^{\text{BESS}}\,\Delta t}{\eta^{\text{BESS}}}\Bigr\} & \forall t \in \Omega_t
+\end{flalign}
+
+The \gls{SoC} is then \eqref{eq:bess_soc_update}:
+
+\begin{flalign}\label{eq:bess_soc_update}
+    & \text{SoC}_{t+1}^{\text{BESS}} = \dfrac{e_{t+1}^{\text{BESS}}}{\overline{E^{\text{BESS}}}} & \forall t \in \Omega_t
+\end{flalign}
+
+\subsubsection{EV model}
+
+The \gls{EV} dynamics are commanded by a normalized action $a_t^{\text{EV}} \in [-1,1]$, where positive values represent charging and negative values represent discharging when the vehicle is available for control. Vehicle availability is described by an indicator $u_t^{\text{EV}} \in \{0,1\}$, where $u_t^{\text{EV}}=1$ indicates that the \gls{EV} is connected to the \gls{EVSE}. The power command is obtained from $a_t^{\text{EV}}$ as in \eqref{eq:ev_command}:
+
+\begin{flalign}\label{eq:ev_command}
+    & p_t^{\text{EV,cmd}} = u_t^{\text{EV}}\,a_t^{\text{EV}}\,\overline{P_t^{\text{EV}}} & \forall t \in \Omega_t
+\end{flalign}
+
+where $\overline{P_t^{\text{EV}}}$ denotes the maximum charger power. The next step is a feasibility clipping stage that limits the command to the available energy and operational limits of the vehicle, as in \eqref{eq:ev_energy_clip}:
+
+\begin{flalign}\label{eq:ev_energy_clip}
+    & \left\{
+    \begin{array}{ll}
+        p_t^{\text{EV,clip}} = \min\Bigl\{p_t^{\text{EV,cmd}},\, \dfrac{\overline{E^{\text{EV}}}-e_t^{\text{EV}}}{\Delta t\,\eta^{\text{EV}}}\Bigr\}
+        & \text{if } p_t^{\text{EV,cmd}} > 0 \\[6pt]
+        p_t^{\text{EV,clip}} = \max\Bigl\{p_t^{\text{EV,cmd}},\, \dfrac{\underline{E^{\text{EV}}}-e_t^{\text{EV}}}{\Delta t}\,\eta^{\text{EV}}\Bigr\}
+        & \text{if } p_t^{\text{EV,cmd}} < 0 \\[6pt]
+        p_t^{\text{EV,clip}} = 0
+        & \text{if } p_t^{\text{EV,cmd}} = 0
+    \end{array}
+    \right.
+    & \forall t \in \Omega_t
+\end{flalign}
+
+Finally, the clipped power is processed by a nonlinear function that relates power limits to the \gls{SoC} of the \gls{EV}. The function is described based on Fig.~\ref{fig:ev-soc-pmax} and is applied as in \eqref{eq:ev_soc_limit}:
+
+\begin{flalign}\label{eq:ev_soc_limit}
+    & p_t^{\text{EV}} = f^{\text{EV}}\Bigl(p_t^{\text{EV,clip}},\,\text{SoC}_t^{\text{EV}}\Bigr) & \forall t \in \Omega_t
+\end{flalign}
+
+where $f^{\text{EV}}(\cdot)$ enforces \gls{SoC}-dependent limits through two pu curves, one for charging and one for discharging, as in \eqref{eq:ev_soc_pmax}:
+
+\begin{flalign}\label{eq:ev_soc_pmax}
+    & \left\{
+    \begin{array}{ll}
+        p_t^{\text{EV}} = \min\Bigl\{p_t^{\text{EV,clip}},\,\overline{P_t^{\text{EV}}}\,f_c^{\text{EV}}(\text{SoC}_t^{\text{EV}})\Bigr\}
+        & \text{if } p_t^{\text{EV,clip}} > 0 \\[6pt]
+        p_t^{\text{EV}} = \max\Bigl\{p_t^{\text{EV,clip}},\,-\overline{P_t^{\text{EV}}}\,f_d^{\text{EV}}(\text{SoC}_t^{\text{EV}})\Bigr\}
+        & \text{if } p_t^{\text{EV,clip}} < 0 \\[6pt]
+        p_t^{\text{EV}} = 0
+        & \text{if } p_t^{\text{EV,clip}} = 0
+    \end{array}
+    \right.
+    & \forall t \in \Omega_t
+\end{flalign}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.5\linewidth]{4-EV_SoC_Pmax.pdf}
+    \caption{Function $f^{\text{EV}}(\cdot)$ for \gls{SoC}-dependent power limiting.}
+    \label{fig:ev-soc-pmax}
+\end{figure}
+
+Stored energy evolves with the applied power. For charging: \eqref{eq:ev_energy_charge} as follows:
+
+\begin{flalign}\label{eq:ev_energy_charge}
+    & e_{t+1}^{\text{EV}} = \min\Bigl\{\overline{E^{\text{EV}}},\, e_t^{\text{EV}} + p_t^{\text{EV}}\,\Delta t\,\eta^{\text{EV}}\Bigr\} & \forall t \in \Omega_t
+\end{flalign}
+
+For discharging: \eqref{eq:ev_energy_discharge} as follows:
+
+\begin{flalign}\label{eq:ev_energy_discharge}
+    & e_{t+1}^{\text{EV}} = \max\Bigl\{\underline{E^{\text{EV}}},\, e_t^{\text{EV}} + \dfrac{p_t^{\text{EV}}\,\Delta t}{\eta^{\text{EV}}}\Bigr\} & \forall t \in \Omega_t
+\end{flalign}
+
+The \gls{SoC} is then \eqref{eq:ev_soc_update}:
+
+\begin{flalign}\label{eq:ev_soc_update}
+    & \text{SoC}_{t+1}^{\text{EV}} = \dfrac{e_{t+1}^{\text{EV}}}{\overline{E^{\text{EV}}}} & \forall t \in \Omega_t
+\end{flalign}
+
+\subsubsection{Power balance}
+
+At each step $t \in \Omega_t$, the environment obtains residential demand $P_t^D$, the applied \gls{BESS} power $p_t^{\text{BESS}}$, the applied \gls{EV} power $p_t^{\text{EV}}$, and the resulting PV power $p_t^{\text{PV}}$. The grid exchange is then computed from the instantaneous power balance, as in \eqref{eq:power_balance}:
+
+\begin{flalign}\label{eq:power_balance}
+    & p_t^{\text{Grid}} = P_t^D + p_t^{\text{BESS}} + p_t^{\text{EV}} - p_t^{\text{PV}} & \forall t \in \Omega_t
+\end{flalign}
+
+where $p_t^{\text{Grid}} > 0$ denotes grid import and $p_t^{\text{Grid}} < 0$ denotes grid injection.
+
+\subsubsection{Grid model and tariffs}
+
+Grid interaction is described by $p_t^{\text{Grid}}$, where $p_t^{\text{Grid}}>0$ represents import and $p_t^{\text{Grid}}<0$ represents injection. The environment uses a single tariff signal $\zeta_t$ to compute the net grid cost, as in \eqref{eq:grid_cost_signal}:
+
+\begin{flalign}\label{eq:grid_cost_signal}
+    & c_t^{\text{Grid}} = \zeta_t \cdot p_t^{\text{Grid}} \cdot \Delta t & \forall t \in \Omega_t
+\end{flalign}
+
+When $\zeta_t>0$, import yields cost and injection yields revenue. When $\zeta_t<0$, import yields a bonus and injection yields a fee.
+
+Five tariff profiles instantiate the signal $\zeta_t$. The flat tariff $\zeta_t^{\text{flat}} = \zeta_0$ provides a constant price reference. The \gls{ToU} tariff $\zeta_t^{\text{tou}}$ is piecewise-constant with high price during peak hours and low price off-peak. The three renewable-dependent dynamic tariffs $\zeta_t^{s}$, $\zeta_t^{w}$, and $\zeta_t^{sw}$ map normalized local solar, wind, and combined renewable availability to inverse pricing, as in \eqref{eq:tariff_dynamic}:
+\begin{flalign}\label{eq:tariff_dynamic}
+    & \zeta_t^{k} = \zeta_{\max} - \bigl(\zeta_{\max}-\zeta_{\min}\bigr)\,\widetilde{R}_t^{k}, \quad k \in \{s, w, sw\}, &
+\end{flalign}
+where $\widetilde{R}_t^{k} \in [0,1]$ is the normalized availability of resource $k$ at time $t$ derived from the weather inputs (irradiance for $s$, wind speed for $w$, and the convex combination for $sw$). Higher renewable availability translates to lower grid prices, providing an explicit incentive for renewable-aware operation.
+
+\subsubsection{Observations and normalization}\label{subsubsec:obs_norm}
+
+At each step $t \in \Omega_t$, the environment returns an observation vector $\mathbf{o}_t \in \mathbb{R}^{d_o}$ that aggregates temporal, electrical, tariff, weather, and lag information. The vector is structured as in \eqref{eq:obs_vector}:
+
+\begin{flalign}\label{eq:obs_vector}
+    & \mathbf{o}_t =
+    \bigl[
+        (\mathbf{o}_t^{\text{time}})^\top,\
+        (\mathbf{o}_t^{\text{power}})^\top,\
+        \zeta_t,\
+        (\mathbf{o}_t^{\text{weather}})^\top,\
+        (\mathbf{o}_t^{\text{aux}})^\top,\
+        (\mathbf{o}_t^{\text{lag}})^\top
+    \bigr]^\top
+    & \forall t \in \Omega_t.
+\end{flalign}
+
+The temporal block $\mathbf{o}_t^{\text{time}}$ encodes minute, hour, day, month, and weekday through sine--cosine pairs, yielding a smooth periodic representation. The electrical block $\mathbf{o}_t^{\text{power}}$ contains the normalized residential demand, the normalized available \gls{PV} power, $\text{SoC}_t^{\text{BESS}}$, $\text{SoC}_t^{\text{EV}}$ (persisted at the last known value when the \gls{EV} is disconnected), and the controllability indicator $u_t^{\text{EV}}$. The tariff scalar $\zeta_t$ is the active grid price. The weather block $\mathbf{o}_t^{\text{weather}}$ contains the min--max-normalized meteorological variables (irradiance components, temperature, humidity, wind speed and direction). The auxiliary block $\mathbf{o}_t^{\text{aux}}$ exposes timing features summarizing the \gls{EV} schedule: time since arrival, time until departure when connected, and time until the next arrival when disconnected, each clipped to a twelve-hour window and normalized to $[0,1]$. The lag block $\mathbf{o}_t^{\text{lag}}$ provides one-day and one-week lagged values of tariff, load, and \gls{PV} availability, summarizing recurrent demand and price patterns without leaking future information.
+
+
+\subsection{Problem Formalization and Markovianity}
+\label{subsec:problem_formalization}
+\label{subsec:mdp_formalization}
+
+The residential energy management problem is formulated in discrete time over $t \in \Omega_t$ with time step $\Delta t$. The simulator described in Section~\ref{subsec:environment} implements the system evolution and returns, at each step, an observation vector $\mathbf{o}_t$ together with the next internal configuration. A Markov decision process is defined as follows:
+\begin{equation}
+\label{eq:mdp_tuple}
+\left(\mathcal{X},\mathcal{A},\mathbb{P},r,\gamma\right),
+\end{equation}
+where $\mathcal{X}$ is the state space, $\mathcal{A}$ is the action space, $\mathbb{P}(x_{t+1}\mid x_t,\mathbf{a}_t)$ is the transition kernel, $r(x_t,\mathbf{a}_t)$ is the one-step reward, and $\gamma \in (0,1)$ is the discount factor. In this formulation, $x_t$ denotes the underlying simulator state used to define $\mathbb{P}(\cdot)$, while decisions are taken based on the observable feature vector $\mathbf{o}_t$.
+
+\subsubsection{State and action}
+\label{subsubsec:mdp_state_action}
+
+The simulator state aggregates the controllable energy variables and the exogenous inputs needed to advance the dynamics, as in \eqref{eq:state_definition}:
+\begin{equation}
+\label{eq:state_definition}
+x_t =
+\Big(
+e^{\text{BESS}}_t,\,
+e^{\text{EV}}_t,\,
+z^{\text{EV}}_t,\,
+P^{D}_t,\,
+P^{\text{PV}}_t,\,
+\tau_t,\,
+w_t,\,
+\kappa_t
+\Big),
+\end{equation}
+where $e^{\text{BESS}}_t$ and $e^{\text{EV}}_t$ are the device energy states, $z^{\text{EV}}_t$ is the \gls{EV} connection indicator, $P^{D}_t$ and $P^{\text{PV}}_t$ are the exogenous demand and available photovoltaic power, $\tau_t$ is the tariff signal, $w_t$ collects weather observables, and $\kappa_t$ is the absolute index in the data stream used to advance exogenous inputs. The controller does not observe $x_t$ directly; its decisions are taken from $\mathbf{o}_t = h(x_t)$ as defined in Section~\ref{subsubsec:obs_norm}.
+
+The control input is the joint command, as in \eqref{eq:action_definition}:
+\begin{equation}
+\label{eq:action_definition}
+\mathbf{a}_t =
+\Big(a^{\text{BESS}}_t,\;a^{\text{EV}}_t,\;a^{\text{PV}}_t\Big)\in\mathcal{A},
+\end{equation}
+where $a^{\text{BESS}}_t, a^{\text{EV}}_t \in [-1,1]$ encode charging and discharging commands and $a^{\text{PV}}_t \in [0,1]$ is the photovoltaic curtailment fraction. The energy dynamics are written compactly as in \eqref{eq:energy_dynamics_compact}:
+\begin{equation}
+\label{eq:energy_dynamics_compact}
+e^{\text{BESS}}_{t+1} = f^{\text{BESS}}\!\left(e^{\text{BESS}}_t, a^{\text{BESS}}_t\right),\qquad
+e^{\text{EV}}_{t+1} = f^{\text{EV}}\!\left(e^{\text{EV}}_t, a^{\text{EV}}_t, z^{\text{EV}}_t, \kappa_t\right),
+\end{equation}
+with $p_t^{\text{PV}}$ obtained from $P_t^{\text{PV}}$ and $a_t^{\text{PV}}$ through \eqref{eq:pv_curtailment}. The grid exchange $p_t^{\text{Grid}}$ follows the instantaneous power balance \eqref{eq:power_balance}.
+
+\subsubsection{Reward}
+\label{subsubsec:mdp_reward}
+
+The one-step reward aggregates the operating-cost components, as in \eqref{eq:reward_definition}:
+\begin{equation}
+\label{eq:reward_definition}
+r(x_t,\mathbf{a}_t)=
+-\Big(
+c^{\text{Grid}}_t
++c^{\text{BESS}}_t
++c^{\text{EV}}_t
++c^{\text{PV}}_t
++g^{\text{Grid}}_t
+\Big),
+\end{equation}
+where $c^{\text{Grid}}_t$ follows \eqref{eq:grid_cost_signal} and the remaining terms are the simulator cost components for \gls{BESS} cycling, \gls{EV} cycling, \gls{PV} curtailment, and grid-limit violations.
+
+\subsubsection{From MDP to POMDP}
+\label{subsubsec:pomdp}
+
+The formulation in \eqref{eq:mdp_tuple}--\eqref{eq:reward_definition} defines a valid \gls{MDP} in the underlying state $x_t$ because the data-stream index $\kappa_t$ deterministically advances the exogenous inputs, fully specifying $\mathbb{P}(x_{t+1}\mid x_t,\mathbf{a}_t)$. The controller, however, accesses only the observation $\mathbf{o}_t = h(x_t)$, and $\mathbf{o}_t$ is not a sufficient statistic for optimal control: cyclic time encodings are not injective in $\kappa_t$, and the \gls{EV} energy state evolves through event-based masking during disconnection. The learning problem is therefore a partially observable Markov decision process,
+\begin{equation}
+\label{eq:pomdp_tuple}
+\left(\mathcal{X},\mathcal{A},\mathbb{P},r,\Omega,h,\gamma\right),
+\end{equation}
+where $\Omega \subseteq \mathbb{R}^{d_o}$ is the observation space defined in Section~\ref{subsubsec:obs_norm} and $h:\mathcal{X}\to\Omega$ is the observation mapping. Optimal decision-making under partial observability typically requires memory or belief-state reasoning, motivating the use of recurrent and attention-based policy architectures considered in the experiments.
+
+\subsubsection{Constrained MDP extension}
+\label{subsubsec:cmdp}
+
+Operational feasibility imposes safety requirements that cannot be captured by the reward alone, in particular the avoidance of \gls{EV} energy states near disconnection that trigger expensive fast-charging on the next arrival. To make these requirements explicit, the formulation in \eqref{eq:pomdp_tuple} is extended to a \gls{CMDP},
+\begin{equation}
+\label{eq:cmdp_tuple}
+\bigl(\mathcal{X}, \mathcal{A}, \mathbb{P}, r, \{c_i, b_i\}_{i=1}^{N_c}, \Omega, h, \gamma\bigr),
+\end{equation}
+where each $c_i(x_t, \mathbf{a}_t) \geq 0$ is a one-step cost associated with constraint $i$, $b_i \geq 0$ is its expected-discounted budget, and $N_c$ is the number of active constraints. A policy $\pi$ is feasible when each cumulative cost stays below its budget, as in \eqref{eq:cmdp_constraint}:
+\begin{equation}
+\label{eq:cmdp_constraint}
+J_{c_i}(\pi) = \underset{\pi}{\mathbb{E}}\!\left[\sum_{t} \gamma^t c_i(x_t,\mathbf{a}_t)\right] \leq b_i, \qquad i = 1,\dots, N_c.
+\end{equation}
+The control objective becomes the constrained problem in \eqref{eq:cmdp_objective}:
+\begin{equation}
+\label{eq:cmdp_objective}
+\pi^\star = \arg\max_{\pi}\; J_r(\pi) \quad \text{s.t.}\quad J_{c_i}(\pi) \leq b_i, \quad i = 1,\dots,N_c,
+\end{equation}
+with $J_r(\pi) = \underset{\pi}{\mathbb{E}}[\sum_t \gamma^t r(x_t,\mathbf{a}_t)]$. The reinforcement learning stage explores two formulations of \eqref{eq:cmdp_objective}: a penalty-based variant that absorbs feasibility costs into the reward signal through fixed weights, and a Lagrangian formulation that learns a multiplier $\lambda_{\mathrm{EV}}$ alongside separate \gls{EV} cost critics for the active \gls{EV} constraint. Both formulations use state-dependent action limits, and validation or testing can additionally apply the safety projection that maps a raw action $\mathbf{a}^{\text{raw}}_t$ into a feasible $\mathbf{a}_t$ before application in the simulator.
+
+
+
+
+% ============================================================================
+\section{Learning framework}
+\label{sec:learning_framework}
+
+This section details the learning-based controllers. The \gls{MILP} teacher (Section~\ref{subsec:milp_teacher}) supplies perfect-foresight expert actions; behavior cloning (Section~\ref{subsec:bc}) regresses them into a sequential policy; and the reinforcement learning stage (Section~\ref{subsec:rl}) trains the controller through direct interaction under two safety-handling formulations and two initialization regimes (from a random initialization, and fine-tuned from the behavior cloning policy). The neural encoders and the feasibility-aware action layer shared by all controllers are described in Section~\ref{subsec:architectures}.
+
+\subsection{Learning pipeline}
+\label{subsec:pipeline}
+
+The framework studies three approaches to the residential energy management problem: a supervised behavior cloning policy distilled from the actions of a \gls{MILP} teacher; a reinforcement learning policy trained directly in the simulator from a randomly initialized actor; and a fine-tuned policy that initializes the reinforcement learning actor with the behavior cloning weights and continues training under the simulator dynamics. Each method is evaluated for every tariff and architecture under a common protocol. Figure~\ref{fig:pipeline} illustrates the three pipelines and their shared components.
+
+The behavior cloning stage produces an actor that approximates the \gls{MILP} teacher on the same observation space used by the reinforcement learning environment, and is evaluated as an independent method. The reinforcement learning stage is run twice for each combination of tariff and architecture: once from a randomly initialized actor and once initialized with the behavior cloning weights. The fine-tuning configuration introduces a critic warm-up phase during which the actor remains frozen, allowing the critic to align with the behavior cloning policy before joint updates resume. The observation-history length $L$ is selected jointly with the other behavior cloning hyperparameters by an Optuna search (Section~\ref{subsubsec:bc_hpo}) and is then propagated into the reinforcement learning configuration, so that the loaded actor and the reinforcement learning encoder share the same temporal context.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{5-Pipeline.pdf}
+    \caption{Training pipelines compared in this work. The \gls{MILP} teacher supervises a behavior cloning policy. Two reinforcement learning regimes are then evaluated for each method: training from a random initialization, and fine-tuning from the behavior cloning weights with a critic warm-up phase. The anticipatory reward shaping is applied during reinforcement learning in both regimes.}
+    \label{fig:pipeline}
+\end{figure}
+
+
+
+\subsection{MILP teacher}
+\label{subsec:milp_teacher}
+
+The \gls{MILP} formulation is used as a supervisory oracle under perfect-foresight assumptions regarding future demand, photovoltaic generation, tariff signals, and \gls{EV} connection events. Similar optimization-based teacher formulations have been used to generate supervised targets for residential energy management~\cite{gomes2023milp-based-c2e,dinh2022supervised-learning-based-5bd}. In this work, the \gls{MILP} produces the behavior-cloning dataset. Most variables and parameters follow the notation of Section~\ref{subsec:environment}; only the additional symbols needed for the optimization formulation are introduced here.
+
+The power balance is given by:
+
+\begin{flalign}\label{eq:milp_power_balance}
+    & P_t^D + p_t^\text{BESS} + p_t^\text{EV}
+    =
+    p_t^\text{Grid} + P_t^\text{PV} \left(1 - \chi_t^\text{PV}\right)
+    && \forall t \in \Omega_t,
+\end{flalign}
+
+where \(\chi_t^\text{PV}\in[0,1]\) is the decision variable that represents the curtailed fraction of photovoltaic generation at time \(t\). The term \(P_t^\text{PV}\left(1-\chi_t^\text{PV}\right)\) is the effectively used photovoltaic power.
+
+The \gls{BESS} net power is obtained from charging and discharging powers:
+
+\begin{flalign}\label{eq:milp-bess-linear-transformation}
+    & p_t^\text{BESS} = p_t^\text{BESS,c} - p_t^\text{BESS,d}
+    && \forall t\in\Omega_t,
+\end{flalign}
+
+where \(p_t^\text{BESS,c}\geq 0\) and \(p_t^\text{BESS,d}\geq 0\) are the charging and discharging powers, respectively. Simultaneous charging and discharging are excluded by:
+
+\begin{flalign}\label{eq:milp-bess-exclusive}
+    & \delta_t^\text{BESS,c} + \delta_t^\text{BESS,d} \leq 1
+    && \forall t\in\Omega_t,
+\end{flalign}
+
+where \(\delta_t^\text{BESS,c}\in\{0,1\}\) and \(\delta_t^\text{BESS,d}\in\{0,1\}\) are binary mode indicators. Power limits are imposed by:
+
+\begin{flalign}\label{eq:milp-bess-charge}
+    & p_t^\text{BESS,c} \leq \overline{P^\text{BESS}}\,\delta_t^\text{BESS,c}
+    && \forall t\in\Omega_t,
+\end{flalign}
+
+\begin{flalign}\label{eq:milp-bess-discharge}
+    & p_t^\text{BESS,d} \leq \overline{P^\text{BESS}}\,\delta_t^\text{BESS,d}
+    && \forall t\in\Omega_t,
+\end{flalign}
+
+with \(\overline{P^\text{BESS}}\) the nominal power. The stored energy evolves under charging and discharging efficiencies and self-discharge:
+
+\begin{flalign}\label{eq:milp-bess-energy}
+    & e_t^\text{BESS}
+    =
+    \left(1-\beta^\text{BESS}\Delta t\right)e_{t-\Delta t}^\text{BESS}
+    +
+    \Delta t
+    \left(
+        \eta^\text{BESS} p_t^\text{BESS,c}
+        -
+        \frac{p_t^\text{BESS,d}}{\eta^\text{BESS}}
+    \right)
+    && \forall t\in\Omega_t \mid t>t_0,
+\end{flalign}
+
+where \(\eta^\text{BESS}\) is the round-trip efficiency, \(\beta^\text{BESS}\) is the self-discharge rate, and \(t_0\) is the initial step. Energy bounds and the initial condition are:
+
+\begin{flalign}\label{eq:milp-bess-dod}
+    & e_t^\text{BESS} \geq \overline{E^\text{BESS}}\left(1-\mathrm{DoD}^\text{BESS}\right)
+    && \forall t\in\Omega_t,
+\end{flalign}
+
+\begin{flalign}\label{eq:milp-bess-energy_max}
+    & e_t^\text{BESS} \leq \overline{E^\text{BESS}}
+    && \forall t\in\Omega_t,
+\end{flalign}
+
+\begin{flalign}\label{eq:milp-bess-energy_initial}
+    & e_{t_0}^\text{BESS} = E_0^\text{BESS}, & 
+\end{flalign}
+
+with \(\overline{E^\text{BESS}}\) the nominal energy capacity, \(\mathrm{DoD}^\text{BESS}\) the maximum depth of discharge, and \(E_0^\text{BESS}\) the initial stored energy.
+
+The \gls{EV} dynamics in the \gls{MILP} are deliberately anticipatory: external fast charging is not available to the teacher, and arrival/departure times and trip-energy requirements are assumed known. Therefore, the teacher must charge the vehicle before departure rather than relying on the fast-charging fallback used by the closed-loop simulator to account for infeasible trips. Connection windows are indexed by \(j\). The net \gls{EV} power is:
+
+\begin{flalign}\label{eq:milp-ev-power_def}
+    & p_t^\text{EV} = p_t^\text{EV,c} - p_t^\text{EV,d}
+    && \forall t\in\Omega_t,
+\end{flalign}
+
+with the exclusivity, power, and energy constraints in \eqref{eq:milp-ev-exclusive}--\eqref{eq:milp-ev-power_zero}:
+
+\begin{flalign}\label{eq:milp-ev-exclusive}
+    & \delta_t^\text{EV,c} + \delta_t^\text{EV,d} \leq 1
+    && \forall t\in\Omega_t,
+\end{flalign}
+
+\begin{flalign}\label{eq:milp-ev-charge_limit}
+    & p_t^\text{EV,c} \leq \overline{P^\text{EV,c}}\,\delta_t^\text{EV,c}
+    && \forall t\in\Omega_t,
+\end{flalign}
+
+\begin{flalign}\label{eq:milp-ev-discharge_limit}
+    & p_t^\text{EV,d} \leq \overline{P^\text{EV,d}}\,\delta_t^\text{EV,d}
+    && \forall t\in\Omega_t.
+\end{flalign}
+
+At arrival, the energy reflects the consumption during the trip immediately before:
+
+\begin{flalign}\label{eq:milp-ev-arrival}
+    & e_{t_{a,j}}^\text{EV}
+    =
+    e_{t_{a,j}-\Delta t}^\text{EV}
+    -
+    \overline{E^\text{EV}}\,\phi_{t_{a,j}}^\text{EV,a}
+    && \forall j = 1,\dots,N_J,
+\end{flalign}
+
+where \(t_{a,j}\) is the arrival of window \(j\), \(N_J\) is the number of connection windows, and \(\phi_{t_{a,j}}^\text{EV,a}\) is the trip-energy fraction. While connected, the energy evolves under efficiency and self-discharge:
+
+\begin{flalign}\label{eq:milp-ev-energy_connected}
+    & e_t^\text{EV}
+    =
+    \left(1-\beta^\text{EV}\Delta t\right)e_{t-\Delta t}^\text{EV}
+    +
+    \Delta t
+    \left(
+        \eta^\text{EV} p_t^\text{EV,c}
+        -
+        \frac{p_t^\text{EV,d}}{\eta^\text{EV}}
+    \right)
+    && \forall t\in\Omega_t \mid t_{a,j} < t \leq t_{d,j},\ \forall j,
+\end{flalign}
+
+where \(t_{d,j}\) is the departure time of window \(j\). Outside connection windows the energy is frozen except for the arrival events of \eqref{eq:milp-ev-arrival}:
+
+\begin{flalign}\label{eq:milp-ev-energy_disconnected}
+    & e_t^\text{EV} = e_{t-\Delta t}^\text{EV}
+    && \forall t\in\Omega_t \mid t \notin \bigcup_{j=1}^{N_J}[t_{a,j},t_{d,j}].
+\end{flalign}
+
+The admissible energy floor while connected is:
+
+\begin{flalign}\label{eq:milp-ev-dod}
+    & e_t^\text{EV} \geq \overline{E^\text{EV}}\left(1-\mathrm{DoD}^\text{EV}\right)
+    && \forall t\in\Omega_t \mid t_{a,j} \leq t \leq t_{d,j},\ \forall j,
+\end{flalign}
+
+To align the teacher with the fast-charging accounting used in the closed-loop environment, the departure requirement is made robust to the next trip. Let \(\sigma^\text{EV,min}\) denote the target minimum \gls{EV} state of charge after a trip. The required departure fraction for window \(j\) is:
+
+\begin{flalign}\label{eq:milp-ev-robust-departure-fraction}
+    & \widehat{\phi}_{t_{d,j}}^\text{EV,d}
+    =
+    \max\left\{
+        \phi_{t_{d,j}}^\text{EV,d},
+        \min\left(1,\phi_{t_{a,j+1}}^\text{EV,a}+\sigma^\text{EV,min}\right)
+    \right\},
+    && \forall j < N_J,
+\end{flalign}
+
+with \(\widehat{\phi}_{t_{d,N_J}}^\text{EV,d}=\phi_{t_{d,N_J}}^\text{EV,d}\) when no subsequent trip is included in the horizon. The hard departure constraint is then:
+
+\begin{flalign}\label{eq:milp-ev-departure}
+    & e_{t_{d,j}}^\text{EV} \geq \overline{E^\text{EV}}\,\widehat{\phi}_{t_{d,j}}^\text{EV,d}
+    && \forall j = 1,\dots,N_J,
+\end{flalign}
+
+where \(\phi_{t_{d,j}}^\text{EV,d}\) is the exogenous minimum-energy fraction required at departure. A nonnegative reserve shortfall variable is retained only as a soft diagnostic penalty while the vehicle is connected:
+
+\begin{flalign}\label{eq:milp-ev-socmin-shortfall}
+    & s_t^\text{EV,min} \geq \overline{E^\text{EV}}\sigma^\text{EV,min}-e_t^\text{EV}
+    && \forall t\in\Omega_t \mid t_{a,j} \leq t \leq t_{d,j},\ \forall j,
+\end{flalign}
+
+\begin{flalign}\label{eq:milp-ev-socmin-shortfall-nonnegative}
+    & s_t^\text{EV,min} \geq 0
+    && \forall t\in\Omega_t.
+\end{flalign}
+
+\gls{EV} power vanishes outside connection windows:
+
+\begin{flalign}\label{eq:milp-ev-power_zero}
+    & p_t^\text{EV} = 0
+    && \forall t\in\Omega_t \mid t \notin \bigcup_{j=1}^{N_J}(t_{a,j},t_{d,j}).
+\end{flalign}
+
+The cost components are the grid energy cost, \gls{BESS} and \gls{EV} cycling costs, photovoltaic curtailment penalty, and \gls{EV} reserve shortfall penalty:
+
+\begin{subequations}\label{eq:milp-costs}
+\begin{align}
+J^\text{Grid}
+&= \sum_{t\in\Omega_t} \zeta_t\, p_t^\text{Grid}\,\Delta t,
+\label{eq:milp-cost-grid} \\
+J^\text{BESS}
+&= \sum_{t\in\Omega_t}
+\frac{C^\text{BESS}}{N^\text{BESS}}\,
+\frac{(p_t^\text{BESS,c}+p_t^\text{BESS,d})\,\Delta t}{\overline{E^\text{BESS}}},
+\label{eq:milp-cost-bess} \\
+J^\text{EV}
+&= \sum_{t\in\Omega_t}
+\frac{C^\text{EV}}{N^\text{EV}}\,
+\frac{(p_t^\text{EV,c}+p_t^\text{EV,d})\,\Delta t}{\overline{E^\text{EV}}},
+\label{eq:milp-cost-ev} \\
+J^\text{PV}
+&= \sum_{t\in\Omega_t} c^\text{PV}\,\chi_t^\text{PV}\,P_t^\text{PV}\,\Delta t,
+\label{eq:milp-cost-pv} \\
+J^\text{EV,min}
+&= \sum_{t\in\Omega_t} c^\text{EV,min}\,s_t^\text{EV,min}\,\Delta t,
+\label{eq:milp-cost-evmin}
+\end{align}
+\end{subequations}
+
+with \(\zeta_t\) the tariff, \(C^\text{BESS}\) and \(C^\text{EV}\) the device degradation costs, \(N^\text{BESS}\) and \(N^\text{EV}\) the equivalent cycle-life parameters, \(c^\text{PV}\) the curtailment penalty, and \(c^\text{EV,min}\) the reserve-shortfall penalty. The complete MILP problem is:
+
+\begin{equation}\label{eq:milp-complete-problem}
+\begin{aligned}
+\min \quad
+& J^\text{Grid} + J^\text{BESS} + J^\text{EV} + J^\text{PV} + J^\text{EV,min} \\
+\text{s.t.} \quad
+& \eqref{eq:milp_power_balance},\ \eqref{eq:milp-bess-linear-transformation}\text{--}\eqref{eq:milp-bess-energy_initial},\ \eqref{eq:milp-ev-power_def}\text{--}\eqref{eq:milp-ev-power_zero}.
+\end{aligned}
+\end{equation}
+
+The MILP is solved exactly with a commercial branch-and-bound solver, yielding the per-step action sequences that constitute the behavior cloning dataset.
+
+% ============================================================================
+\subsection{Behavior cloning}
+\label{subsec:bc}
+
+The behavior cloning stage learns a regression of teacher actions from the observation history $\mathbf{H}_t$. It is evaluated as a stand-alone method and also serves as the initial actor for the fine-tuning variants of the reinforcement learning stage (Section~\ref{subsec:rl}). The observation-history length $L$ is selected by the hyperparameter search of Section~\ref{subsubsec:bc_hpo} and is propagated to the reinforcement learning configuration so that the same temporal context is used at both stages.
+
+The observation history collected at step $t$ over the fixed window of length $L$ is defined as in \eqref{eq:obs_history}:
+
+\begin{flalign}\label{eq:obs_history}
+    \mathbf{H}_t &= \bigl[\mathbf{o}_{t-(L-1)\Delta t},\ldots,\mathbf{o}_{t-\Delta t},\mathbf{o}_t\bigr] && \forall t \in \Omega_t.
+\end{flalign}
+
+\subsubsection{Loss and training}
+\label{subsubsec:bc_loss}
+
+The behavior cloning problem is treated as supervised regression from observation histories to teacher actions, following the standard behavior-cloning framing~\cite{ross2010dagger}. Let \(\mathcal{D}_\text{BC}=\{(\mathbf{H}_t,\mathbf{a}^{\star}_t)\}\) denote the dataset generated by replaying the \gls{MILP} teacher in the simulator observation space, where \(\mathbf{a}^{\star}_t=[a_{t,\star}^\text{BESS},a_{t,\star}^\text{EV},a_{t,\star}^\text{PV}]\). The learned actor predicts the strategic \gls{BESS} and \gls{EV} commands, while photovoltaic curtailment is computed by the actor through a deterministic closed-form rule that enforces the export limit and curtails only when curtailment is economically preferable. Therefore, the supervised loss is restricted to the \gls{BESS} and \gls{EV} dimensions:
+
+\begin{flalign}\label{eq:bc_loss}
+    \mathcal{L}_\text{BC}(\theta_{\mathrm{BC}})
+    =
+    \underset{(\mathbf{H}_t,\mathbf{a}^{\star}_t)\sim\mathcal{D}_\text{BC}}{\mathbb{E}}
+    \left[
+        \left(a_{\theta_{\mathrm{BC}}}^\text{BESS}(\mathbf{H}_t)-a_{t,\star}^\text{BESS}\right)^2
+        +
+        \left(a_{\theta_{\mathrm{BC}}}^\text{EV}(\mathbf{H}_t)-a_{t,\star}^\text{EV}\right)^2
+    \right].
+\end{flalign}
+
+The photovoltaic command is nevertheless logged in the full validation mean-squared error as a diagnostic, since it is part of the executed three-dimensional action vector. Training uses the Adam optimizer with learning rate, batch size, weight decay, and history length selected as described in Section~\ref{subsubsec:bc_hpo}. The dataset is split chronologically into training and validation subsets to avoid leakage from future timesteps into the validation horizon, and early stopping is applied based on the validation loss in \eqref{eq:bc_loss}.
+
+\subsubsection{Hyperparameter optimization}
+\label{subsubsec:bc_hpo}
+
+The behavior cloning hyperparameters are tuned with an automated search using Optuna~\cite{akiba2019optuna}. A Tree-structured Parzen Estimator sampler explores the joint space of the learning rate, batch size, weight-decay regularization, and the observation-history length $L$. The actor is trained on the dataset of teacher actions generated by the MILP formulation of Section~\ref{subsec:milp_teacher}, and after every trial the validation loss is computed by comparing predicted actions to teacher actions on a held-out chronological split using mean squared error on the \gls{BESS} and \gls{EV} command dimensions. Trial pruning based on a median rule discards trials whose validation loss falls behind early, reducing the total search cost.
+
+Including $L$ in the search space is a deliberate choice: the temporal context required by the sequential encoders is architecture-dependent, and fixing $L$ a priori risks either over-providing context or under-providing it (losing the relevant horizon for tariff and \gls{EV} dynamics). The optimization therefore selects $(L^{\star}, \mathrm{lr}^{\star}, B^{\star}, \lambda_{wd}^{\star})$ jointly per architecture and tariff.
+
+The configuration that achieves the lowest validation loss is retrained for the full epoch budget and saved as the behavior cloning artifact, together with its selected hyperparameters. This artifact serves both as a stand-alone supervised baseline and as the initialization point for the fine-tuning variants of Section~\ref{subsec:rl}; the selected $L^{\star}$ is propagated into the reinforcement learning configuration so that the loaded actor and the reinforcement learning encoder share the same temporal context.
+
+
+% ============================================================================
+\subsection{Reinforcement learning}
+\label{subsec:rl}
+
+The reinforcement learning stage trains the actor through direct interaction with the simulator. Two safety-handling formulations are considered: a penalty-based variant that keeps a single scalar reward with feasibility penalties embedded in it (Section~\ref{subsubsec:sac_penalty}), and a constrained-\gls{MDP} Lagrangian variant with separate \gls{EV} cost critics (Section~\ref{subsubsec:sac_cmdp}). Each formulation is evaluated under two initialization regimes: training from a randomly initialized actor, and fine-tuning from the behavior-cloning checkpoint (Section~\ref{subsubsec:ft_protocol}). All variants share the same \gls{SAC} backbone~\cite{haarnoja2018soft}: twin reward critics, automatic entropy tuning, $N$-step returns, interleaved online updates during rollout, and soft target updates. All learning objectives below are written as losses to be minimized and are denoted by $\mathcal{L}$.
+
+The actor is denoted by $\pi_\theta(\cdot|\mathbf{H}_t)$, where $\theta$ contains the actor parameters and $\mathbf{H}_t$ is the observation history used by the encoder. After applying action $a_t$, the environment returns reward $r_t$, the next observation $\mathbf{o}_{t+\Delta t}$, and a termination flag. The next history is:
+
+\begin{flalign}\label{eq:next_history}
+    & \mathbf{H}_{t+\Delta t} = \bigl[\mathbf{o}_{t-(L-2)\Delta t},\ldots,\mathbf{o}_t,\mathbf{o}_{t+\Delta t}\bigr] && \forall t \in \Omega_t.
+\end{flalign}
+
+The environment reward is defined with the maximization sign convention: it is the negative of the operating cost, so maximizing return is equivalent to minimizing cumulative cost. During training, reward shaping and reward scaling are applied before the transition is stored:
+
+\begin{flalign}\label{eq:train_reward_scale}
+    & r_t^{\text{train}} =
+    r_t + \gamma\Phi(\mathbf{H}_{t+\Delta t})-\Phi(\mathbf{H}_t),
+    \qquad
+    \tilde r_t = \kappa r_t^{\text{train}},
+    \qquad
+    \kappa = 0.1.
+\end{flalign}
+
+When shaping is disabled, $\Phi(\cdot)=0$. The reward critics learn from the scaled reward $\tilde r_t$, whereas the \gls{EV} cost used by the \gls{CMDP} variant is not reward-scaled. Evaluation always uses the original environment reward $r_t$.
+
+For a minibatch sample indexed by $j\sim\mathcal{B}$, the replay buffer returns $(\mathbf{H}_j,a_j,R_j^{(N)},C_{\mathrm{EV},j}^{(N)},\mathbf{H}'_j,d_j,\Gamma_j)$, where $R_j^{(N)}$ is the discounted $N$-step return built from $\tilde r_t$, $C_{\mathrm{EV},j}^{(N)}$ is the discounted $N$-step \gls{EV} cost, $d_j$ is the termination indicator, and $\Gamma_j$ is the effective bootstrapping discount for the sampled transition. The next action used in the Bellman target is sampled explicitly from the current policy:
+
+\begin{flalign}\label{eq:target_policy_sample}
+    & a'_j \sim \pi_\theta(\cdot|\mathbf{H}'_j).
+\end{flalign}
+
+The two reward critics are denoted by $Q_{r,1}^{\phi_1}$ and $Q_{r,2}^{\phi_2}$, with target critics $Q_{r,1}^{\bar{\phi}_1}$ and $Q_{r,2}^{\bar{\phi}_2}$. The clipped double-Q reductions are:
+
+\begin{flalign}\label{eq:reward_q_min_online}
+    & \widetilde{Q}_r^{\phi}(\mathbf{H}_j,a_j)
+    =
+    \min_{m\in\{1,2\}}
+    Q_{r,m}^{\phi_m}(\mathbf{H}_j,a_j),
+\\
+    & \widetilde{Q}_r^{\bar{\phi}}(\mathbf{H}'_j,a'_j)
+    =
+    \min_{m\in\{1,2\}}
+    Q_{r,m}^{\bar{\phi}_m}(\mathbf{H}'_j,a'_j).
+\end{flalign}
+
+The reward target and critic loss are:
+
+\begin{flalign}\label{eq:critic_target}
+    & y_{r,j}
+    =
+    R_j^{(N)}
+    +
+    (1-d_j)\Gamma_j
+    \left[
+        \widetilde{Q}_r^{\bar{\phi}}(\mathbf{H}'_j,a'_j)
+        -
+        \alpha\log\pi_\theta(a'_j|\mathbf{H}'_j)
+    \right],
+\\
+\label{eq:critic_loss}
+    & \mathcal{L}_{Q_r}(\phi_1,\phi_2)
+    =
+    \underset{j\sim\mathcal{B}}{\mathbb{E}}
+    \left[
+        \sum_{m=1}^{2}
+        \left(
+            Q_{r,m}^{\phi_m}(\mathbf{H}_j,a_j)
+            -
+            y_{r,j}
+        \right)^2
+    \right].
+\end{flalign}
+
+The entropy coefficient is parameterized by $\eta=\log\alpha$, with $\alpha=e^\eta$, and is updated by minimizing:
+
+\begin{flalign}\label{eq:alpha_loss}
+    & \mathcal{L}_{\alpha}(\eta)
+    =
+    -
+    \underset{j\sim\mathcal{B}}{\mathbb{E}}
+    \left[
+    \underset{a_j\sim\pi_\theta(\cdot|\mathbf{H}_j)}{\mathbb{E}}
+    \left[
+        \eta
+        \left(
+            \log\pi_\theta(a_j|\mathbf{H}_j)
+            +
+            \mathcal{H}_{\mathrm{target}}
+        \right)
+    \right]
+    \right].
+\end{flalign}
+
+In implementation, the inner expectation over $a_j \sim \pi_\theta(\cdot|\mathbf{H}_j)$ is estimated with one sampled action per batch element. The log-probability term is computed for the transformed action and includes the $\tanh$ correction and the scaling to state-dependent physical limits; it is not replaced by the analytic entropy of the pre-squashed Gaussian. Target critics are initialized from the online critics and updated by Polyak averaging, $\bar{\phi}_m \leftarrow \tau\phi_m+(1-\tau)\bar{\phi}_m$.
+
+\subsubsection{Penalty-based SAC variant}
+\label{subsubsec:sac_penalty}
+
+In the penalty-based variant, feasibility is priced directly in the scalar reward of Section~\ref{subsec:problem_formalization}: grid-limit excess, \gls{EV} reserve shortfall, and other operational penalties are already embedded in $r_t$. The method is therefore a vanilla \gls{SAC} controller over the shaped and scaled training reward, without cost critics, Lagrange multipliers, \gls{KL} anchors, or a projection residual in the actor loss. The actor loss is:
+
+\begin{flalign}\label{eq:actor_loss_penalty}
+    & \mathcal{L}_{\pi}^{\mathrm{Penalty}}(\theta)
+    =
+    \underset{j\sim\mathcal{B}}{\mathbb{E}}
+    \left[
+    \underset{a_j\sim\pi_\theta(\cdot|\mathbf{H}_j)}{\mathbb{E}}
+    \left[
+        \alpha\log\pi_\theta(a_j|\mathbf{H}_j)
+        -
+        \widetilde{Q}_r^{\phi}(\mathbf{H}_j,a_j)
+    \right]
+    \right],
+\end{flalign}
+
+where the minus sign before $\widetilde{Q}_r^\phi$ appears because the loss is minimized while the return is maximized. Safety projection can still be applied during validation and testing as an execution guard, but it is not a separate optimization term in this variant.
+
+\subsubsection{CMDP-Lagrangian SAC variant}
+\label{subsubsec:sac_cmdp}
+
+The constrained-\gls{MDP} variant separates the economic reward from the active feasibility cost~\cite{tessler2018reward}. In the present implementation, the active constraint is the \gls{EV} departure-risk cost, denoted by $c_{\mathrm{EV},t}$. It is learned by two cost critics $Q_{\mathrm{EV},1}^{\psi_1}$ and $Q_{\mathrm{EV},2}^{\psi_2}$, with target networks $Q_{\mathrm{EV},1}^{\bar{\psi}_1}$ and $Q_{\mathrm{EV},2}^{\bar{\psi}_2}$. The online reduction is:
+
+\begin{flalign}\label{eq:cost_q_min_online}
+    & \widetilde{Q}_{\mathrm{EV}}^{\psi}(\mathbf{H}_j,a_j)
+    =
+    \min_{m\in\{1,2\}}
+    Q_{\mathrm{EV},m}^{\psi_m}(\mathbf{H}_j,a_j).
+\end{flalign}
+
+The cost target and cost-critic loss are:
+
+\begin{flalign}\label{eq:cost_critic_target}
+    & y_{\mathrm{EV},j}
+    =
+    C_{\mathrm{EV},j}^{(N)}
+    +
+    (1-d_j)\Gamma_j
+    \left[
+        \min_{m\in\{1,2\}}
+        Q_{\mathrm{EV},m}^{\bar{\psi}_m}(\mathbf{H}'_j,a'_j)
+    \right]_+,
+\\
+    & \mathcal{L}_{Q_{\mathrm{EV}}}(\psi_1,\psi_2)
+    =
+    \underset{j\sim\mathcal{B}}{\mathbb{E}}
+    \left[
+        \sum_{m=1}^{2}
+        \left(
+            Q_{\mathrm{EV},m}^{\psi_m}(\mathbf{H}_j,a_j)
+            -
+            y_{\mathrm{EV},j}
+        \right)^2
+    \right].
+\end{flalign}
+
+The actor maximizes the reward while penalizing the positive estimated \gls{EV} cost-to-go through a learned multiplier $\lambda_{\mathrm{EV}}$:
+
+\begin{flalign}\label{eq:actor_loss_cmdp}
+    & \mathcal{L}_{\pi}^{\mathrm{CMDP}}(\theta)
+    =
+    \underset{j\sim\mathcal{B}}{\mathbb{E}}
+    \left[
+    \underset{a_j\sim\pi_\theta(\cdot|\mathbf{H}_j)}{\mathbb{E}}
+    \left[
+        \alpha
+        \log\pi_\theta(a_j|\mathbf{H}_j)
+        -
+        \widetilde{Q}_r^{\phi}(\mathbf{H}_j,a_j)
+        +
+        \lambda_{\mathrm{EV}}
+        \left[
+            \widetilde{Q}_{\mathrm{EV}}^{\psi}(\mathbf{H}_j,a_j)
+        \right]_+
+    \right]
+    \right],
+\end{flalign}
+
+where $[\cdot]_+=\max\{\cdot,0\}$. The multiplier is parameterized in log-space as $\zeta=\log\lambda_{\mathrm{EV}}$, $\lambda_{\mathrm{EV}}=e^\zeta$, and is updated with:
+
+\begin{flalign}\label{eq:lambda_loss}
+    & \mathcal{L}_{\lambda_{\mathrm{EV}}}(\zeta)
+    =
+    -
+    \underset{j\sim\mathcal{B}}{\mathbb{E}}
+    \left[
+        \zeta
+        \left(
+            \left[
+                \widetilde{Q}_{\mathrm{EV}}^{\psi}(\mathbf{H}_j,a_j)
+            \right]_+
+            -
+            b_{\mathrm{EV}}
+        \right)
+    \right].
+\end{flalign}
+
+The budget $b_{\mathrm{EV}}$ is a hyperparameter expressed in the scale of the normalized \gls{EV} cost. The contrast with the penalty variant is therefore explicit: the penalty controller folds feasibility into the scalar reward with fixed reward weights, whereas the \gls{CMDP} controller learns $\lambda_{\mathrm{EV}}$ online and increases pressure when the estimated \gls{EV} cost-to-go exceeds its budget.
+
+\subsubsection{Behavior-cloning fine-tuning protocol}
+\label{subsubsec:ft_protocol}
+
+Both safety-handling variants are evaluated under two initialization regimes: from a random actor (\emph{from-scratch}) and from the behavior-cloning checkpoint (\emph{fine-tuning}, \gls{FT}). Naively loading the \gls{BC} actor into \gls{SAC} can destroy it within a few updates, because the critics are initially random, automatic entropy tuning pushes the near-deterministic \gls{BC} policy toward higher stochasticity, and the replay buffer starts empty~\cite{nair2018overcoming}. The \gls{FT} protocol therefore changes only the initialization and update schedule:
+
+\begin{enumerate}
+    \item \textbf{Initialization.} The actor is loaded from the \gls{BC} checkpoint; reward critics, target reward critics, and, for \gls{CMDP}, \gls{EV} cost critics remain randomly initialized. The entropy coefficient is initialized at a smaller value and the target entropy is reduced to tolerate the lower-entropy \gls{BC} policy.
+    \item \textbf{Critic alignment.} During the initial update interval, actor and temperature updates are delayed while the critics are updated from transitions generated by the loaded \gls{BC} policy. This lets the reward and cost critics approach the value landscape around $\pi_{\mathrm{BC}}$ before the actor receives gradients.
+    \item \textbf{Joint refinement.} After the actor-update start episode, actor, critic, entropy, and, for \gls{CMDP}, multiplier updates proceed jointly. The actor learning rate is reduced relative to from-scratch training to slow drift from the \gls{BC} initialization.
+\end{enumerate}
+
+No \gls{KL} anchor is used in the unified fine-tuning runs. This warm-start is the mechanism by which the framework tests whether expert initialization can escape the from-scratch critic-drift ceiling, as quantified in Section~\ref{sec:results}.
+
+\subsubsection{Stabilization mechanisms}
+\label{subsubsec:stabilizers}
+
+Three mechanisms are evaluated as controlled ablations for their ability to remove the critic drift in the \emph{from-scratch} setting. Each is toggled independently and none alters the safety treatment; their effect is reported in Section~\ref{subsec:res_ablation}.
+
+\paragraph{Anticipatory reward shaping.}
+\label{subsubsec:shaping}
+The \gls{EV} fast-charging cost is sparse and delayed: it materializes only when the vehicle reconnects with a low \gls{SoC}, often hundreds of steps after the decision that caused it, so the credit-assignment chain through the Bellman backup is long. Potential-based shaping~\cite{ng1999policy} densifies this signal without changing the optimal policy: for any potential $\Phi$,
+
+\begin{flalign}\label{eq:shaping}
+    & r_t^{\text{train}} = r_t + \gamma\,\Phi(\mathbf{H}_{t+\Delta t}) - \Phi(\mathbf{H}_t),
+\end{flalign}
+
+leaves the optimal policy invariant, since the cumulative shaped return differs from the raw return only by the boundary term induced by $\Phi$. The potential is an anticipatory estimate of upcoming fast-charging cost, derived from the physical structure of the system. With shaping weight $\omega>0$, fast-charging tariff multiplier $p_\text{FC}$, target arrival \gls{SoC} $\sigma^\text{EV}$, and typical trip consumption $\Delta\sigma$, when the \gls{EV} is connected and controllable the foreseeable deficit at departure is
+
+\begin{flalign}\label{eq:shaping_connected}
+    & \text{cost} = \overline{E}^\text{EV} p_\text{FC}\,
+    \max\!\Big(0,\ \sigma^\text{EV} - \text{SoC}^\text{EV}_t - \tfrac{\overline{P}_c^\text{EV}\,\Delta t_\text{dep}}{\overline{E}^\text{EV}}\Big),
+\end{flalign}
+
+with $\Delta t_\text{dep}$ the time to departure; when disconnected, the predicted arrival deficit is offset by the available \gls{BESS} reserve and weighted by arrival urgency $1-t_\text{arr}$,
+
+\begin{flalign}\label{eq:shaping_disconnected}
+    & \text{cost} = p_\text{FC}\,(1-t_\text{arr})\,
+    \max\!\Big(0,\ \overline{E}^\text{EV}\big[\sigma^\text{EV}-\max(\sigma_\text{crit},\,\text{SoC}^\text{EV}_t-\Delta\sigma)\big] - \overline{E}^\text{BESS}\max(0,\text{SoC}^\text{BESS}_t-\underline{\text{SoC}}^\text{BESS})\Big),
+\end{flalign}
+
+and $\Phi(\mathbf{H}_t)=-\omega\,\text{cost}$. The critical-\gls{SoC} floor $\sigma_\text{crit}$ in the disconnected branch reflects that mid-trip fast charging returns the vehicle to at least $\sigma_\text{crit}$. Shaping affects only the reward stored for training and therefore the calculation of $R_j^{(N)}$; evaluation always reports the original reward, preserving comparability with the baselines.
+
+\paragraph{Prior-data injection.}
+Following the efficient-online-RL-with-offline-data approach~\cite{ball2023efficient}, a fixed fraction $\rho_{\mathrm{prior}}$ of each minibatch is drawn from a buffer of rule-based \gls{RB}/\gls{RBS} demonstrations and the remainder is drawn from the online replay buffer. The actor never imitates the demonstrations; they only ground the critics' value estimates on a feasible, storage-active manifold throughout training, which is intended to keep the Bellman target from collapsing as the live policy drifts.
+
+\paragraph{Lagged target policy.}
+The continuation action $a'_j$ in the Bellman target of \eqref{eq:critic_target} is sampled from an exponential-moving-average copy of the policy rather than the live actor. Decoupling the target's continuation from a possibly degrading live policy is intended to prevent the target value of good transitions from collapsing together with the policy.
+
+These three mechanisms, together with the two safety-handling formulations and the two initialization regimes, define the method space evaluated in Section~\ref{sec:results}.
+
+% ============================================================================
+\subsection{Neural architectures}
+\label{subsec:architectures}
+
+The three sequential encoders evaluated in this work --- gated recurrent unit (\gls{GRU}), multi-head attention (\gls{MHA}), and temporal convolutional network (\gls{TCN}) --- share the same policy and critic heads. They differ only in the encoder used to map the observation history $\mathbf{H}_t \in \mathbb{R}^{L \times d_o}$ into a fixed-size representation:
+\begin{flalign}
+& \mathbf{h}_t = f_{\mathrm{enc}}(\mathbf{H}_t),
+\qquad
+\mathbf{h}_t \in \mathbb{R}^{d_h}.
+& \label{eq:encoder_mapping}
+\end{flalign}
+Here, $\mathbf{H}_t$ is the sequence of observations available to the controller at time $t$, $L$ is the history length, $d_o$ is the observation dimension, and $\mathbf{h}_t$ is the latent representation used by the actor and critics. The hidden and head dimensions are kept equal across variants to isolate the effect of the temporal inductive bias.
+
+\subsubsection{Feasibility-aware actor}
+\label{subsubsec:feasibility_aware_actor}
+
+The actor generates control commands from the encoded observation history. Let $\theta$ denote the actor parameters. The actor outputs the mean $\boldsymbol{\mu}_{\theta,t}$ and standard deviation $\boldsymbol{\sigma}_{\theta,t}$ of a latent Gaussian distribution for the controllable storage commands. Let $\mathcal{J}=\{\text{BESS},\text{EV}\}$ denote the set of controllable storage devices. For each device $j\in\mathcal{J}$, the admissible normalized bounds $a_t^{j,\min}$ and $a_t^{j,\max}$ are computed from the current physical state, including \gls{SoC}, device availability, energy capacity, charging and discharging limits, efficiency, and self-discharge. These bounds define the feasible action interval for each storage device at time $t$.
+
+The stochastic branch samples a latent action as:
+\begin{flalign}
+& \boldsymbol{\xi}_t \sim
+\mathcal{N}\!\left(
+\boldsymbol{\mu}_{\theta,t},
+\operatorname{diag}(\boldsymbol{\sigma}_{\theta,t}^2)
+\right),
+\qquad
+\mathbf{z}_t=\tanh(\boldsymbol{\xi}_t).
+& \label{eq:actor_latent_sampling}
+\end{flalign}
+In this notation, $\boldsymbol{\xi}_t$ is the latent Gaussian sample and $\mathbf{z}_t$ is the bounded command obtained after the $\tanh$ transformation. The storage actions are then remapped to their state-dependent feasible intervals:
+\begin{flalign}
+& a_t^j
+=
+a_t^{j,\min}
++
+\frac{z_t^j+1}{2}
+\left(a_t^{j,\max}-a_t^{j,\min}\right),
+\qquad
+j\in\mathcal{J}.
+& \label{eq:actor_feasible_remap}
+\end{flalign}
+Thus, the \gls{BESS} and \gls{EV} commands are stochastic but constrained by the current physical state. The \gls{PV} curtailment command is not sampled from the Gaussian policy; it is deterministically recovered from the selected storage actions and the grid/export feasibility condition.
+
+The deterministic branch used during evaluation follows the same mapping, but replaces the latent sample $\boldsymbol{\xi}_t$ with the policy mean $\boldsymbol{\mu}_{\theta,t}$. The resulting normalized action vector is denoted by $\mathbf{a}_t$, while the corresponding physical power vector is denoted by $\mathbf{x}_t$. The log-probability term $\log\pi_\theta(\mathbf{a}_t|\mathbf{H}_t)$ used in the entropy-regularized losses is computed for the transformed storage actions, including the correction associated with the $\tanh$ transformation and the state-dependent scaling. The corresponding change-of-variable expression is reported in Appendix~\ref{app:actor_logprob}.
+
+\subsubsection{Safety projection}
+\label{subsubsec:safety_projection}
+
+A safety projection is used as a feasibility guard against residual grid infeasibility. Let
+$\bar{\mathbf{x}}_t=
+[\bar{P}_t^{\text{BESS}},\bar{P}_t^{\text{EV}},\bar{Y}_t^{\text{PV}}]^\top$
+denote the physical power vector obtained from the actor output before the grid projection. In this vector, $\bar{P}_t^{\text{BESS}}$ is the \gls{BESS} power, $\bar{P}_t^{\text{EV}}$ is the \gls{EV} power, and $\bar{Y}_t^{\text{PV}}\leq 0$ is the net \gls{PV} contribution. Positive storage power denotes charging, while negative storage power denotes discharging. The \gls{PV} term is non-positive because local generation reduces the net grid demand.
+
+Let $\underline{\mathbf{x}}_t$ and $\overline{\mathbf{x}}_t$ be the lower and upper physical bounds of the three-dimensional vector
+$\mathbf{x}_t=[P_t^{\text{BESS}},P_t^{\text{EV}},Y_t^{\text{PV}}]^\top$.
+Let $\mathbf{u}_t=[1,1,1]^\top$ be the aggregation vector that sums the three physical power components. Although its entries are constant, the subscript $t$ is kept to emphasize that the aggregation is applied to the time-indexed physical action vector $\mathbf{x}_t$. The grid-feasible interval for this aggregated power is defined by the grid import/export limits after subtracting the local load.
+
+The projected physical vector is obtained by solving:
+\begin{flalign}
+& \mathbf{x}_t^\star
+=
+\arg\min_{\mathbf{x}_t}
+\left\|
+\mathbf{x}_t-\bar{\mathbf{x}}_t
+\right\|_2^2
+\\
+& \text{s.t.}\quad
+\underline{\mathbf{x}}_t\leq \mathbf{x}_t\leq \overline{\mathbf{x}}_t,
+\qquad
+\underline{P}^{\text{Grid}}-P_t^{\text{Load}}
+\leq
+\mathbf{u}_t^\top\mathbf{x}_t
+\leq
+\overline{P}^{\text{Grid}}-P_t^{\text{Load}}.
+& \label{eq:compact_safety_projection}
+\end{flalign}
+
+This projection minimally modifies the actor output while enforcing device-level and grid-level feasibility. The projected physical vector $\mathbf{x}_t^\star$ is then mapped back to the normalized action vector $\mathbf{a}_t$ before being applied to the environment. The full projection construction, including the scalar-shift solution and inverse mapping, is provided in Appendix~\ref{app:feasibility_projection}.
+
+The projection residual can also be logged as a diagnostic violation signal, measuring the discrepancy between the actor output and its feasible projection. In the unified experiments reported here, this residual is not used as an additional actor-loss term in the penalty-based \gls{SAC} variant.
+
+\subsubsection{Critic architecture}
+\label{subsubsec:critic_arch}
+
+The reward critics follow the clipped double-Q structure used in \gls{SAC} and \gls{TD3}-style overestimation control~\cite{fujimoto2018addressing,haarnoja2018soft}. The two online reward critics, $Q_{r,1}^{\phi_1}$ and $Q_{r,2}^{\phi_2}$, use the same encoder family as the actor but have independent parameters. Each critic maps the observation history to a latent representation, concatenates it with the candidate action, and applies an \gls{MLP} head to produce a scalar value:
+
+\begin{flalign}\label{eq:critic_architecture}
+    & \mathbf{h}_{r,m,j}=f_{\mathrm{enc},r,m}^{\phi_m}(\mathbf{H}_j),
+    \qquad
+    Q_{r,m}^{\phi_m}(\mathbf{H}_j,a_j)
+    =
+    f_{Q,r,m}^{\phi_m}\!\left([\mathbf{h}_{r,m,j},a_j]\right),
+    \qquad m\in\{1,2\}.
+\end{flalign}
+
+For the \gls{CMDP} variant, the \gls{EV} cost critics $Q_{\mathrm{EV},1}^{\psi_1}$ and $Q_{\mathrm{EV},2}^{\psi_2}$ use the same architecture and are trained on the \gls{EV} cost targets of \eqref{eq:cost_critic_target}. The penalty-based variant does not instantiate cost critics.
+
+% ============================================================================
+% ============================================================================
+\section{Experimental setup}
+\label{sec:experimental_setup}
+
+This section describes the training and evaluation protocol (Section~\ref{subsec:protocol}), the consolidated hyperparameters, the validation and held-out test split, and the rule-based baselines used for comparison.
+
+\subsection{Training and evaluation protocol}
+\label{subsec:protocol}
+
+% TODO: intro paragraph
+%   - Two-stage pipeline: BC pretraining (per architecture and tariff) -> RL refinement
+%     (per architecture, tariff, and method variant)
+%   - Distributed across multiple machines, one architecture per machine
+%   - Skip-if-done markers allow incremental resumption
+%   - Refer back to Section~\ref{subsec:pipeline} for the overall flow
+
+\subsubsection{Hyperparameters}
+\label{subsubsec:protocol_hp}
+
+% TODO: write this subsection, providing a single consolidated table
+%   - Columns: parameter | symbol | BC | SAC penalty (scratch) | SAC penalty (FT)
+%              | SAC CMDP (scratch) | SAC CMDP (FT)
+%   - Rows include: gamma, n_step, batch_size, buffer_size, episode count,
+%     warmup_episodes, learning rates (actor, critic, alpha, lambda),
+%     tau, ema_tau, history_len L, observation dim, hidden_dim, head_dim,
+%     reward_scale, target_entropy, init_alpha, shaping_omega, shaping_typical_drop,
+%     cost budgets b_i (CMDP only), prior-data ratio, EMA-backup flag,
+%     actor_update_start_episode (FT extended for critic warm-up),
+%     bc_init_checkpoint (FT only)
+%   - Distinguish per-method and per-initialization values where they differ.
+%     Highlight the FT-specific changes: init_alpha=0.01 vs 0.3, target_entropy
+%     lower, actor_lr halved, actor_update_start_episode extended to allow
+%     critic warm-up.
+%   - Reference \cite{akiba2019optuna} for the HPO procedure used in the BC stage.
+
+\subsubsection{Validation and test protocol}
+\label{subsubsec:protocol_eval}
+
+% TODO: write this subsection
+%   - Validation: 24 monthly windows (12 CY current year + 12 WY warm year) every episode
+%     during training. Aggregates: mean reward, robust reward (mean of two worst windows),
+%     worst reward
+%   - Checkpoint policy: best (mean), best_robust, best_worst, last
+%   - Test: annual evaluation, 24 windows x 4 checkpoints x 2 modes (raw vs safety-projected)
+%     x 5 tariffs. Reported in absolute units ($/year, kWh/year) for comparability with
+%     classical baselines
+%   - Methods compared at evaluation: BC, SAC penalty (scratch/FT), SAC CMDP (scratch/FT),
+%     plus the rule-based baselines (RB, RBS). The MILP of Section~\ref{subsec:milp_teacher}
+%     is used only to generate the BC dataset, not as an evaluation reference (it is
+%     infeasible on some held-out windows that require unavoidable EV fast charging).
+%   - Metrics: cost ($/year), % cost reduction over RBS, feasibility violation rate,
+%     BESS cycle count, EV fast-charging events, PV self-consumption
+
+\subsubsection{Baselines}
+\label{subsubsec:protocol_baselines}
+
+% TODO: write this subsection
+%   - Rule-based (RB): heuristic priority list - use PV first, store excess in BESS,
+%     charge EV during off-peak hours. No learning, no foresight
+%   - Rule-based with safety (RBS): same as RB plus a feasibility projection
+%   - The learning approaches under comparison are: BC alone, SAC penalty
+%     (scratch and FT), and SAC CMDP (scratch and FT), benchmarked against the
+%     RB and RBS rule-based baselines.
+%   - Cite \cite{abdelaal2021integration-d54, rehman2026iot-4dc} for rule-based residential references
+
+
+
+
+
+\section{Results}
+\label{sec:results}
+
+% Skeleton — fill once the 3-machine grid and economic-metric extraction are
+% complete. Lead each subsection with the headline number, then the
+% table/figure, then one interpretation sentence.
+
+\subsection{Cost performance across methods and tariffs}
+\label{subsec:res_method_tariff}
+% Core matrix: BC | SAC-penalty (scratch/FT) | SAC-CMDP (scratch/FT) × 5 tariffs.
+% Annual operating cost ($/year) on the held-out test year and % cost reduction
+% over the RBS rule-based baseline.
+% Headline: which formulation wins per tariff regime, and that warm-start (FT)
+% achieves the largest cost reduction, which from-scratch RL cannot match.
+
+\subsection{Architecture comparison}
+\label{subsec:res_arch}
+% GRU vs MHA vs TCN under identical training/eval. Isolate the effect
+% of the sequence encoder's inductive bias. Headline: GRU leads for CMDP.
+
+\subsection{Stabilization ablations}
+\label{subsec:res_ablation}
+% Anticipatory shaping (omega sweep), prior-data injection (RLPD), lagged EMA
+% backup. Report as ablations: none of these from-scratch stabilizers fully
+% removes the critic drift. This subsection operationalizes the central thesis.
+
+\subsection{Comparison against rule-based baselines}
+\label{subsec:res_bounds}
+% Compare every learned controller against the RB and RBS rule-based baselines:
+% absolute $/year, % cost reduction over RBS, and the from-scratch vs FT gap.
+
+\subsection{Constraint satisfaction and robustness}
+\label{subsec:res_feasibility}
+% Grid-violation rate, EV fast-charging frequency, mean-vs-worst-case reward
+% Pareto. Show the safety projection keeps violations ~0 at deployment.
+
+\subsection{Operational analysis}
+\label{subsec:res_operation}
+% BESS/EV dispatch profiles over representative weeks from operations/*.csv.gz.
+% Contrast a from-scratch (drifted) vs FT (warm-started) policy timing to the tariff.
+
+
+
+
+
+% ============================================================================
+\section{Discussion}
+\label{sec:discussion}
+% - Decision guidance: when penalty vs CMDP, scratch vs FT, per tariff regime.
+% - Why from-scratch DRL hits the critic-drift ceiling and why BC warm-start
+%   (or constraint-grounded prior) is what yields the strongest controller.
+% - Practical deployment considerations (safety projection, retraining cadence).
+% - Limitations: single building, simulated weather year, seed variance.
+
+% ============================================================================
+\section{Conclusion}
+\label{sec:conclusion}
+% - Restate the thesis and the single strongest quantitative result.
+% - One sentence on each contribution as delivered.
+% - Future work: multi-building, online adaptation, hardware-in-the-loop.
+
+
+\section*{CRediT authorship contribution statement}
+% \textbf{Lucas Zenichi Terada:} Writing - original draft, Methodology, Conceptualization, Visualization. \textbf{Luis A. Oroya:} Writing -- review \& editing, Conceptualization, Visualization. \textbf{Juan C. Cortez:} Writing -- review \& editing, Methodology, Conceptualization, Visualization. \textbf{Marina Lavorato} Writing -- review \& editing, Conceptualization, Supervision. \textbf{Marcos J. Rider:} Writing -- review \& editing, Supervision, Validation, Project administration.
+
+\section*{Funding}
+
+This work was supported by the Brazilian Institution São Paulo Research Foundation -- FAPESP (2023/05708-3, 2025/22634-9,  and thematic project 2021/11380-5).
+
+\section*{Data availability}
+
+The data are available at \url{https://github.com/TeradaZenichi/steep-battery-control}.
+
+
+During the preparation of this manuscript, the authors used Grammarly as an editing tool to improve the paper's readability and clarity, and Anthropic's Claude (Claude Opus 4.7) to assist with code organization. After using these tools, the authors carefully reviewed and edited the content as needed and take full responsibility for the publication's content. In addition, the repository is publicly available to enhance this project's reproducibility.
+
+\bibliographystyle{elsarticle-num} 
+\bibliography{references, references-papers}
+
+
+ \appendix
+ 
+\section{Feasibility-aware action mapping and safety projection}
+\label{app:feasibility_projection}
+
+This appendix details the state-dependent action bounds and the safety projection used by the feasibility-aware actor. Let $\mathcal{J}=\{\text{BESS},\text{EV}\}$ denote the set of controllable storage devices. For each device $j\in\mathcal{J}$, $u_t^j$ denotes the device controllability indicator. In particular, $u_t^{\text{BESS}}=1$ and $u_t^{\text{EV}}$ indicates whether the \gls{EV} is connected and controllable at time $t$.
+
+The stored energy after self-discharge is:
+\begin{flalign}
+& e_t^j = \text{SoC}_t^j\,\overline{E}^j,
+\qquad
+\tilde{e}_t^j = e_t^j(1-\beta^j\Delta t),
+\qquad
+\underline{E}^j=\overline{E}^j(1-\text{DoD}^j).
+& \label{eq:app_storage_energy_projected}
+\end{flalign}
+Here, $e_t^j$ is the energy stored in device $j$ before self-discharge, $\tilde{e}_t^j$ is the energy after self-discharge, $\overline{E}^j$ is the nominal energy capacity, $\underline{E}^j$ is the minimum admissible energy, $\beta^j$ is the self-discharge coefficient, and $\Delta t$ is the simulation time step.
+
+The \gls{SoC}-dependent charging and discharging limits are:
+\begin{flalign}
+& \overline{P}_{t,c}^j=\overline{P}_c^j f_c^j(\text{SoC}_t^j),
+\qquad
+\overline{P}_{t,d}^j=\overline{P}_d^j f_d^j(\text{SoC}_t^j).
+& \label{eq:app_storage_soc_power_limits}
+\end{flalign}
+In this expression, $\overline{P}_{t,c}^j$ and $\overline{P}_{t,d}^j$ are the instantaneous charging and discharging limits, $\overline{P}_c^j$ and $\overline{P}_d^j$ are the rated charging and discharging powers, and $f_c^j(\cdot)$ and $f_d^j(\cdot)$ are the \gls{SoC}-dependent derating functions. For the \gls{BESS}, $\overline{P}_c^{\text{BESS}}=\overline{P}_d^{\text{BESS}}=\overline{P}^{\text{BESS}}$.
+
+The physical admissible power interval is:
+\begin{flalign}
+& P_t^{j,\min}
+=
+u_t^j
+\max\left\{
+    -\overline{P}_{t,d}^j,\,
+    \frac{\underline{E}^j-\tilde{e}_t^j}{\Delta t}\eta^j
+\right\},
+\\
+& P_t^{j,\max}
+=
+u_t^j
+\min\left\{
+    \overline{P}_{t,c}^j,\,
+    \frac{\overline{E}^j-\tilde{e}_t^j}{\Delta t\,\eta^j}
+\right\}.
+& \label{eq:app_storage_admissible_power}
+\end{flalign}
+Here, $P_t^{j,\min}$ and $P_t^{j,\max}$ are the minimum and maximum admissible physical powers for device $j$, and $\eta^j$ is the charge/discharge efficiency parameter used in the physical update. Negative power denotes discharging and positive power denotes charging.
+
+The corresponding normalized bounds are:
+\begin{flalign}
+& a_t^{j,\min}=\frac{P_t^{j,\min}}{\overline{P}_d^j},
+\qquad
+a_t^{j,\max}=\frac{P_t^{j,\max}}{\overline{P}_c^j}.
+& \label{eq:app_storage_normalized_bounds}
+\end{flalign}
+The normalized variable $a_t^j$ is the action component used by the actor for device $j$.
+
+Given a candidate normalized action
+$\hat{\mathbf{a}}_t=
+[\hat{a}_t^{\text{BESS}},\hat{a}_t^{\text{EV}},\hat{a}_t^{\text{PV}}]^\top$,
+the device-level box projection is:
+\begin{flalign}
+& \bar{a}_t^j
+=
+\min\left\{
+    \max\left\{\hat{a}_t^j,a_t^{j,\min}\right\},
+    a_t^{j,\max}
+\right\},
+\qquad
+\bar{a}_t^{\text{PV}}
+=
+\min\left\{
+    \max\left\{\hat{a}_t^{\text{PV}},0\right\},
+    1
+\right\}.
+& \label{eq:app_device_box_projection}
+\end{flalign}
+Here, $\hat{\mathbf{a}}_t$ is the candidate action before clipping, and $\bar{\mathbf{a}}_t$ is the action after device-level bounds are enforced.
+
+Let $[x]^+=\max\{x,0\}$. The normalized action is mapped to the physical vector:
+\begin{flalign}
+& \bar{\mathbf{x}}_t
+=
+\Pi_t(\bar{\mathbf{a}}_t)
+=
+\begin{bmatrix}
+\overline{P}^{\text{BESS}}\bar{a}_t^{\text{BESS}} \\[2mm]
+\overline{P}_c^{\text{EV}}[\bar{a}_t^{\text{EV}}]^+
+-
+\overline{P}_d^{\text{EV}}[-\bar{a}_t^{\text{EV}}]^+ \\[2mm]
+-P_t^{\text{PV,av}}(1-\bar{a}_t^{\text{PV}})
+\end{bmatrix}
+=
+\begin{bmatrix}
+\bar{P}_t^{\text{BESS}}\\
+\bar{P}_t^{\text{EV}}\\
+\bar{Y}_t^{\text{PV}}
+\end{bmatrix}.
+& \label{eq:app_action_to_physical_vector}
+\end{flalign}
+The vector $\bar{\mathbf{x}}_t$ is the physical action before the grid projection. Its components are the \gls{BESS} power, the \gls{EV} power, and the \gls{PV} net contribution. The \gls{PV} component is non-positive because generation reduces the net grid demand.
+
+The grid-feasible action must satisfy:
+\begin{flalign}
+& \underline{P}^{\text{Grid}}-P_t^{\text{Load}}
+\leq
+P_t^{\text{BESS}}+P_t^{\text{EV}}+Y_t^{\text{PV}}
+\leq
+\overline{P}^{\text{Grid}}-P_t^{\text{Load}}.
+& \label{eq:app_grid_slab_constraint}
+\end{flalign}
+
+Define the physical lower and upper bounds:
+\begin{flalign}
+& \underline{\mathbf{x}}_t=
+\begin{bmatrix}
+P_t^{\text{BESS},\min}\\
+P_t^{\text{EV},\min}\\
+-P_t^{\text{PV,av}}
+\end{bmatrix},
+\qquad
+\overline{\mathbf{x}}_t=
+\begin{bmatrix}
+P_t^{\text{BESS},\max}\\
+P_t^{\text{EV},\max}\\
+0
+\end{bmatrix}.
+& \label{eq:app_projection_physical_bounds}
+\end{flalign}
+
+Let $\mathbf{u}_t=[1,1,1]^\top$ be the aggregation vector used to sum the physical \gls{BESS}, \gls{EV}, and \gls{PV} components at time $t$. Although $\mathbf{u}_t$ is constant in value, the subscript $t$ indicates that it is applied to the time-indexed physical vector $\mathbf{x}_t$. The pre-projection aggregated power and its clipped feasible target are:
+\begin{flalign}
+& s_t^0=\mathbf{u}_t^\top\bar{\mathbf{x}}_t,
+\qquad
+s_t^\star=
+\min\left\{
+    \max\left\{
+        s_t^0,\,
+        \underline{P}^{\text{Grid}}-P_t^{\text{Load}}
+    \right\},
+    \overline{P}^{\text{Grid}}-P_t^{\text{Load}}
+\right\}.
+& \label{eq:app_projection_target}
+\end{flalign}
+Here, $s_t^0$ is the aggregated physical power before the grid projection, and $s_t^\star$ is the closest grid-feasible aggregate power.
+
+The safety projection can then be written as:
+\begin{flalign}
+& \mathbf{x}_t^\star
+=
+\arg\min_{\mathbf{x}_t}
+\left\|
+    \mathbf{x}_t-\bar{\mathbf{x}}_t
+\right\|_2^2
+\\
+& \text{s.t.}\quad
+\underline{\mathbf{x}}_t\leq \mathbf{x}_t\leq \overline{\mathbf{x}}_t,
+\qquad
+\mathbf{u}_t^\top\mathbf{x}_t=s_t^\star.
+& \label{eq:app_safety_projection_problem_compact}
+\end{flalign}
+The solution $\mathbf{x}_t^\star$ is the feasible physical vector closest to the actor output $\bar{\mathbf{x}}_t$.
+
+This projection admits a scalar-shift solution:
+\begin{flalign}
+& \mathbf{x}_t^\star
+=
+\min\left\{
+    \max\left\{
+        \bar{\mathbf{x}}_t+\mu_t^\star\mathbf{u}_t,\,
+        \underline{\mathbf{x}}_t
+    \right\},
+    \overline{\mathbf{x}}_t
+\right\},
+\qquad
+\mathbf{u}_t^\top\mathbf{x}_t^\star=s_t^\star.
+& \label{eq:app_safety_scalar_shift}
+\end{flalign}
+The scalar $\mu_t^\star$ shifts the physical power vector along the aggregation direction until the target aggregate $s_t^\star$ is satisfied, while respecting all componentwise bounds.
+
+Finally, with
+$\mathbf{x}_t^\star=
+[P_t^{\text{BESS}\star},P_t^{\text{EV}\star},Y_t^{\text{PV}\star}]^\top$
+and $P_t^{\text{PV}\star}=-Y_t^{\text{PV}\star}$, the projected normalized action is recovered as:
+\begin{flalign}
+& \mathbf{a}_t
+=
+\Pi_t^{-1}(\mathbf{x}_t^\star)
+=
+\begin{bmatrix}
+\dfrac{P_t^{\text{BESS}\star}}{\overline{P}^{\text{BESS}}} \\[3mm]
+\dfrac{[P_t^{\text{EV}\star}]^+}{\overline{P}_c^{\text{EV}}}
+-
+\dfrac{[-P_t^{\text{EV}\star}]^+}{\overline{P}_d^{\text{EV}}} \\[3mm]
+1-\dfrac{P_t^{\text{PV}\star}}{P_t^{\text{PV,av}}}
+\end{bmatrix}.
+& \label{eq:app_physical_to_action_compact}
+\end{flalign}
+When $P_t^{\text{PV,av}}=0$, the photovoltaic action is set to $a_t^{\text{PV}}=0$.
+
+The pre-projection grid violation is:
+\begin{flalign}
+& C_t^{\text{Grid}}
+=
+\left[
+    \underline{P}^{\text{Grid}}-P_t^{\text{Load}}-s_t^0
+\right]^+
++
+\left[
+    s_t^0-\left(\overline{P}^{\text{Grid}}-P_t^{\text{Load}}\right)
+\right]^+.
+& \label{eq:app_grid_violation_cost_compact}
+\end{flalign}
+This diagnostic term quantifies how far the actor output is from satisfying the grid import/export bounds before the safety projection is applied.
+
+
+\section{Log-probability of the transformed stochastic action}
+\label{app:actor_logprob}
+
+The stochastic actor samples latent storage commands from a Gaussian distribution and then maps them to feasible normalized actions. For each storage device $j\in\{\text{BESS},\text{EV}\}$:
+\begin{flalign}
+& \xi_t^j \sim \mathcal{N}(\mu_{\theta,t}^j,(\sigma_{\theta,t}^j)^2),
+\qquad
+z_t^j=\tanh(\xi_t^j),
+\\
+& a_t^j
+=
+a_t^{j,\min}
++
+\frac{z_t^j+1}{2}
+\left(a_t^{j,\max}-a_t^{j,\min}\right).
+& \label{eq:app_tanh_scaled_action}
+\end{flalign}
+Here, $\xi_t^j$ is the latent Gaussian sample, $z_t^j$ is the bounded command after the $\tanh$ transformation, and $a_t^j$ is the final normalized command applied to storage device $j$.
+
+The log-probability used in the entropy term is computed by change of variables. Let
+$\Delta a_t^j=a_t^{j,\max}-a_t^{j,\min}$. For non-degenerate action intervals:
+\begin{flalign}
+& \log\pi_\theta(a_t^j|\mathbf{H}_t)
+=
+\log \mathcal{N}(\xi_t^j;\mu_{\theta,t}^j,(\sigma_{\theta,t}^j)^2)
+-
+\log\left(1-\tanh^2(\xi_t^j)\right)
+-
+\log\left(\frac{\Delta a_t^j}{2}\right).
+& \label{eq:app_logprob_single_dim}
+\end{flalign}
+
+The total log-probability is the sum over the stochastic storage dimensions:
+\begin{flalign}
+& \log\pi_\theta(\mathbf{a}_t|\mathbf{H}_t)
+=
+\sum_{j\in\{\text{BESS},\text{EV}\}}
+\log\pi_\theta(a_t^j|\mathbf{H}_t).
+& \label{eq:app_logprob_sum}
+\end{flalign}
+If a state-dependent action interval collapses, the corresponding dimension is treated as deterministic and does not contribute to the entropy term. The \gls{PV} command is also excluded from this sum because it is recovered deterministically rather than sampled from the Gaussian policy.
+
+
+
+
+ 
+\end{document}
