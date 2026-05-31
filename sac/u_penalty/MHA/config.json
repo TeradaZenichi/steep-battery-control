@@ -9,7 +9,7 @@
         "evaluate_every": 1,
         "eval_workers": 6,
         "max_pending_evals": 2,
-        "target_entropy": -1.0,
+        "target_entropy": -2.0,
         "init_alpha": 0.3,
         "log_std_min": -10.0,
         "log_std_max": 2.0,
