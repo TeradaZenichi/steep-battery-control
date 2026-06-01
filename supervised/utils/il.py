@@ -333,7 +333,7 @@ def train_il(algo_root: Path):
         if best_state is None:
             raise RuntimeError(f"IL training did not converge for {arch_name}/{tariff}")
 
-        torch.save(best_state, folder / "best.pth")
+        torch.save(best_state, folder / "best.pt")
         with open(folder / "best_params.json", "w", encoding="utf-8") as out:
             json.dump({
                 "lr": lr,

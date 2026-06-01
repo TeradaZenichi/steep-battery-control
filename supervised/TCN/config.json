@@ -2,7 +2,11 @@
     "seed": 42,
     "solver": "gurobi",
     "tariffs": [
-        "tar_w"
+        "tar_flat",
+        "tar_s",
+        "tar_w",
+        "tar_sw",
+        "tar_tou"
     ],
     "training": {
         "epochs": 300,

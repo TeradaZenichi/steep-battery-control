@@ -76,7 +76,7 @@
 \begin{frontmatter}
 
 
-\title{Constrained Neural Network Control with Safe Action Projection for Residential Energy Management under Dynamic Tariffs}
+\title{Demonstration-Free Constrained Soft Actor-Critic with Potential-Based Shaping for Residential Energy Management under Dynamic Tariffs}
 
 
 \author[unicamp]{Lucas Zenichi Terada~\orcidlink{0000-0002-3554-9947}}
@@ -124,11 +124,11 @@
 
 
 \begin{highlights}
-    \item Safe deep RL for home PV, battery and EV control across five tariff schemes
-    \item From-scratch SAC peaks early then drifts to a worse converged policy
-    \item Penalty and CMDP safety formulations both fail to remove the drift
-    \item Behavior-cloning warm-start from a MILP teacher mitigates the drift
-    \item Warm-started controller gives the largest cost cut over rule-based baselines
+    \item Demonstration-free SAC for home PV, battery, EV and grid control
+    \item CMDP-Lagrangian safety separates economic reward from feasibility cost
+    \item Potential-based BESS shaping stabilizes training without expert demos
+    \item Dropout and randomized critic ensembles target long-horizon overestimation
+    \item Policies are tested across five tariffs and three sequence encoders
     
 \end{highlights}
 
@@ -137,8 +137,8 @@
 %% Keywords
 \begin{keyword}
 Smart home energy management \sep Safe reinforcement learning \sep
-Behavior cloning \sep Constrained Markov decision process \sep
-Soft actor-critic \sep Battery and electric vehicle scheduling
+Demonstration-free learning \sep Constrained Markov decision process \sep
+Soft actor-critic \sep Potential-based reward shaping
 \end{keyword}
 
 
@@ -162,7 +162,7 @@ Soft actor-critic \sep Battery and electric vehicle scheduling
 \section{Introduction}
 
 % Problem statement (Tier 1.3) — leads the introduction with a concrete gap
-Residential energy systems that combine photovoltaic generation, battery storage, electric vehicles, and grid interaction require real-time control under uncertainty, intermittent renewables, dynamic tariffs, and state-dependent operational limits. Two learning paradigms have emerged as candidates for this problem: imitation learning from optimization-based teachers, which transfers near-optimal decisions but cannot adapt beyond the demonstrated regime, and reinforcement learning, which adapts online but struggles with sparse safety-critical signals such as electric vehicle fast-charging cost. The literature treats these paradigms separately, with limited comparison under a common environment, multiple tariff structures, multiple neural architectures, and explicit feasibility handling. This paper addresses that gap with a controlled study under a common environment, with explicit safety projection and dual feasibility regularization, across five tariff schemes and three neural architectures. We find that from-scratch \gls{SAC} reaches a strong early peak and then drifts to a worse converged regime, and that this critic drift resists the stabilizers we test --- a constrained-\gls{MDP} formulation, an anticipatory potential-based reward shaping derived from the physical structure of the system, prior-data injection, and a lagged target policy. Behavior-cloning warm-start from a mixed-integer-linear-programming teacher, followed by constrained fine-tuning, is what mitigates the drift and yields the strongest controller, reducing operating cost over rule-based heuristics across tariffs.
+Residential energy systems that combine photovoltaic generation, battery storage, electric vehicles, and grid interaction require real-time control under uncertainty, intermittent renewables, dynamic tariffs, and state-dependent operational limits. Reinforcement learning is attractive for this setting because it can adapt policies directly from closed-loop operation, but practical \gls{SHEMS} deployments cannot usually rely on expensive expert demonstrations from optimization-based teachers. This paper asks whether \gls{SAC} can be trained for home energy management in a stable, safe, and economically competitive way without behavior-cloning warm-starts. We study a common simulation environment with explicit action projection, five tariff schemes, three sequence encoders, and a unified \gls{SAC} training harness. The central result is that separating economics from feasibility through a \gls{CMDP}-Lagrangian formulation, and adding a simple potential-based \gls{BESS} shaping signal, makes from-scratch \gls{SAC} a viable demonstration-free alternative to behavior-cloning warm-starts. We further test critic-side anti-overestimation mechanisms, including dropout regularization and randomized critic ensembles, to reduce the residual drift observed under long-horizon discounting.
 % TIER 2.7 (quantitative anchor): once results are in, replace the last sentence above with a quantitative claim, e.g. "Across five tariff schemes, the proposed framework reduces operating cost by X% over a rule-based baseline while keeping fast-charging events below Y% of timesteps."
 
 % Smart homes
@@ -225,14 +225,14 @@ These methods have been applied to various combinations of residential resources
 
 Recent studies have explored various reinforcement learning structures, including parallel and multi-agent strategies~\cite{zhang2026parallel-e48,abishu2025multiagent-b59}, as well as autonomous and offline-guided schemes for real-time residential energy management~\cite{aldahmashi2024real-time-078,xiong2026offline-67f}. Additional deep reinforcement learning implementations further demonstrate the methodological diversity and growing importance of this field in \gls{SHEMS}~\cite{lissa2021deep-fe8,rehman2026iot-4dc}. However, most reinforcement learning studies still focus on specific resource combinations, individual tariff settings, or isolated methodologies, limiting broader comparative assessments.
 
-Most closely related to the present work,~\cite{yuan2026reinforcement-dd1} also formulate residential energy management as a \gls{CMDP} solved with a Lagrangian \gls{SAC}, integrating \gls{PV}, storage, \gls{EV}, and HVAC, and emphasize heterogeneous battery degradation and stochastic \gls{EV} behaviour. Their contribution is largely \emph{environmental}: a richer degradation and behaviour model under a single dynamic-pricing scenario. Our focus is complementary and orthogonal, centering on the \emph{learnability} of the control policy itself. Rather than refining the environment models, we show that a from-scratch Lagrangian \gls{SAC} exhibits a critic-drift instability that standard stabilizers do not remove, and that a behavior-cloning warm-start from a \gls{MILP} teacher is required to reliably reach the strongest controller. We further contrast penalty- and constraint-based safety formulations across three neural encoders and five tariff regimes, under an explicit physics-aware feasibility projection --- dimensions not addressed in~\cite{yuan2026reinforcement-dd1}.
+Most closely related to the present work,~\cite{yuan2026reinforcement-dd1} also formulate residential energy management as a \gls{CMDP} solved with a Lagrangian \gls{SAC}, integrating \gls{PV}, storage, \gls{EV}, and HVAC, and emphasize heterogeneous battery degradation and stochastic \gls{EV} behaviour. Their contribution is largely \emph{environmental}: a richer degradation and behaviour model under a single dynamic-pricing scenario. Our focus is complementary and orthogonal, centering on the \emph{learnability} of the control policy itself. We test whether a from-scratch Lagrangian \gls{SAC} can be made reliable without demonstrations by separating safety costs from economic reward, adding a lightweight potential-based shaping signal, and directly attacking critic overestimation in the long-horizon setting. We further contrast penalty- and constraint-based safety formulations across three neural encoders and five tariff regimes, under an explicit physics-aware feasibility projection --- dimensions not addressed in~\cite{yuan2026reinforcement-dd1}.
 
 % Gaps
 \subsection{Research Gaps}
 
 Tables~\ref{tab:opt_baselines} and~\ref{tab:learning_comparative} provide a comparative mapping of the literature reviewed. Table~\ref{tab:opt_baselines} summarizes optimization-based and rule-based approaches, considered as reference baselines for the learning methods discussed in this work. Table~\ref{tab:learning_comparative} positions learning-based approaches, including supervised behavior cloning and reinforcement learning, alongside the proposed framework. The comparison considers temporal resolution, energy resources, control variables, methodological approach, neural architecture, safety treatment, tariff structure, evaluation criteria, and reproducibility. While the literature addresses significant aspects of this problem, it often does so in a fragmented manner. For example,~\cite{9585298} utilizes optimal solutions from a \gls{MILP} model for imitation learning, whereas~\cite{XU2024122915} employs offline optimal solutions to guide reinforcement learning for energy storage control. In \gls{SHEMS},~\cite{XIONG20243501} applies \gls{SAC} to real-time storage control under a \gls{ToU} tariff. According to a recent study published in Scientific Reports, research on smart home energy management has generally focused on applying optimization, imitation, or reinforcement learning in isolation, or on testing policies within limited-resource and system setups. The authors note that integrating optimization-based teaching, behavior cloning, and reinforcement learning into a single, unified framework for energy management in smart homes is still a relatively unexplored area.
 
-Furthermore, gaps persist in safety, architectural comparison, and evaluation. The study in~\cite{CEUSTERS2023101202} emphasizes the importance of safety layers and explicit constraints in multi-energy systems, yet many learning-based \gls{SHEMS} studies do not report a dedicated feasibility layer and instead rely solely on action clipping. This limitation is particularly relevant in systems with \gls{BESS} and \gls{EV}, where admissible actions depend on state of charge, availability, power limits, and degradation. Additionally, recent reviews on reinforcement learning for \gls{SHEMS} identify challenges related to safety, scalability, validation in real applications, and comparability across studies~\cite{en17246420}. These gaps motivate the present work, which integrates a \gls{MILP} teacher, behavior cloning, \gls{SAC}-based reinforcement learning, physics-constrained action projection, dual feasibility regularization, and the comparison of multiple neural architectures under a multi-tariff protocol for real-time residential operation with \gls{PV}, \gls{BESS}, \gls{EV}, and grid interaction.
+Furthermore, gaps persist in safety, architectural comparison, evaluation, and dependence on expert demonstrations. The study in~\cite{CEUSTERS2023101202} emphasizes the importance of safety layers and explicit constraints in multi-energy systems, yet many learning-based \gls{SHEMS} studies do not report a dedicated feasibility layer and instead rely solely on action clipping. This limitation is particularly relevant in systems with \gls{BESS} and \gls{EV}, where admissible actions depend on state of charge, availability, power limits, and degradation. Additionally, recent reviews on reinforcement learning for \gls{SHEMS} identify challenges related to safety, scalability, validation in real applications, and comparability across studies~\cite{en17246420}. These gaps motivate the present work, which evaluates demonstration-free \gls{SAC} variants with physics-constrained action projection, \gls{CMDP} dual feasibility regularization, potential-based reward shaping, anti-overestimation critics, and multiple neural architectures under a multi-tariff protocol for real-time residential operation with \gls{PV}, \gls{BESS}, \gls{EV}, and grid interaction. Behavior cloning from a \gls{MILP} teacher is retained as a comparison baseline rather than as a required training ingredient.
 
 % Comparative Table A — non-learning baselines
 \begin{table*}[t]
@@ -345,7 +345,7 @@ Furthermore, gaps persist in safety, architectural comparison, and evaluation. T
 & -- & B,R,L,G & B & RL & -- & Constr & -- & C,Deg,SoC & M \\
 
 TW
-& 5m & P,B,E,G & P,B,E(V2G) & BC+SAC(P,C)+$\Phi$ & Suite$^\dagger$ & Proj+Dual & Flat,ToU,Sol,Wnd,SW & C\$,Gap,Viol,Stat & H$^{\ddagger}$ \\
+& 5m & P,B,E,G & P,B,E(V2G) & SAC(P,C)+$\Phi$+FT+Reg. & Suite$^\dagger$ & Proj+Dual & Flat,ToU,Sol,Wnd,SW & C\$,Gap,Viol,Stat & H$^{\ddagger}$ \\
 
 \bottomrule
 \end{tabular}%
@@ -356,7 +356,7 @@ TW
 \scriptsize
 \textbf{Resources.} P = photovoltaic; B = battery energy storage; E = electric vehicle; H = HVAC; L = load; G = grid; I = ICT; W = wind turbine; DG = distributed generation; R = renewable source.
 
-\textbf{Methods.} BC = behavior cloning (supervised learning from expert demonstrations); RL = reinforcement learning; DDPG = deep deterministic policy gradient; MADDPG = multi-agent DDPG; PPO = proximal policy optimization; SAC = soft actor--critic; TD3 = twin delayed DDPG; DQN = deep Q-network; MORL = multi-objective RL; RIQL = risk-informed Q-learning; LSAC = Lagrangian SAC; SAC(P,C) = penalty-based and CMDP-Lagrangian SAC variants; $\Phi$ = anticipatory potential-based reward shaping.
+\textbf{Methods.} BC = behavior cloning (supervised learning from expert demonstrations); RL = reinforcement learning; DDPG = deep deterministic policy gradient; MADDPG = multi-agent DDPG; PPO = proximal policy optimization; SAC = soft actor--critic; TD3 = twin delayed DDPG; DQN = deep Q-network; MORL = multi-objective RL; RIQL = risk-informed Q-learning; LSAC = Lagrangian SAC; SAC(P,C) = penalty-based and CMDP-Lagrangian SAC variants; $\Phi$ = potential-based reward shaping; FT = behavior-cloning fine-tuning reference; Reg. = critic regularization/ensembles.
 
 \textbf{Neural networks.} MLP = multilayer perceptron; GRU = gated recurrent unit; LSTM = long short-term memory; FCN = fully connected network; TRF = transformer; MLP-AC = MLP actor--critic; Q-NET = Q-network; Suite$^\dagger$ = GRU, multi-head attention (MHA), and temporal convolutional network (TCN).
 
@@ -378,30 +378,30 @@ TW
 % Contribution
 \subsection{Contributions}
 
-This paper studies safe \gls{SHEMS} operation with \gls{PV}, \gls{BESS}, \gls{EV}, and grid interaction, and asks how reliably reinforcement learning controllers can be trained for it under realistic constraints and dynamic tariffs. Its central finding is that from-scratch deep reinforcement learning hits a \emph{critic-drift ceiling} on this task --- policies reach a strong early peak and then degrade --- that standard stabilizers do not remove, and that behavior-cloning warm-start from a \gls{MILP} teacher is what reliably mitigates it, yielding the strongest controller across tariff regimes. The main contributions are:
+This paper studies safe \gls{SHEMS} operation with \gls{PV}, \gls{BESS}, \gls{EV}, and grid interaction, and asks whether reinforcement learning controllers can be trained reliably under realistic constraints and dynamic tariffs without expert demonstrations. Its central finding is that a from-scratch \gls{SAC} controller becomes stable and economically competitive when safety is handled as a \gls{CMDP} with separate cost critics and the training reward is augmented with a lightweight potential-based \gls{BESS} shaping signal. Behavior cloning from a \gls{MILP} teacher is therefore treated as a strong but expensive reference, not as a prerequisite. The main contributions are:
 
 \begin{itemize}
-    \item We characterize a critic-drift instability of from-scratch \gls{SAC} on residential energy control: across two safety-handling formulations, three encoders, and five tariffs, learned policies reach an early high-performing peak and then drift to a markedly worse converged regime. We report both peak and converged performance to quantify this gap, rather than the peak alone.
+    \item We characterize seed-dependent critic drift in from-scratch \gls{SAC} for residential energy control and show why single-seed conclusions can be misleading. Multi-seed training reveals that some apparent drift is seed noise, while potential-based shaping substantially reduces the variance of the final policy.
 
-    \item We compare a penalty-based \gls{SAC} variant, where feasibility violations enter the reward, against a constrained \gls{MDP} (\gls{CMDP}) formulation with separate cost critics and a Lagrangian dual per constraint, under an identical environment, hyperparameters, and evaluation protocol --- isolating how the safety-handling formulation interacts with the drift and with the tariff regime.
+    \item We compare a penalty-based \gls{SAC} variant, where feasibility costs enter the scalar reward, against a \gls{CMDP}-Lagrangian formulation with separate cost critics and a learned dual variable, under an identical environment, hyperparameters, and evaluation protocol. This isolates the methodological value of separating economic reward from safety cost.
 
-    \item We evaluate, as controlled ablations, three stabilizers intended to remove the drift from scratch: an anticipatory potential-based reward shaping $\Phi(s)$ derived from the physical structure of the system (last-known \gls{EV} \gls{SoC}, time-to-arrival, available \gls{BESS} reserve) via a Ng--Harada--Russell transformation; prior-data injection from rule-based demonstrations; and a lagged target policy in the Bellman backup. We show that none fully closes the gap from scratch.
+    \item We introduce a demonstration-free potential-based \gls{BESS} shaping term $\Phi_{\mathrm{BESS}}(s)$ that gives the agent a cheap mathematical hint about when stored energy is valuable. We test whether this shaping can play the practical stabilizing role normally sought through behavior-cloning warm-starts, while avoiding the need for an expert controller and demonstration dataset.
 
-    \item We show that behavior-cloning warm-start from the \gls{MILP} teacher, followed by constrained \gls{SAC} fine-tuning, mitigates the drift and yields the strongest controller, with the largest cost reduction over the rule-based baselines across tariffs.
+    \item We test critic-side anti-overestimation mechanisms for long-horizon \gls{SAC}: a DroQ-style dropout critic and a REDQ-style randomized critic ensemble. These ablations target the residual value overestimation that remains under high discount factors.
 
-    \item All learned policies are evaluated through a safety projection enforcing state-dependent power limits of \gls{BESS}, \gls{EV}, and \gls{PV}, and are compared against rule-based heuristic baselines (a naive and a smart rule-based controller) in absolute operating cost (\$/year), cost reduction, and feasibility-violation rate, across five tariff structures (flat, \gls{ToU}, and solar-, wind-, and combined-renewable dynamic signals) and three neural encoders (\gls{GRU}, multi-head attention, \gls{TCN}).
+    \item All learned policies are evaluated through a safety projection enforcing state-dependent power limits of \gls{BESS}, \gls{EV}, and \gls{PV}, and are compared against rule-based heuristic baselines and a behavior-cloning fine-tuning reference in absolute operating cost, cost reduction, feasibility-violation rate, storage use, and robustness across five tariff structures and three neural encoders (\gls{GRU}, multi-head attention, \gls{TCN}).
 \end{itemize}
 
 % TIER 2.7 (quantitative anchor): once the multi-seed grid is in, add concrete
 % numbers to contributions 1 and 4, e.g. "the peak exceeds the converged policy
-% by X% on average" and "warm-start reduces cost over RBS by Y% vs Z% for the
-% best from-scratch variant".
+% by X% on average" and "CMDP+PBRS reduces cost over RBS by Y% while matching
+% or approaching the BC+FT comparator".
 
 % TIER 2.4 (organization paragraph): add immediately after this list, e.g.
 %   "The remainder of the paper is organized as follows. Section 2 presents
 %   the system model and MDP formulation. Section 3 details the learning
-%   framework, including the MILP teacher, behavior cloning, the two SAC
-%   variants, and the anticipatory shaping. Section 4 describes the
+%   framework, including the SAC variants, CMDP safety, PBRS, critic
+%   regularization, and the BC/FT comparator. Section 4 describes the
 %   experimental setup. Section 5 reports the results across architectures
 %   and tariffs. Section 6 discusses implications and Section 7 concludes."
 
@@ -410,7 +410,7 @@ This paper studies safe \gls{SHEMS} operation with \gls{PV}, \gls{BESS}, \gls{EV
 \section{System model and problem formulation}
 \label{sec:system_model}
 
-This section presents the proposed system for the real-time residential energy management with distributed energy resources. The framework combines a simulation environment, an optimization-based teacher and learning-based controllers for sequential decision-making with different tariff signals. The environment models the interactions among residential demand, photovoltaic generation, a stationary \gls{BESS}, an \gls{EV}, and the distribution grid. An \gls{MILP} formulation is used to generate expert actions under perfect-foresight assumptions, which are then used for behavior cloning. Subsequently, reinforcement learning is applied to improve the policy through direct interaction with the environment. To preserve operational feasibility, the actor output is constrained by state-dependent device limits, while an additional safety projection is used to enforce grid exchange limits during validation and testing. The complete framework is evaluated under five tariff profiles: a flat tariff, a time-of-use \gls{ToU} tariff, and three renewable-dependent dynamic tariffs based on solar, wind, and combined solar-wind availability. Figure~\ref{fig:methodology} summarizes the main components of the proposed methodology and their interconnections. This section details the simulation environment (Section~\ref{subsec:environment}) and the formal control problem (Section~\ref{subsec:problem_formalization}); the learning framework and the experimental setup follow in Sections~\ref{sec:learning_framework} and~\ref{sec:experimental_setup}.
+This section presents the proposed system for real-time residential energy management with distributed energy resources. The framework combines a simulation environment and learning-based controllers for sequential decision-making under different tariff signals. The environment models the interactions among residential demand, photovoltaic generation, a stationary \gls{BESS}, an \gls{EV}, and the distribution grid. The main controllers are trained by reinforcement learning directly in this environment; an \gls{MILP} formulation is additionally used to generate expert actions for the behavior-cloning and fine-tuning references. To preserve operational feasibility, the actor output is constrained by state-dependent device limits, while an additional safety projection is used to enforce grid exchange limits during validation and testing. The complete framework is evaluated under five tariff profiles: a flat tariff, a time-of-use \gls{ToU} tariff, and three renewable-dependent dynamic tariffs based on solar, wind, and combined solar-wind availability. Figure~\ref{fig:methodology} summarizes the main components of the proposed methodology and their interconnections. This section details the simulation environment (Section~\ref{subsec:environment}) and the formal control problem (Section~\ref{subsec:problem_formalization}); the learning framework and the experimental setup follow in Sections~\ref{sec:learning_framework} and~\ref{sec:experimental_setup}.
 
 
 
@@ -742,19 +742,19 @@ with $J_r(\pi) = \underset{\pi}{\mathbb{E}}[\sum_t \gamma^t r(x_t,\mathbf{a}_t)]
 \section{Learning framework}
 \label{sec:learning_framework}
 
-This section details the learning-based controllers. The \gls{MILP} teacher (Section~\ref{subsec:milp_teacher}) supplies perfect-foresight expert actions; behavior cloning (Section~\ref{subsec:bc}) regresses them into a sequential policy; and the reinforcement learning stage (Section~\ref{subsec:rl}) trains the controller through direct interaction under two safety-handling formulations and two initialization regimes (from a random initialization, and fine-tuned from the behavior cloning policy). The neural encoders and the feasibility-aware action layer shared by all controllers are described in Section~\ref{subsec:architectures}.
+This section details the learning-based controllers. The main training path is demonstration-free: \gls{SAC} learns directly from simulator interaction under alternative safety formulations, shaping signals, and critic regularization mechanisms. A \gls{MILP} teacher (Section~\ref{subsec:milp_teacher}) and behavior-cloning policy (Section~\ref{subsec:bc}) are retained as reference baselines and as the source of the fine-tuning comparator, allowing the shaped from-scratch policies to be compared against a demonstration-based warm-start. The neural encoders and the feasibility-aware action layer shared by all controllers are described in Section~\ref{subsec:architectures}.
 
 \subsection{Learning pipeline}
 \label{subsec:pipeline}
 
-The framework studies three approaches to the residential energy management problem: a supervised behavior cloning policy distilled from the actions of a \gls{MILP} teacher; a reinforcement learning policy trained directly in the simulator from a randomly initialized actor; and a fine-tuned policy that initializes the reinforcement learning actor with the behavior cloning weights and continues training under the simulator dynamics. Each method is evaluated for every tariff and architecture under a common protocol. Figure~\ref{fig:pipeline} illustrates the three pipelines and their shared components.
+The framework studies two families of controllers for the residential energy management problem. The first family is demonstration-free and trains \gls{SAC} directly in the simulator from a randomly initialized actor. Within this family we compare penalty-based safety, \gls{CMDP}-Lagrangian safety, potential-based \gls{BESS} shaping, and critic anti-overestimation variants. The second family is demonstration-based and uses a \gls{MILP} teacher to train a behavior-cloning policy that can either be evaluated directly or used to initialize a fine-tuned \gls{SAC} controller. Each method is evaluated for every tariff and architecture under a common protocol. Figure~\ref{fig:pipeline} illustrates the compared pipelines and their shared components.
 
-The behavior cloning stage produces an actor that approximates the \gls{MILP} teacher on the same observation space used by the reinforcement learning environment, and is evaluated as an independent method. The reinforcement learning stage is run twice for each combination of tariff and architecture: once from a randomly initialized actor and once initialized with the behavior cloning weights. The fine-tuning configuration introduces a critic warm-up phase during which the actor remains frozen, allowing the critic to align with the behavior cloning policy before joint updates resume. The observation-history length $L$ is selected jointly with the other behavior cloning hyperparameters by an Optuna search (Section~\ref{subsubsec:bc_hpo}) and is then propagated into the reinforcement learning configuration, so that the loaded actor and the reinforcement learning encoder share the same temporal context.
+The behavior cloning stage produces an actor that approximates the \gls{MILP} teacher on the same observation space used by the reinforcement learning environment, and is evaluated as an independent demonstration-based reference. The fine-tuning configuration initializes \gls{SAC} with the behavior-cloning weights and introduces a critic warm-up phase during which the actor remains frozen, allowing the critic to align with the behavior-cloning policy before joint updates resume. The demonstration-free variants use the same observation space, action projection, replay buffer, online update schedule, and evaluation protocol, so differences in performance can be attributed to the safety formulation, shaping, initialization, or critic design rather than to the surrounding training harness.
 
 \begin{figure}[H]
     \centering
     \includegraphics[width=\textwidth]{5-Pipeline.pdf}
-    \caption{Training pipelines compared in this work. The \gls{MILP} teacher supervises a behavior cloning policy. Two reinforcement learning regimes are then evaluated for each method: training from a random initialization, and fine-tuning from the behavior cloning weights with a critic warm-up phase. The anticipatory reward shaping is applied during reinforcement learning in both regimes.}
+    \caption{Training pipelines compared in this work. Demonstration-free \gls{SAC} variants train directly from simulator interaction, while the demonstration-based reference uses a \gls{MILP} teacher to supervise a behavior-cloning policy that can initialize a fine-tuned \gls{SAC} controller. Potential-based shaping, \gls{CMDP} safety, and critic regularization are toggled inside the unified reinforcement-learning harness.}
     \label{fig:pipeline}
 \end{figure}
 
@@ -982,7 +982,7 @@ The MILP is solved exactly with a commercial branch-and-bound solver, yielding t
 \subsection{Behavior cloning}
 \label{subsec:bc}
 
-The behavior cloning stage learns a regression of teacher actions from the observation history $\mathbf{H}_t$. It is evaluated as a stand-alone method and also serves as the initial actor for the fine-tuning variants of the reinforcement learning stage (Section~\ref{subsec:rl}). The observation-history length $L$ is selected by the hyperparameter search of Section~\ref{subsubsec:bc_hpo} and is propagated to the reinforcement learning configuration so that the same temporal context is used at both stages.
+The behavior cloning stage learns a regression of teacher actions from the observation history $\mathbf{H}_t$. It is evaluated as a stand-alone method and also serves as the initial actor for the fine-tuning reference used to measure the practical value of expert demonstrations (Section~\ref{subsec:rl}). The demonstration-free \gls{SAC} variants do not use this dataset. The observation-history length $L$ is selected by the hyperparameter search of Section~\ref{subsubsec:bc_hpo} and is propagated to the fine-tuning configuration so that the loaded actor and the reinforcement learning encoder share the same temporal context.
 
 The observation history collected at step $t$ over the fixed window of length $L$ is defined as in \eqref{eq:obs_history}:
 
@@ -1015,14 +1015,14 @@ The behavior cloning hyperparameters are tuned with an automated search using Op
 
 Including $L$ in the search space is a deliberate choice: the temporal context required by the sequential encoders is architecture-dependent, and fixing $L$ a priori risks either over-providing context or under-providing it (losing the relevant horizon for tariff and \gls{EV} dynamics). The optimization therefore selects $(L^{\star}, \mathrm{lr}^{\star}, B^{\star}, \lambda_{wd}^{\star})$ jointly per architecture and tariff.
 
-The configuration that achieves the lowest validation loss is retrained for the full epoch budget and saved as the behavior cloning artifact, together with its selected hyperparameters. This artifact serves both as a stand-alone supervised baseline and as the initialization point for the fine-tuning variants of Section~\ref{subsec:rl}; the selected $L^{\star}$ is propagated into the reinforcement learning configuration so that the loaded actor and the reinforcement learning encoder share the same temporal context.
+The configuration that achieves the lowest validation loss is retrained for the full epoch budget and saved as the behavior cloning artifact, together with its selected hyperparameters. This artifact serves both as a stand-alone supervised baseline and as the initialization point for the fine-tuning comparator of Section~\ref{subsec:rl}; the selected $L^{\star}$ is propagated into that configuration so that the loaded actor and the reinforcement learning encoder share the same temporal context.
 
 
 % ============================================================================
 \subsection{Reinforcement learning}
 \label{subsec:rl}
 
-The reinforcement learning stage trains the actor through direct interaction with the simulator. Two safety-handling formulations are considered: a penalty-based variant that keeps a single scalar reward with feasibility penalties embedded in it (Section~\ref{subsubsec:sac_penalty}), and a constrained-\gls{MDP} Lagrangian variant with separate \gls{EV} cost critics (Section~\ref{subsubsec:sac_cmdp}). Each formulation is evaluated under two initialization regimes: training from a randomly initialized actor, and fine-tuning from the behavior-cloning checkpoint (Section~\ref{subsubsec:ft_protocol}). All variants share the same \gls{SAC} backbone~\cite{haarnoja2018soft}: twin reward critics, automatic entropy tuning, $N$-step returns, interleaved online updates during rollout, and soft target updates. All learning objectives below are written as losses to be minimized and are denoted by $\mathcal{L}$.
+The reinforcement learning stage trains the actor through direct interaction with the simulator. Two safety-handling formulations are considered: a penalty-based variant that keeps a single scalar reward with feasibility penalties embedded in it (Section~\ref{subsubsec:sac_penalty}), and a constrained-\gls{MDP} Lagrangian variant with separate \gls{EV} cost critics (Section~\ref{subsubsec:sac_cmdp}). The \gls{CMDP} variant is then extended with three from-scratch mechanisms: potential-based \gls{BESS} shaping, DroQ-style critic dropout, and REDQ-style randomized critic ensembles (Section~\ref{subsubsec:stabilizers}). A behavior-cloning fine-tuning run is retained as a demonstration-based comparator (Section~\ref{subsubsec:ft_protocol}). All variants share the same \gls{SAC} backbone~\cite{haarnoja2018soft}: automatic entropy tuning, $N$-step returns, interleaved online updates during rollout, and soft target updates. Unless otherwise stated, the reward critic is the standard clipped double-Q critic. All learning objectives below are written as losses to be minimized and are denoted by $\mathcal{L}$.
 
 The actor is denoted by $\pi_\theta(\cdot|\mathbf{H}_t)$, where $\theta$ contains the actor parameters and $\mathbf{H}_t$ is the observation history used by the encoder. After applying action $a_t$, the environment returns reward $r_t$, the next observation $\mathbf{o}_{t+\Delta t}$, and a termination flag. The next history is:
 
@@ -1218,7 +1218,7 @@ The budget $b_{\mathrm{EV}}$ is a hyperparameter expressed in the scale of the n
 \subsubsection{Behavior-cloning fine-tuning protocol}
 \label{subsubsec:ft_protocol}
 
-Both safety-handling variants are evaluated under two initialization regimes: from a random actor (\emph{from-scratch}) and from the behavior-cloning checkpoint (\emph{fine-tuning}, \gls{FT}). Naively loading the \gls{BC} actor into \gls{SAC} can destroy it within a few updates, because the critics are initially random, automatic entropy tuning pushes the near-deterministic \gls{BC} policy toward higher stochasticity, and the replay buffer starts empty~\cite{nair2018overcoming}. The \gls{FT} protocol therefore changes only the initialization and update schedule:
+The fine-tuning protocol is used as a demonstration-based reference against which the from-scratch methods are compared. Naively loading the \gls{BC} actor into \gls{SAC} can destroy it within a few updates, because the critics are initially random, automatic entropy tuning pushes the near-deterministic \gls{BC} policy toward higher stochasticity, and the replay buffer starts empty~\cite{nair2018overcoming}. The \gls{FT} protocol therefore changes only the initialization and update schedule:
 
 \begin{enumerate}
     \item \textbf{Initialization.} The actor is loaded from the \gls{BC} checkpoint; reward critics, target reward critics, and, for \gls{CMDP}, \gls{EV} cost critics remain randomly initialized. The entropy coefficient is initialized at a smaller value and the target entropy is reduced to tolerate the lower-entropy \gls{BC} policy.
@@ -1226,44 +1226,50 @@ Both safety-handling variants are evaluated under two initialization regimes: fr
     \item \textbf{Joint refinement.} After the actor-update start episode, actor, critic, entropy, and, for \gls{CMDP}, multiplier updates proceed jointly. The actor learning rate is reduced relative to from-scratch training to slow drift from the \gls{BC} initialization.
 \end{enumerate}
 
-No \gls{KL} anchor is used in the unified fine-tuning runs. This warm-start is the mechanism by which the framework tests whether expert initialization can escape the from-scratch critic-drift ceiling, as quantified in Section~\ref{sec:results}.
+No \gls{KL} anchor is used in the unified fine-tuning runs. This warm-start quantifies the benefit and cost of expert demonstrations, allowing the proposed demonstration-free \gls{CMDP}+shaping variants to be compared against the common practice of initializing \gls{SAC} from an expert policy.
 
 \subsubsection{Stabilization mechanisms}
 \label{subsubsec:stabilizers}
 
-Three mechanisms are evaluated as controlled ablations for their ability to remove the critic drift in the \emph{from-scratch} setting. Each is toggled independently and none alters the safety treatment; their effect is reported in Section~\ref{subsec:res_ablation}.
+Three from-scratch mechanisms are evaluated as controlled ablations on top of the \gls{CMDP} formulation. The first gives the agent a cheap physical hint through reward shaping; the other two act directly on critic overestimation, which is amplified by the long effective horizon induced by high $\gamma$.
 
-\paragraph{Anticipatory reward shaping.}
+\paragraph{Potential-based BESS shaping.}
 \label{subsubsec:shaping}
-The \gls{EV} fast-charging cost is sparse and delayed: it materializes only when the vehicle reconnects with a low \gls{SoC}, often hundreds of steps after the decision that caused it, so the credit-assignment chain through the Bellman backup is long. Potential-based shaping~\cite{ng1999policy} densifies this signal without changing the optimal policy: for any potential $\Phi$,
+Potential-based shaping~\cite{ng1999policy} modifies the training reward without changing the optimal policy: for any potential $\Phi$,
 
 \begin{flalign}\label{eq:shaping}
     & r_t^{\text{train}} = r_t + \gamma\,\Phi(\mathbf{H}_{t+\Delta t}) - \Phi(\mathbf{H}_t),
 \end{flalign}
 
-leaves the optimal policy invariant, since the cumulative shaped return differs from the raw return only by the boundary term induced by $\Phi$. The potential is an anticipatory estimate of upcoming fast-charging cost, derived from the physical structure of the system. With shaping weight $\omega>0$, fast-charging tariff multiplier $p_\text{FC}$, target arrival \gls{SoC} $\sigma^\text{EV}$, and typical trip consumption $\Delta\sigma$, when the \gls{EV} is connected and controllable the foreseeable deficit at departure is
+so the cumulative shaped return differs from the raw return only by the boundary term induced by $\Phi$. The proposed potential encodes a simple economic cue for the \gls{BESS}: stored energy is more valuable when it was accumulated during relatively cheap tariff periods and can later offset more expensive grid import. Let $\sigma_t^\text{BESS}$ be the battery state of charge, $\underline{\sigma}^\text{BESS}$ its usable lower bound, $\overline{E}^\text{BESS}$ its nominal capacity, and $q_t^\zeta\in[0,1]$ the current tariff percentile over the recent tariff history. The shaping potential is
 
-\begin{flalign}\label{eq:shaping_connected}
-    & \text{cost} = \overline{E}^\text{EV} p_\text{FC}\,
-    \max\!\Big(0,\ \sigma^\text{EV} - \text{SoC}^\text{EV}_t - \tfrac{\overline{P}_c^\text{EV}\,\Delta t_\text{dep}}{\overline{E}^\text{EV}}\Big),
+\begin{flalign}\label{eq:shaping_bess}
+    & \Phi_{\mathrm{BESS}}(\mathbf{H}_t)
+    =
+    \omega_{\mathrm{BESS}}\,
+    \overline{E}^\text{BESS}
+    \max\!\left(0,\sigma_t^\text{BESS}-\underline{\sigma}^\text{BESS}\right)
+    \left(1-q_t^\zeta\right),
 \end{flalign}
 
-with $\Delta t_\text{dep}$ the time to departure; when disconnected, the predicted arrival deficit is offset by the available \gls{BESS} reserve and weighted by arrival urgency $1-t_\text{arr}$,
+where $\omega_{\mathrm{BESS}}$ controls the shaping strength. This term rewards moving into states with usable stored energy when the current price context is cheap, while remaining a potential-based transformation whose raw-reward optimum is preserved. Evaluation always reports the original environment reward $r_t$, so shaped and unshaped policies remain directly comparable.
 
-\begin{flalign}\label{eq:shaping_disconnected}
-    & \text{cost} = p_\text{FC}\,(1-t_\text{arr})\,
-    \max\!\Big(0,\ \overline{E}^\text{EV}\big[\sigma^\text{EV}-\max(\sigma_\text{crit},\,\text{SoC}^\text{EV}_t-\Delta\sigma)\big] - \overline{E}^\text{BESS}\max(0,\text{SoC}^\text{BESS}_t-\underline{\text{SoC}}^\text{BESS})\Big),
+\paragraph{DroQ-style critic dropout.}
+The DroQ ablation inserts a small dropout probability in the reward and cost critic heads during critic training. The actor, replay buffer, safety formulation, and all other hyperparameters are kept unchanged. The purpose is not to change the objective, but to regularize the critic function class so that value estimates do not become excessively sharp around transiently favorable actions.
+
+\paragraph{REDQ-style randomized critic ensemble.}
+The REDQ ablation replaces the clipped double-Q reward critic with an ensemble of $N_Q$ critics. Each critic is trained against the same scalar target, but the Bellman target uses the minimum over a random subset of $M<N_Q$ target critics:
+
+\begin{flalign}\label{eq:redq_target_min}
+    & \widetilde{Q}_{r,\mathrm{REDQ}}^{\bar{\phi}}(\mathbf{H}'_j,a'_j)
+    =
+    \min_{m\in\mathcal{M}_j}
+    Q_{r,m}^{\bar{\phi}_m}(\mathbf{H}'_j,a'_j),
+    \qquad
+    \mathcal{M}_j \subset \{1,\ldots,N_Q\},\ |\mathcal{M}_j|=M.
 \end{flalign}
 
-and $\Phi(\mathbf{H}_t)=-\omega\,\text{cost}$. The critical-\gls{SoC} floor $\sigma_\text{crit}$ in the disconnected branch reflects that mid-trip fast charging returns the vehicle to at least $\sigma_\text{crit}$. Shaping affects only the reward stored for training and therefore the calculation of $R_j^{(N)}$; evaluation always reports the original reward, preserving comparability with the baselines.
-
-\paragraph{Prior-data injection.}
-Following the efficient-online-RL-with-offline-data approach~\cite{ball2023efficient}, a fixed fraction $\rho_{\mathrm{prior}}$ of each minibatch is drawn from a buffer of rule-based \gls{RB}/\gls{RBS} demonstrations and the remainder is drawn from the online replay buffer. The actor never imitates the demonstrations; they only ground the critics' value estimates on a feasible, storage-active manifold throughout training, which is intended to keep the Bellman target from collapsing as the live policy drifts.
-
-\paragraph{Lagged target policy.}
-The continuation action $a'_j$ in the Bellman target of \eqref{eq:critic_target} is sampled from an exponential-moving-average copy of the policy rather than the live actor. Decoupling the target's continuation from a possibly degrading live policy is intended to prevent the target value of good transitions from collapsing together with the policy.
-
-These three mechanisms, together with the two safety-handling formulations and the two initialization regimes, define the method space evaluated in Section~\ref{sec:results}.
+The same subset-min reduction is used for cost critics in the \gls{CMDP} variant. This randomized conservative target is intended to reduce overestimation while avoiding the cost of large ensembles. Together, the \gls{CMDP}, \gls{CMDP}+\(\Phi_{\mathrm{BESS}}\), \gls{CMDP}+DroQ, \gls{CMDP}+REDQ, penalty, and fine-tuned \gls{CMDP} variants define the method space evaluated in Section~\ref{sec:results}.
 
 % ============================================================================
 \subsection{Neural architectures}
@@ -1373,8 +1379,8 @@ This section describes the training and evaluation protocol (Section~\ref{subsec
 \label{subsec:protocol}
 
 % TODO: intro paragraph
-%   - Two-stage pipeline: BC pretraining (per architecture and tariff) -> RL refinement
-%     (per architecture, tariff, and method variant)
+%   - Main pipeline: demonstration-free SAC variants trained per architecture,
+%     tariff, and seed; BC/FT retained as demonstration-based comparator
 %   - Distributed across multiple machines, one architecture per machine
 %   - Skip-if-done markers allow incremental resumption
 %   - Refer back to Section~\ref{subsec:pipeline} for the overall flow
@@ -1383,13 +1389,14 @@ This section describes the training and evaluation protocol (Section~\ref{subsec
 \label{subsubsec:protocol_hp}
 
 % TODO: write this subsection, providing a single consolidated table
-%   - Columns: parameter | symbol | BC | SAC penalty (scratch) | SAC penalty (FT)
-%              | SAC CMDP (scratch) | SAC CMDP (FT)
+%   - Columns: parameter | symbol | penalty | CMDP | CMDP+PBRS
+%              | CMDP+DroQ | CMDP+REDQ | CMDP+FT | BC
 %   - Rows include: gamma, n_step, batch_size, buffer_size, episode count,
 %     warmup_episodes, learning rates (actor, critic, alpha, lambda),
 %     tau, ema_tau, history_len L, observation dim, hidden_dim, head_dim,
 %     reward_scale, target_entropy, init_alpha, shaping_omega, shaping_typical_drop,
-%     cost budgets b_i (CMDP only), prior-data ratio, EMA-backup flag,
+%     cost budgets b_i (CMDP only), shaping_bess_omega, droq_dropout,
+%     n_critics, m_target,
 %     actor_update_start_episode (FT extended for critic warm-up),
 %     bc_init_checkpoint (FT only)
 %   - Distinguish per-method and per-initialization values where they differ.
@@ -1409,7 +1416,8 @@ This section describes the training and evaluation protocol (Section~\ref{subsec
 %   - Test: annual evaluation, 24 windows x 4 checkpoints x 2 modes (raw vs safety-projected)
 %     x 5 tariffs. Reported in absolute units ($/year, kWh/year) for comparability with
 %     classical baselines
-%   - Methods compared at evaluation: BC, SAC penalty (scratch/FT), SAC CMDP (scratch/FT),
+%   - Methods compared at evaluation: BC, SAC penalty, SAC CMDP, CMDP+PBRS,
+%     CMDP+DroQ, CMDP+REDQ, CMDP+FT,
 %     plus the rule-based baselines (RB, RBS). The MILP of Section~\ref{subsec:milp_teacher}
 %     is used only to generate the BC dataset, not as an evaluation reference (it is
 %     infeasible on some held-out windows that require unavoidable EV fast charging).
@@ -1423,8 +1431,8 @@ This section describes the training and evaluation protocol (Section~\ref{subsec
 %   - Rule-based (RB): heuristic priority list - use PV first, store excess in BESS,
 %     charge EV during off-peak hours. No learning, no foresight
 %   - Rule-based with safety (RBS): same as RB plus a feasibility projection
-%   - The learning approaches under comparison are: BC alone, SAC penalty
-%     (scratch and FT), and SAC CMDP (scratch and FT), benchmarked against the
+%   - The learning approaches under comparison are: BC alone, SAC penalty,
+%     SAC CMDP, CMDP+PBRS, CMDP+DroQ, CMDP+REDQ, and CMDP+FT, benchmarked against the
 %     RB and RBS rule-based baselines.
 %   - Cite \cite{abdelaal2021integration-d54, rehman2026iot-4dc} for rule-based residential references
 
@@ -1441,11 +1449,11 @@ This section describes the training and evaluation protocol (Section~\ref{subsec
 
 \subsection{Cost performance across methods and tariffs}
 \label{subsec:res_method_tariff}
-% Core matrix: BC | SAC-penalty (scratch/FT) | SAC-CMDP (scratch/FT) × 5 tariffs.
+% Core matrix: penalty | CMDP | CMDP+PBRS | CMDP+DroQ | CMDP+REDQ | CMDP+FT x 5 tariffs.
 % Annual operating cost ($/year) on the held-out test year and % cost reduction
 % over the RBS rule-based baseline.
-% Headline: which formulation wins per tariff regime, and that warm-start (FT)
-% achieves the largest cost reduction, which from-scratch RL cannot match.
+% Headline: CMDP+PBRS as the demonstration-free punch, with FT as the
+% demonstration-based comparator.
 
 \subsection{Architecture comparison}
 \label{subsec:res_arch}
@@ -1454,9 +1462,8 @@ This section describes the training and evaluation protocol (Section~\ref{subsec
 
 \subsection{Stabilization ablations}
 \label{subsec:res_ablation}
-% Anticipatory shaping (omega sweep), prior-data injection (RLPD), lagged EMA
-% backup. Report as ablations: none of these from-scratch stabilizers fully
-% removes the critic drift. This subsection operationalizes the central thesis.
+% PBRS, DroQ, and REDQ ablations. Report whether PBRS substitutes the practical
+% role of BC warm-start and whether critic regularization reduces residual drift.
 
 \subsection{Comparison against rule-based baselines}
 \label{subsec:res_bounds}
@@ -1471,7 +1478,7 @@ This section describes the training and evaluation protocol (Section~\ref{subsec
 \subsection{Operational analysis}
 \label{subsec:res_operation}
 % BESS/EV dispatch profiles over representative weeks from operations/*.csv.gz.
-% Contrast a from-scratch (drifted) vs FT (warm-started) policy timing to the tariff.
+% Contrast CMDP+PBRS operation vs RBS and FT, including BESS cycling economics.
 
 
 
@@ -1480,8 +1487,8 @@ This section describes the training and evaluation protocol (Section~\ref{subsec
 % ============================================================================
 \section{Discussion}
 \label{sec:discussion}
-% - Decision guidance: when penalty vs CMDP, scratch vs FT, per tariff regime.
-% - Why from-scratch DRL hits the critic-drift ceiling and why BC warm-start
+% - Decision guidance: when penalty vs CMDP, PBRS vs FT, and when DroQ/REDQ helps.
+% - Why seed noise and critic overestimation can masquerade as structural drift.
 %   (or constraint-grounded prior) is what yields the strongest controller.
 % - Practical deployment considerations (safety projection, retraining cadence).
 % - Limitations: single building, simulated weather year, seed variance.

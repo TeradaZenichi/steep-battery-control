@@ -63,6 +63,23 @@ def _has_bc_init(method, arch, tariff):
     return p.exists()
 
 
+def _ensure_supervised(arch, tariff):
+    """If the BC checkpoint for `arch/tariff` is missing, train the supervised
+    pipeline (which generates all 5 tariffs in one call). Idempotent."""
+    target = PROJECT_ROOT / "paper" / "train" / "supervised" / arch / tariff / "best.pt"
+    if target.exists():
+        return True
+    script = PROJECT_ROOT / "supervised" / arch / "train.py"
+    if not script.exists():
+        print(f"[supervised] WARN: {script} not found; cannot auto-generate BC for {arch}")
+        return False
+    print(f"[supervised] missing {target.relative_to(PROJECT_ROOT)}, running {script.relative_to(PROJECT_ROOT)} ...", flush=True)
+    t0 = time.time()
+    rc = _run(script, {})
+    print(f"[supervised] {arch}: rc={rc} ({time.time()-t0:.0f}s)", flush=True)
+    return target.exists()
+
+
 def build_cells(methods, archs, tariffs, base_seeds, extra_seeds, lead_tariff):
     cells = []
     for m in methods:
@@ -91,7 +108,11 @@ def run_cell(method, arch, tariff, seed, skip_test):
     else:
         bc = _has_bc_init(method, arch, tariff)
         if bc is False:
-            return ["train=skip(no-bc)", "test=skip"]
+            # FT method needs a supervised checkpoint that isn't there yet —
+            # generate it (trains all 5 tariffs in one call, ~15-30 min once).
+            ok = _ensure_supervised(arch, tariff)
+            if not ok:
+                return ["train=skip(no-bc)", "test=skip"]
         t0 = time.time()
         rc = _run(SAC_ROOT / method / arch / "train.py", base_env)
         statuses.append(f"train={'ok' if rc == 0 else 'FAIL'}({time.time()-t0:.0f}s)")
