@@ -1,464 +1,474 @@
 # steep-battery-control
 
-Research repository for residential energy management with battery energy storage (BESS), electric vehicle (EV), photovoltaic generation (PV), and dynamic electricity tariffs.
+Research code for residential home energy management with photovoltaic generation
+(PV), a stationary battery (BESS), an electric vehicle (EV), and grid exchange
+under dynamic electricity tariffs.
 
-The project uses a two-stage learning pipeline:
+The current paper studies whether Soft Actor-Critic (SAC) can be trained for
+this setting in a stable, safe, and economically competitive way without relying
+on expert demonstrations or behavior-cloning warm starts.
 
-1. `1-IL` (Imitation Learning): train actors to imitate a MILP teacher (`Pyomo`).
-2. `2-RL` (Reinforcement Learning): refine policies with SAC plus state-bounded actions and a feasibility guard.
+## Current Thesis
 
-## Technical Overview
+The working claim is:
 
-- **Environment**: `environment/__init__.py` (`SmartHomeEnv`) models grid, load, PV, BESS, EV, weather, and tariffs.
-- **Teacher/oracle**: `opt/__init__.py` (`Teacher`) solves dispatch by mathematical optimization.
-- **Model families** in `models/`:
-  - `ATT`, `ATTv2`
-  - `ATT_MEM`, `ATT_MEMv2`
-  - `GRU`, `GRUv2`
-  - `MLP`, `MLPv2`
-  - `TCN`, `TCNv2`
-- **Tariffs** evaluated in train/test loops: `tar_s`, `tar_w`, `tar_sw`, `tar_tou`, `tar_flat`.
-- **Datasets**: `CY/WY` with `Cur` (training/validation) and `Fut` (test/generalization).
+> Constrained SAC with potential-based BESS shaping can learn a competitive
+> residential energy-management policy from simulator interaction, while keeping
+> behavior cloning as a comparison baseline rather than a required ingredient.
 
-## Repository Structure
+The final experiment grid is designed to test four concrete claims:
 
-- `data/`: CSV datasets and global parameters (`parameters.json`).
-- `environment/`: Gymnasium environment.
-- `models/<family>/1-IL/`: IL train/test/HPO/plot scripts.
-- `models/<family>/2-RL/`: RL train/test scripts and RL utilities.
-- `models/test_utils/`: shared test-time teacher and summary utilities.
-- `opt/`: MILP teacher.
-- `scripts/analysis/`: post-processing, statistical tests, and report tables.
-- `scripts/distributed/`: split training and merge utilities.
-- `Results/`: generated artifacts (checkpoints, summaries, logs, analytics).
+1. `CMDP > Penalty`: separating economic reward from safety cost with a
+   Lagrangian CMDP formulation is better than folding all costs into one
+   penalized reward.
+2. `PBRS replaces demonstrations`: a cheap potential-based shaping term
+   `Phi_BESS(s)` can provide the stabilizing role often sought from
+   behavior-cloning initialization.
+3. `Critic overestimation matters`: DroQ-style dropout and REDQ-style randomized
+   critic ensembles reduce residual drift in long-horizon SAC.
+4. `The result generalizes`: conclusions are tested across 3 sequence encoders
+   and 5 tariff structures.
 
-## Environment Details
+## What Is Versioned
 
-The environment is implemented in `SmartHomeEnv` (`environment/__init__.py`).
+The repository tracks code, configurations, and input data needed to reproduce
+the experiments.
 
-### Core Dynamics
+Important tracked paths:
 
-- Simulation step is controlled by `data/parameters.json` (`general.timestep`, currently 5 minutes).
-- Episode length is `days * 24h`, discretized by timestep.
-- Grid power is:
-  - `PGrid = PLoad + PBESS + PEV - PPV`
-- Reward per step is:
-  - `reward = -(energy_cost + grid_penalty + bess_cost + ev_cost + pv_cost)`
+- `data/`: simulation data and system parameters.
+- `environment/`: residential energy-management simulator.
+- `models/`: neural sequence encoders used by supervised and SAC controllers.
+- `opt/`: MILP teacher used to generate behavior-cloning references.
+- `supervised/`: behavior-cloning training used only for the FT comparator.
+- `sac/`: current unified SAC experiment harness.
+- `baselines/`: rule-based baselines.
+- `reinforcement/`: legacy SAC implementations kept for reference.
+- `scripts/`: auxiliary experiment and analysis scripts.
 
-### Action Space
+Generated experiment artifacts are intentionally ignored by git. In particular,
+the `.gitignore` excludes:
 
-The action is 3D:
+- `paper/`: local training, testing, ablation, checkpoint, and operation outputs.
+- `Results/`: legacy generated outputs.
+- `.venv/`, logs, caches, backups, and `__pycache__/`.
 
-- `a[0]`: BESS command in `[-1, 1]` (discharge/charge).
-- `a[1]`: EV command in `[-1, 1]` (V2G/charge, subject to EV availability and limits).
-- `a[2]`: PV curtailment in `[0, 1]`.
+This means `paper/train/...`, `paper/test/...`, `paper/ablation/...`, model
+checkpoints, audit CSVs, and operation traces are local products of a run. They
+are not expected to be present after cloning the repository.
 
-### Observation Space
+## Using The Environment Directly
 
-The observation has 23 features and includes:
+The simulator is a Gymnasium-style environment implemented as
+`environment.SmartHomeEnv`. It can be used without the SAC harness, which is the
+recommended entry point for testing a new methodology such as PPO, TD3, online
+MPC, offline RL, evolutionary search, or a hand-written controller.
 
-1. Time encodings (sin/cos for minute, hour, day, month, weekday).
-2. Power/system terms:
-   - normalized load,
-   - normalized PV,
-   - BESS SoC,
-   - EV SoC (masked when EV is not controllable),
-   - EV controllability flag.
-3. Current tariff value.
-4. Weather features:
-   - `drybulb_C`,
-   - `relhum_percent`,
-   - `Global Horizontal Radiation`,
-   - `dni_Wm2`,
-   - `dhi_Wm2`,
-   - `Wind Speed (m/s)`,
-   - `wdir_deg`.
+Minimal rollout:
 
-### EV Logic
+```python
+import json
+import pandas as pd
 
-The EV sub-environment uses `ev_conn`, `ev_arrival`, and `ev_departure`:
+from environment import SmartHomeEnv
 
-- `ev_conn == 0`: disconnected.
-- `ev_conn == 1`: connected/controllable.
-- `ev_conn == 2`: departure step (power forced to zero).
+df = pd.read_csv(
+    "data/Simulation_CY_Cur_HP__PV5000-HB5000.csv",
+    sep=";",
+    parse_dates=["timestamp"],
+    dayfirst=True,
+    index_col="timestamp",
+)
 
-Arrival and departure are modeled explicitly, including:
+with open("data/parameters.json", encoding="utf-8") as f:
+    params = json.load(f)
 
-- trip-energy jumps,
-- fast-charging cost proxy,
-- SoC-min penalties while connected,
-- degradation terms.
+env = SmartHomeEnv(
+    df=df,
+    parameters=params,
+    start=pd.Timestamp("2000-07-01 00:00:00"),
+    days=2,
+    BESS_SoC=0.5,
+    tariff="tar_sw",
+    track_operation=True,
+)
 
-### Operation Logging
+obs, info = env.reset()
+done = False
+episode_reward = 0.0
 
-When `track_operation=True`, each step is logged to `env.operation` with:
+while not done:
+    action = env.action_space.sample()
+    obs, reward, terminated, truncated, info = env.step(action)
+    episode_reward += reward
+    done = terminated or truncated
 
-- commands (`bess_cmd`, `ev_cmd`, `pv_cmd`),
-- physical powers/energies (`PLoad`, `PPV`, `PBESS`, `PEV`, `PGrid`, `EBESS`, `EEV`),
-- SoCs (`SoCBESS`, `SoCEV`),
-- costs and reward components.
+print(episode_reward)
+print(env.operation.tail())
+```
 
-### Required Dataset Columns
+The environment is not registered through `gym.make`; instantiate
+`SmartHomeEnv` directly.
 
-Training/testing CSV files are expected to include at least:
+### Inputs
 
-- `timestamp`
+`SmartHomeEnv` expects a timestamp-indexed dataframe and the parameter dictionary
+from `data/parameters.json`.
+
+Required dataframe columns for direct closed-loop simulation:
+
 - `electricity_demand_rate_W`
 - `produced_electricity_rate_W`
-- `ev_conn`, `ev_arrival`, `ev_departure`
-- tariff columns (`tar_s`, `tar_w`, `tar_sw`, `tar_tou`, `tar_flat`)
-- weather columns used in state normalization.
+- `ev_conn`
+- `ev_arrival`
+- the selected tariff column, for example `tar_sw`
+- weather columns used by normalization:
+  - `drybulb_C`
+  - `relhum_percent`
+  - `Global Horizontal Radiation`
+  - `dni_Wm2`
+  - `dhi_Wm2`
+  - `Wind Speed (m/s)`
+  - `wdir_deg`
 
-## RL Training Protocol
+The bundled datasets also include `ev_departure`, which is useful for teacher
+and analysis workflows, but the closed-loop environment uses `ev_conn` and
+precomputed arrival/departure indices internally.
 
-The `2-RL` stage refines each actor with Soft Actor-Critic (SAC) after IL pretraining/architecture selection. Each model family has its own `models/<family>/2-RL/train.py`, but the training protocol is shared across families.
+### Actions
 
-### Training Rollout
+The action is a three-dimensional continuous vector:
 
-- One SAC agent is trained per tariff: `tar_s`, `tar_w`, `tar_sw`, `tar_tou`, and `tar_flat`.
-- Each training episode uses two parallel data streams:
-  - `CY` from `Simulation_CY_Cur_HP__PV5000-HB5000.csv`,
-  - `WY` from `Simulation_WY_Cur_HP__PV5000-HB5000.csv`.
-- The default RL horizon is `7` days at the global 5-minute timestep.
-- With two streams, this gives `4032` environment steps per episode:
-  - `2016` steps for CY,
-  - `2016` steps for WY.
-- Warmup samples random actions directly inside the state-dependent feasible BESS/EV bounds and then applies the model-level guard.
-- After warmup, the actor samples stochastic actions directly inside the state-dependent BESS/EV/PV bounds and stores executable actions in replay.
-
-### SAC Update
-
-Each update samples lazy history sequences from the replay buffer and applies:
-
-- twin critics with target critics,
-- n-step returns,
-- automatic entropy temperature (`alpha`),
-- actor loss composed of:
-  - entropy term,
-  - Q-value term.
-
-The main RL hyperparameters are configured in `models/<family>/2-RL/config.json`, including:
-
-- `batch_size`,
-- `history_len`,
-- `n_step`,
-- `update_every_steps`,
-- `early_stop_patience`,
-- `gamma`,
-- `tau`,
-- `alpha_lr`.
-
-Other training choices are intentionally fixed in code for reproducibility and simpler experiment management:
-
-- `days = 7`,
-- `train_episodes = 300`,
-- `warmup_episodes = 10`,
-- `evaluate_every = 1`,
-- `target_entropy = -2.0`,
-- `log_std_max = 0`,
-- `buffer_size = 200000`,
-- `train_env_workers = 1`,
-- `eval_workers = 12`.
-
-### Bounded Actor and Feasibility Guard
-
-The actor samples a raw Gaussian variable, applies `tanh`, and then maps the BESS and EV components directly to the feasible action interval induced by the current observation. PV curtailment is mapped to `[0, 1]` with the same smooth transform used by all model families.
-
-This avoids the old mismatch where SAC optimized the log-probability of a pre-projection action while the critic and environment saw the projected action. The model-level projection remains as a guard for numerical drift:
-
-1. The bounded sampled action is sent to the environment.
-2. The guard projection is applied afterward and should usually have zero residual.
-3. The residual is still logged as a feasibility cost.
-
-In normal policy rollouts, the projection cost should remain near zero because the actor distribution is already state-feasible.
-
-### Validation and Early Stopping
-
-Validation runs every episode. The validation suite has 24 scenarios:
-
-- 12 monthly CY scenarios,
-- 12 monthly WY scenarios,
-- 7 days per scenario,
-- initial BESS SoC cycling through `0.2`, `0.5`, and `0.8`.
-
-Validation uses a process pool with `eval_workers = 12`, so the 24 scenarios run in two parallel batches. Early stopping is delayed until at least 100 episodes and then controlled by `early_stop_patience`.
-
-### Checkpoints
-
-The trainer writes four deterministic checkpoint families:
-
-- reward checkpoint:
-  - `best_actor_eval.pt`,
-  - `best_actor_eval_det.pt`,
-  - `best_checkpoint_eval.pt`,
-  - `best_checkpoint_eval_det.pt`,
-  - `best_eval_meta.json`,
-  - `best_eval_det_meta.json`.
-- robust checkpoint:
-  - `best_actor_eval_robust.pt`,
-  - `best_checkpoint_eval_robust.pt`,
-  - `best_eval_robust_meta.json`.
-- operational checkpoint:
-  - `best_actor_eval_operational.pt`,
-  - `best_checkpoint_eval_operational.pt`,
-  - `best_eval_operational_meta.json`.
-- final checkpoint:
-  - `final_actor.pt`,
-  - `final_checkpoint.pt`,
-  - `final_eval_meta.json`.
-
-The reward checkpoint selects the highest deterministic validation reward.
-
-The robust checkpoint selects the highest mean reward over the two worst validation scenarios. This avoids choosing a policy that wins only by overperforming in easier validation windows.
-
-The operational checkpoint considers policies within a small reward tolerance of the current best reward and then prefers lower operational side costs: grid penalty, EV cost, and PV curtailment cost. It is meant for inspection and figure selection, while the reward checkpoint remains the main result checkpoint.
-
-The final checkpoint stores the last actor and a final deterministic validation summary. It is useful for diagnosing late training degradation.
-
-### Training Audit
-
-Every 5 episodes, and also at the end of training or early stopping, the trainer flushes `audit_training.csv` with:
-
-- training reward,
-- deterministic validation reward,
-- worst-case and robust validation reward,
-- operational validation score,
-- best checkpoint scores,
-- Q-value and backup statistics,
-- `alpha`,
-- projection cost metrics,
-- violation fraction,
-- actor/critic/alpha losses,
-- no-improvement counters,
-- episode timing.
-
-## RL Scripts (Detailed)
-
-RL scripts live under `models/<family>/2-RL/`.
-
-### `train.py`
-
-Main behavior:
-
-- Trains one SAC agent per tariff (`tar_s`, `tar_w`, `tar_sw`, `tar_tou`, `tar_flat`).
-- Uses two training streams (`CY` and `WY`) sampled by `EpisodeGen`.
-- Runs warmup episodes with random actions before gradient updates.
-- Uses a replay buffer split by data stream (`CY`/`WY`) with:
-  - history stacking (`history_len`),
-  - n-step returns (`n_step`),
-  - independent n-step queues and episode ids per stream,
-  - lower memory usage by storing flat transitions and reconstructing sequences on sample.
-- Supports multi-thread stepping for train environments (`train_env_workers`).
-- Supports process-pool parallel evaluation (`eval_workers`).
-
-SAC update logic includes:
-
-- critic backup with entropy term,
-- actor loss with two terms:
-  - entropy term,
-  - Q term.
-- automatic entropy temperature update (`alpha`) when configured.
-- target critic soft update (`tau`).
-
-Feasibility/constraint handling:
-
-- Actor output is sampled directly inside action-feasible bounds.
-- The model-level projection remains as a final guard and its residual induces a cost when nonzero.
-- Projection cost is logged as a diagnostic; it is not part of the actor objective.
-
-Evaluation and checkpoint policy:
-
-- Deterministic validation every episode on the configured validation suite.
-- Saves reward-selected deterministic checkpoints:
-  - `best_actor_eval.pt`,
-  - `best_actor_eval_det.pt`.
-- Saves robust deterministic checkpoints:
-  - `best_actor_eval_robust.pt`.
-- Saves operational deterministic checkpoints:
-  - `best_actor_eval_operational.pt`.
-- Saves final-episode checkpoints:
-  - `final_actor.pt`.
-- Saves full checkpoint files and metadata JSON.
-- Writes `audit_training.csv` with episode-level diagnostics:
-  - rewards,
-  - Q/backup statistics,
-  - alpha,
-  - cost violation metrics,
-  - actor/critic/alpha losses,
-  - no-improvement counters,
-  - timing.
-
-Early stop:
-
-- Controlled by `early_stop_patience` and `min_episodes_before_early_stop`.
-
-### `test.py`
-
-Main behavior:
-
-- Evaluates trained RL actors against the cached teacher summaries.
-- Supports checkpoint selection with:
-  - `--actor-variant combo|det`
-- For each tariff and configured test run:
-  - rolls out actor in `SmartHomeEnv`,
-  - computes actor reward,
-  - compares to teacher reward,
-  - exports optional operation and breakdown CSVs.
-- Writes:
-  - `summary_<variant>.json`,
-  - legacy `summary.json` for `combo`,
-  - per-variant operation files,
-  - cross-variant comparison table `actor_variant_comparison.csv`.
-
-### `utils.py`
-
-Contains reusable RL components:
-
-- `ReplayBuffer` (lazy-frame, n-step, sequence reconstruction),
-- `EpisodeGen` (CY/WY sampling outside validation windows),
-- `Hyperparameters`,
-- `Temperature` (learnable entropy coefficient),
-- `_eval_worker` (parallel evaluation rollout helper).
-
-## Requirements
-
-- Python `3.13` (project currently uses this version).
-- Dependencies from `requirements.txt`.
-- MILP solver available through Pyomo (current default in teacher is `gurobi`).
-- CUDA GPU is optional but strongly recommended for full experiments.
-- `scipy` for Wilcoxon tests in `scripts/analysis/generate_bootstrap_wilcoxon.py`.
-
-## Installation
-
-From the repository root:
-
-```powershell
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install --upgrade pip
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
-.\.venv\Scripts\python.exe -m pip install scipy
+```text
+[a_bess, a_ev, a_pv]
 ```
 
-## How To Run
+with bounds:
 
-Run all commands from the repository root.
+- `a_bess in [-1, 1]`: negative discharges the stationary battery, positive
+  charges it.
+- `a_ev in [-1, 1]`: negative discharges the EV when available, positive charges
+  it.
+- `a_pv in [0, 1]`: photovoltaic curtailment fraction.
 
-### 1) Build teacher baseline for test runs
+The environment clips actions to this box and then applies device-level physics:
+state-of-charge limits, power limits, availability, efficiencies,
+self-discharge, battery degradation, EV trip energy, and EV fast-charging
+fallback costs.
 
-```powershell
-.\.venv\Scripts\python.exe .\generate_teacher_test_baseline.py --family all --stage all
+The bare environment does not guarantee grid-feasible actions. If grid import or
+export limits are exceeded, the violation is charged through the grid penalty in
+the reward. For deployment-style comparisons, use a safety guard during
+evaluation or reproduce the safety-projected evaluation path used by the SAC
+tests.
+
+### Observations
+
+The observation vector currently has 34 features:
+
+- 10 cyclic time features for minute, hour, day, month, and weekday.
+- normalized load and available PV.
+- BESS SoC, EV SoC, and EV controllability flag.
+- current tariff.
+- 7 normalized weather features.
+- tariff percentile over recent history.
+- short-term PV moving average.
+- EV timing features: time since arrival, time until departure, and time until
+  next arrival.
+- one-day and one-week lags of tariff, PV, and load.
+
+The exact construction is in `SmartHomeEnv._get_observation()`. A new method
+should treat `env.observation_space.shape` as the source of truth rather than
+hard-coding the dimension.
+
+### Rewards And Diagnostics
+
+The reward is the negative operating cost:
+
+```text
+reward = -(grid_energy_cost + grid_penalty + bess_cost + ev_cost + pv_cost)
 ```
 
-This creates/reuses shared teacher cache and writes `teacher_summary.json` per family/stage/tariff.
+The `info` dictionary returned by `step()` includes:
 
-### 2) Train and test one family (example: MLP)
+- `energy_cost`
+- `bess_cost`
+- `ev_cost`
+- `pv_cost`
+- `penalty`
+- `pgrid`
+- `pbess`
+- `pev`
+- `ppv`
+- `timestep`
 
-```powershell
-# IL
-.\.venv\Scripts\python.exe .\models\MLP\1-IL\train.py
-.\.venv\Scripts\python.exe .\models\MLP\1-IL\test.py
+For fast training, use `track_operation=False`. For debugging and plots, use
+`track_operation=True`; the full step-by-step trace is stored in
+`env.operation`.
 
-# RL
-.\.venv\Scripts\python.exe .\models\MLP\2-RL\train.py
-.\.venv\Scripts\python.exe .\models\MLP\2-RL\test.py --actor-variant combo
-.\.venv\Scripts\python.exe .\models\MLP\2-RL\test.py --actor-variant det
+### Resetting Scenarios
+
+The same environment instance can be reused with different start dates, horizon
+lengths, and initial BESS SoC:
+
+```python
+obs, info = env.reset(options={
+    "start": "2000-08-01 00:00:00",
+    "days": 7,
+    "bess_soc": 0.8,
+})
 ```
 
-### 3) Run all families sequentially
+For fair comparison with the paper grid, evaluate methods on the same monthly
+validation/test windows and tariff columns used by `sac/run_final_grid.py` and
+the SAC test scripts.
 
-```powershell
-$families = @("ATT","ATTv2","ATT_MEM","ATT_MEMv2","GRU","GRUv2","MLP","MLPv2","TCN","TCNv2")
-foreach ($f in $families) {
-  .\.venv\Scripts\python.exe ".\models\$f\1-IL\train.py"
-  .\.venv\Scripts\python.exe ".\models\$f\1-IL\test.py"
-  .\.venv\Scripts\python.exe ".\models\$f\2-RL\train.py"
-  .\.venv\Scripts\python.exe ".\models\$f\2-RL\test.py --actor-variant combo"
-}
+## Current Experiment Matrix
+
+The final SAC grid is defined in `sac/run_final_grid.py`.
+
+Methods in the final grid:
+
+- `u_penalty`: penalty-based SAC.
+- `u_cmdp`: CMDP-Lagrangian SAC with separate EV cost critics.
+- `u_cmdp_shaped`: CMDP SAC plus potential-based BESS shaping.
+- `u_cmdp_ft`: CMDP SAC initialized from a behavior-cloning actor.
+- `u_cmdp_droq`: CMDP SAC with DroQ-style critic dropout.
+- `u_cmdp_redq`: CMDP SAC with a REDQ-style randomized critic ensemble.
+
+Architectures:
+
+- `GRU`
+- `MHA`
+- `TCN`
+
+Tariffs:
+
+- `tar_flat`
+- `tar_s`
+- `tar_w`
+- `tar_sw`
+- `tar_tou`
+
+Seeds:
+
+- Seed `42` for every method, architecture, and tariff.
+- Extra seeds `7` and `13` on the lead tariff `tar_sw`.
+
+The lean final grid therefore has:
+
+- `6` methods
+- `3` architectures
+- `5` tariffs
+- `3` seeds only for `tar_sw`
+- `126` train/test cells in total
+
+## SAC Harness
+
+The unified SAC implementation lives under `sac/`.
+
+Key files:
+
+- `sac/common/trainer.py`: shared train loop, validation, checkpointing.
+- `sac/common/updates.py`: SAC, CMDP, DroQ, and REDQ update logic.
+- `sac/run_final_grid.py`: generic grid orchestrator with skip-if-done markers.
+- `sac/run_final_gru.py`: hardcoded GRU machine runner.
+- `sac/run_final_mha.py`: hardcoded MHA machine runner.
+- `sac/run_final_tcn.py`: hardcoded TCN machine runner.
+- `sac/make_configs.py`: config generator. See the warning below before using it.
+
+Each experiment directory follows the same layout:
+
+```text
+sac/<method>/<arch>/
+    config.json
+    train.py
+    test.py
 ```
 
-## Distributed Training (A/B/C)
+Training writes to:
 
-Recommended for large experimental campaigns.
-
-### Run split training
-
-```powershell
-# Machine A
-.\.venv\Scripts\python.exe .\scripts\distributed\run_machine_A.py
-
-# Machine B
-.\.venv\Scripts\python.exe .\scripts\distributed\run_machine_B.py
-
-# Machine C
-.\.venv\Scripts\python.exe .\scripts\distributed\run_machine_C.py
+```text
+paper/train/<method>/<arch>/<tariff>[-s<seed>]/
 ```
 
-You can also run:
+Testing writes to:
 
-```powershell
-.\.venv\Scripts\python.exe .\scripts\distributed\run_split_training.py --machine A --stage all
+```text
+paper/test/<method>/<arch>/<tariff>[-s<seed>]/
 ```
 
-### Package and merge results
+The orchestrator skips completed work using:
 
-```powershell
-# On remote machine (packager currently accepts A or B)
-.\.venv\Scripts\python.exe .\scripts\distributed\package_split_results.py --machine B --stage all
+- `.train_done`
+- `.test_done`
 
-# On main machine
-.\.venv\Scripts\python.exe .\scripts\distributed\merge_split_results.py --source .\Results\analysis\package_machine_B_all_YYYYMMDD_HHMMSS.zip
+If a directory exists without the corresponding marker, treat it as an
+in-progress or interrupted run.
+
+## Behavior Cloning Comparator
+
+The main SAC methods are demonstration-free. Behavior cloning is used only for:
+
+- the stand-alone supervised reference, and
+- the `u_cmdp_ft` fine-tuning comparator.
+
+Supervised checkpoints are expected at:
+
+```text
+paper/train/supervised/<arch>/<tariff>/best.pt
 ```
 
-## Analysis and Reporting
-
-After `Results/test` is available:
+They can be generated with:
 
 ```powershell
-.\.venv\Scripts\python.exe .\scripts\analysis\generate_tariff_spreadsheets.py
-.\.venv\Scripts\python.exe .\scripts\analysis\generate_bootstrap_wilcoxon.py
-.\.venv\Scripts\python.exe .\scripts\analysis\generate_statistical_tables.py
-.\.venv\Scripts\python.exe .\scripts\analysis\generate_operational_stats.py
-.\.venv\Scripts\python.exe .\scripts\analysis\generate_critic_weakness_diagnostic.py
+.\.venv\Scripts\python.exe supervised\run_supervised_gru.py
+.\.venv\Scripts\python.exe supervised\run_supervised_mha.py
+.\.venv\Scripts\python.exe supervised\run_supervised_tcn.py
 ```
 
-Main outputs:
+The architecture-specific supervised runners are idempotent and train the five
+tariffs for that architecture. The GRU runner forces CPU use so it can run
+without competing with an active SAC grid on the GPU.
 
-- `Results/analysis/`: per-tariff comparisons and distributed logs.
-- `Results/statistical_tests/`: bootstrap CI + paired Wilcoxon outputs (CSV/TEX).
-- `Results/figures/analysis/operational_stats/`: operational comparison plots.
+## Running The Final Grid
 
-## Expected Artifacts
+All commands should be launched from the repository root.
 
-- `Results/train/<MODEL>/1-IL/<TARIFF>/`
-  - `best.pth`
-  - `best_params.json`
-  - `actor_cfg.json`
-- `Results/train/<MODEL>/2-RL/<TARIFF>/`
-  - `best_actor_eval.pt`, `best_actor_eval_det.pt`
-  - `best_actor_eval_robust.pt`, `best_actor_eval_operational.pt`
-  - `final_actor.pt`
-  - `best_checkpoint_eval*.pt`
-  - `best_eval*_meta.json`
-  - `final_checkpoint.pt`, `final_eval_meta.json`
-  - `audit_training.csv`
-- `Results/test/<MODEL>/<STAGE>/<TARIFF>/`
-  - `teacher_summary.json`
-  - `summary.json` and/or `summary_<variant>.json`
-  - actor/teacher operation CSVs
-  - breakdown CSVs
+To preview the current plan and local completion markers:
 
-## Academic Contributions
+```powershell
+.\.venv\Scripts\python.exe sac\run_final_grid.py --plan-only
+```
 
-1. Hybrid optimization-learning methodology (MILP teacher plus IL/RL student policies).
-2. Controlled benchmarking across architectures, tariffs, and training stages.
-3. Reproducible experiment setup through JSON configs, fixed seeds, and teacher caching.
-4. Fair IL vs RL comparisons on shared test definitions and identical teacher baseline.
-5. Statistical rigor using bootstrap confidence intervals and paired Wilcoxon testing.
-6. Interpretable cost decomposition (energy, penalties, BESS/EV degradation, fast-charge events).
-7. Scalable workflow via distributed training and result consolidation.
+Preview only one architecture:
 
-## Notes
+```powershell
+.\.venv\Scripts\python.exe sac\run_final_grid.py --archs GRU --plan-only
+```
 
-- The teacher uses `gurobi` by default in `opt.Teacher.solve()`.
-- Full training is computationally expensive; distributed execution is recommended.
-- Some analysis scripts intentionally focus on model subsets, depending on experiment design.
+Run the hardcoded architecture runners:
+
+```powershell
+.\.venv\Scripts\python.exe sac\run_final_gru.py
+.\.venv\Scripts\python.exe sac\run_final_mha.py
+.\.venv\Scripts\python.exe sac\run_final_tcn.py
+```
+
+Run a distributed split across three machines:
+
+```powershell
+.\.venv\Scripts\python.exe sac\run_final_grid.py --machine 1/3
+.\.venv\Scripts\python.exe sac\run_final_grid.py --machine 2/3
+.\.venv\Scripts\python.exe sac\run_final_grid.py --machine 3/3
+```
+
+Run only a method subset:
+
+```powershell
+.\.venv\Scripts\python.exe sac\run_final_grid.py --methods u_cmdp,u_cmdp_shaped --archs GRU
+```
+
+Run only seed `42` without extra lead-tariff seeds:
+
+```powershell
+.\.venv\Scripts\python.exe sac\run_final_grid.py --seeds 42 --extra-seeds none
+```
+
+Train without annual testing:
+
+```powershell
+.\.venv\Scripts\python.exe sac\run_final_grid.py --skip-test
+```
+
+## Monitoring Runs
+
+Use the plan view for the most reliable live status:
+
+```powershell
+.\.venv\Scripts\python.exe sac\run_final_grid.py --archs GRU --plan-only
+```
+
+Training diagnostics are written incrementally to:
+
+```text
+paper/train/<method>/<arch>/<tariff>[-s<seed>]/audit_training.csv
+```
+
+Example:
+
+```powershell
+Get-Content paper\train\u_cmdp\GRU\tar_sw-s13\audit_training.csv -Tail 5
+```
+
+A completed training cell contains checkpoints:
+
+- `best.pt`
+- `best_robust.pt`
+- `best_worst.pt`
+- `last.pt`
+
+and metadata files:
+
+- `best_meta.json`
+- `best_robust_meta.json`
+- `best_worst_meta.json`
+- `last_meta.json`
+
+Annual testing evaluates the checkpoints in raw and safety-projected modes and
+writes summaries plus operation traces under `paper/test/...`.
+
+## Important Config Warning
+
+During the current campaign, the active `sac/<method>/<arch>/config.json` files
+are the source of truth.
+
+Do not regenerate configs blindly with:
+
+```powershell
+.\.venv\Scripts\python.exe sac\make_configs.py
+```
+
+unless `sac/make_configs.py` has first been checked against the active configs.
+A previous unstable setting used `target_entropy = -1.0`; the patched active
+final-grid configs use `target_entropy = -2.0` to avoid entropy-temperature
+explosion caused by the narrow feasible BESS action interval.
+
+## Preliminary Phase-0 Evidence
+
+The ablation campaign in `sac/ablation/` was used to diagnose the original SAC
+drift story before launching the final grid.
+
+The main lesson was that single-seed conclusions were misleading:
+
+- apparent SAC drift varied strongly by seed,
+- potential-based BESS shaping reduced seed variance,
+- the shaped policy used the BESS conservatively when tariff spreads did not
+  justify aggressive cycling,
+- against the RBS-safe baseline on a representative 48 h window, the shaped
+  policy reduced cost while using substantially less BESS energy.
+
+These ablation artifacts are generated under `paper/ablation/`, which is ignored
+by git. They should be regenerated locally when needed.
+
+## Baselines
+
+Rule-based baselines live under:
+
+- `baselines/RB/`
+- `baselines/RBS/`
+
+`RBS` is the safer rule-based reference used as the practical baseline for the
+money-plot comparison. It is useful for interpreting whether learned policies are
+economically better because they control better, not because they violate
+constraints that a deployable controller would respect.
+
+## Legacy Code
+
+The older `models/` and `reinforcement/` training paths are kept because they
+document the project history and still contain reusable components. The current
+paper grid, however, is the unified path under `sac/` plus the supervised BC
+comparators under `supervised/`.
+
+For new final-paper runs, prefer `sac/run_final_grid.py` or the architecture
+runners in `sac/run_final_*.py`.
