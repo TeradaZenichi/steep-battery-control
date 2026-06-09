@@ -37,8 +37,11 @@ class Actor(BaseActor):
 
 class Critic(nn.Module):
     def __init__(self, state_dim, action_dim, hidden_dim, num_layers, head_dim,
-                 num_heads=4, dropout=0.05, use_layer_norm=False, n_critics=2):
+                 num_heads=4, dropout=0.05, use_layer_norm=False, dropout_rate=0.0, n_critics=2):
         super().__init__()
+        # `dropout` is the architectural attention/feed-forward dropout; `dropout_rate`
+        # is the DroQ head dropout, kept active at the Bellman target (see trainer).
+        pq = float(dropout_rate)
 
         def build():
             proj = nn.Linear(state_dim, hidden_dim)
@@ -51,11 +54,12 @@ class Critic(nn.Module):
                 nn.Linear(hidden_dim, hidden_dim),
             )
             ln = nn.LayerNorm(hidden_dim) if use_layer_norm else nn.Identity()
-            mlp = nn.Sequential(
-                nn.Linear(hidden_dim + action_dim, hidden_dim), nn.ReLU(),
-                nn.Linear(hidden_dim, head_dim), nn.ReLU(),
-                nn.Linear(head_dim, 1),
-            )
+            head = [nn.Linear(hidden_dim + action_dim, hidden_dim), nn.ReLU()]
+            if pq > 0: head.append(nn.Dropout(pq))
+            head += [nn.Linear(hidden_dim, head_dim), nn.ReLU()]
+            if pq > 0: head.append(nn.Dropout(pq))
+            head += [nn.Linear(head_dim, 1)]
+            mlp = nn.Sequential(*head)
             return proj, attn, ff, ln, mlp
 
         self.n_critics = int(n_critics)
@@ -111,6 +115,7 @@ def load_critic(cfg, device=None):
         num_heads=int(cfg.get("num_heads", 4)),
         dropout=float(cfg.get("dropout", 0.05)),
         use_layer_norm=bool(cfg.get("use_layer_norm", False)),
+        dropout_rate=float(cfg.get("dropout_rate", 0.0)),
         n_critics=int(cfg.get("n_critics", 2)),
     )
     return c if device is None else c.to(device)
