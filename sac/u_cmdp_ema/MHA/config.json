@@ -28,7 +28,7 @@
         "reward_scale": 0.1,
         "grad_clip": true,
         "ema_tau": 0.99,
-        "precision": "bf16",
+        "precision": "fp32",
         "droq_dropout": 0.0,
         "n_critics": 2,
         "m_target": null,

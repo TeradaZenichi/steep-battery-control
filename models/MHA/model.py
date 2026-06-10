@@ -1,14 +1,49 @@
-"""Lightweight multi-head attention SAC model.
+"""Multi-head attention SAC model (single pre-LN Transformer encoder block).
 
-This is intentionally smaller than a Transformer encoder: one input projection,
-one self-attention block, and the last contextual token feeds the heads. The
-observation already carries calendar encodings, so no extra positional encoding
-is added here.
+Design for stable training under SAC-CMDP:
+  * sinusoidal positional encoding added to the projected history, so the
+    attention sees explicit sequence order / recency (the calendar features give
+    absolute wall-clock time, but not relative position within the window);
+  * one `nn.TransformerEncoderLayer(norm_first=True)` block, i.e. pre-LN with a
+    residual + LayerNorm around BOTH the self-attention and the feed-forward
+    sublayers. An earlier hand-rolled block without the residual-around-attention
+    collapsed the moment the actor started updating.
+
+Capacity stays matched to the other encoders: 1 layer, `dim_feedforward =
+hidden_dim`, and the positional encoding is a non-learnable buffer (0 params).
+The last contextual token feeds the heads.
 """
+import math
+
 import torch
 import torch.nn as nn
 
 from models.GRU.model import Actor as BaseActor
+
+
+class SinusoidalPE(nn.Module):
+    """Fixed sinusoidal positional encoding (Vaswani et al.); 0 learnable params."""
+
+    def __init__(self, d_model, max_len=512):
+        super().__init__()
+        pe = torch.zeros(int(max_len), int(d_model))
+        pos = torch.arange(int(max_len)).unsqueeze(1).float()
+        div = torch.exp(torch.arange(0, int(d_model), 2).float() * (-math.log(10000.0) / int(d_model)))
+        pe[:, 0::2] = torch.sin(pos * div)
+        pe[:, 1::2] = torch.cos(pos * div)
+        self.register_buffer("pe", pe.unsqueeze(0))  # (1, max_len, d_model)
+
+    def forward(self, x):  # x: (B, T, d_model)
+        return x + self.pe[:, : x.size(1)]
+
+
+def _make_encoder(hidden_dim, num_heads, dropout, num_layers):
+    layer = nn.TransformerEncoderLayer(
+        d_model=int(hidden_dim), nhead=int(num_heads), dim_feedforward=int(hidden_dim),
+        dropout=float(dropout), activation="relu", batch_first=True, norm_first=True,
+    )
+    return nn.TransformerEncoder(layer, num_layers=max(1, int(num_layers)),
+                                 enable_nested_tensor=False)
 
 
 class Actor(BaseActor):
@@ -17,22 +52,20 @@ class Actor(BaseActor):
         super().__init__(input_dim, hidden_dim, 1, head_dim, **kwargs)
         del self.gru
         self.proj = nn.Linear(input_dim, hidden_dim)
-        self.attn = nn.MultiheadAttention(
-            hidden_dim, int(num_heads), dropout=float(dropout), batch_first=True
-        )
-        self.ff = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
-            nn.Dropout(float(dropout)),
-            nn.Linear(hidden_dim, hidden_dim),
-        )
+        self.pe = SinusoidalPE(hidden_dim)
+        self.enc = _make_encoder(hidden_dim, num_heads, dropout, num_layers)
 
     def _enc(self, x):
         x = x.unsqueeze(1) if x.dim() == 2 else x
-        z = self.proj(x)
-        h, _ = self.attn(z, z, z, need_weights=False)
-        h = h + self.ff(h)
-        h = h[:, -1, :]
-        return self.ln(h) if self.ln is not None else h
+        # Attention is numerically fragile in bf16 (the policy collapses the moment
+        # the actor starts updating). Run the whole encoder in fp32 even under a
+        # bf16 autocast; the rest of the actor stays in the outer precision.
+        with torch.autocast(device_type=x.device.type, enabled=False):
+            z = self.pe(self.proj(x.float()))
+            h = self.enc(z)[:, -1, :]
+            if self.ln is not None:
+                h = self.ln(h)
+        return h
 
 
 class Critic(nn.Module):
@@ -45,14 +78,8 @@ class Critic(nn.Module):
 
         def build():
             proj = nn.Linear(state_dim, hidden_dim)
-            attn = nn.MultiheadAttention(
-                hidden_dim, int(num_heads), dropout=float(dropout), batch_first=True
-            )
-            ff = nn.Sequential(
-                nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
-                nn.Dropout(float(dropout)),
-                nn.Linear(hidden_dim, hidden_dim),
-            )
+            pe = SinusoidalPE(hidden_dim)
+            enc = _make_encoder(hidden_dim, num_heads, dropout, num_layers)
             ln = nn.LayerNorm(hidden_dim) if use_layer_norm else nn.Identity()
             head = [nn.Linear(hidden_dim + action_dim, hidden_dim), nn.ReLU()]
             if pq > 0: head.append(nn.Dropout(pq))
@@ -60,31 +87,31 @@ class Critic(nn.Module):
             if pq > 0: head.append(nn.Dropout(pq))
             head += [nn.Linear(head_dim, 1)]
             mlp = nn.Sequential(*head)
-            return proj, attn, ff, ln, mlp
+            return proj, pe, enc, ln, mlp
 
         self.n_critics = int(n_critics)
-        self.projs = nn.ModuleList(); self.attns = nn.ModuleList()
-        self.ffs = nn.ModuleList(); self.lns = nn.ModuleList(); self.mlps = nn.ModuleList()
+        self.projs = nn.ModuleList(); self.pes = nn.ModuleList(); self.encs = nn.ModuleList()
+        self.lns = nn.ModuleList(); self.mlps = nn.ModuleList()
         for _ in range(self.n_critics):
-            proj, attn, ff, ln, mlp = build()
-            self.projs.append(proj); self.attns.append(attn); self.ffs.append(ff)
+            proj, pe, enc, ln, mlp = build()
+            self.projs.append(proj); self.pes.append(pe); self.encs.append(enc)
             self.lns.append(ln); self.mlps.append(mlp)
         if self.n_critics == 2:
-            self.proj1, self.attn1, self.ff1, self.ln1, self.mlp1 = self.projs[0], self.attns[0], self.ffs[0], self.lns[0], self.mlps[0]
-            self.proj2, self.attn2, self.ff2, self.ln2, self.mlp2 = self.projs[1], self.attns[1], self.ffs[1], self.lns[1], self.mlps[1]
+            self.proj1, self.pe1, self.enc1, self.ln1, self.mlp1 = self.projs[0], self.pes[0], self.encs[0], self.lns[0], self.mlps[0]
+            self.proj2, self.pe2, self.enc2, self.ln2, self.mlp2 = self.projs[1], self.pes[1], self.encs[1], self.lns[1], self.mlps[1]
 
-    def _q(self, proj, attn, ff, ln, mlp, obs, act):
+    def _q(self, proj, pe, enc, ln, mlp, obs, act):
         x = obs.unsqueeze(1) if obs.dim() == 2 else obs
-        z = proj(x)
-        h, _ = attn(z, z, z, need_weights=False)
-        h = h + ff(h)
-        h = h[:, -1, :]
-        if ln is not None and not isinstance(ln, nn.Identity):
-            h = ln(h)
-        return mlp(torch.cat([h, act], dim=-1))
+        # Encoder in fp32 (see Actor._enc); the Q head runs in the outer precision.
+        with torch.autocast(device_type=x.device.type, enabled=False):
+            z = pe(proj(x.float()))
+            h = enc(z)[:, -1, :]
+            if ln is not None and not isinstance(ln, nn.Identity):
+                h = ln(h)
+        return mlp(torch.cat([h.to(act.dtype), act], dim=-1))
 
     def forward(self, obs, act):
-        return tuple(self._q(self.projs[i], self.attns[i], self.ffs[i], self.lns[i], self.mlps[i], obs, act)
+        return tuple(self._q(self.projs[i], self.pes[i], self.encs[i], self.lns[i], self.mlps[i], obs, act)
                      for i in range(self.n_critics))
 
 
