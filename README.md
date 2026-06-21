@@ -8,26 +8,27 @@ The current paper studies whether Soft Actor-Critic (SAC) can be trained for
 this setting in a stable, safe, and economically competitive way without relying
 on expert demonstrations or behavior-cloning warm starts.
 
-## Current Thesis
+> **For new methods, start with the environment.** The main reusable artifact in
+> this repository is `environment.SmartHomeEnv`: a method-agnostic, Gymnasium-style
+> simulator of a home with PV, BESS, EV, and grid exchange under five tariffs. You
+> can plug in any controller (RL, MPC, offline RL, evolutionary search, or a
+> hand-written rule) without needing the rest of the codebase. See
+> [Using The Environment Directly](#using-the-environment-directly) for a minimal
+> rollout. Everything else here (`sac/`, `opt/`, `supervised/`, `baselines/`) is one
+> set of controllers built on top of the simulator, not a prerequisite for using it.
 
-The working claim is:
+## Scope
 
-> Constrained SAC with potential-based BESS shaping can learn a competitive
-> residential energy-management policy from simulator interaction, while keeping
-> behavior cloning as a comparison baseline rather than a required ingredient.
+This repository provides the simulation environment, a set of controllers, and an
+evaluation harness for the residential PV + BESS + EV + grid setting under dynamic
+tariffs. The controllers include rule-based baselines, a behavior-cloning reference
+distilled from a MILP teacher, and several Soft Actor-Critic variants (penalty-based
+and CMDP-Lagrangian, with optional reward shaping and anti-overestimation critics).
+They are run across three sequence encoders (GRU, attention, TCN) and five tariff
+structures under a shared train/validation/test protocol.
 
-The final experiment grid is designed to test four concrete claims:
-
-1. `CMDP > Penalty`: separating economic reward from safety cost with a
-   Lagrangian CMDP formulation is better than folding all costs into one
-   penalized reward.
-2. `PBRS replaces demonstrations`: a cheap potential-based shaping term
-   `Phi_BESS(s)` can provide the stabilizing role often sought from
-   behavior-cloning initialization.
-3. `Critic overestimation matters`: DroQ-style dropout and REDQ-style randomized
-   critic ensembles reduce residual drift in long-horizon SAC.
-4. `The result generalizes`: conclusions are tested across 3 sequence encoders
-   and 5 tariff structures.
+The associated study is in progress; this README documents how to run the code and
+how the pieces fit together, not its results.
 
 ## What Is Versioned
 
@@ -60,9 +61,12 @@ are not expected to be present after cloning the repository.
 ## Using The Environment Directly
 
 The simulator is a Gymnasium-style environment implemented as
-`environment.SmartHomeEnv`. It can be used without the SAC harness, which is the
-recommended entry point for testing a new methodology such as PPO, TD3, online
-MPC, offline RL, evolutionary search, or a hand-written controller.
+`environment.SmartHomeEnv`, and it is the recommended primary entry point for
+anyone building on this work. It runs without the SAC harness, so a new
+methodology (PPO, TD3, online MPC, offline RL, evolutionary search, or a
+hand-written controller) can be plugged in directly. For comparable results,
+evaluate on the same monthly windows and tariff columns (see the comparison note
+at the end of this section).
 
 Minimal rollout:
 
@@ -434,22 +438,12 @@ A previous unstable setting used `target_entropy = -1.0`; the patched active
 final-grid configs use `target_entropy = -2.0` to avoid entropy-temperature
 explosion caused by the narrow feasible BESS action interval.
 
-## Preliminary Phase-0 Evidence
+## Ablation Campaign
 
-The ablation campaign in `sac/ablation/` was used to diagnose the original SAC
-drift story before launching the final grid.
-
-The main lesson was that single-seed conclusions were misleading:
-
-- apparent SAC drift varied strongly by seed,
-- potential-based BESS shaping reduced seed variance,
-- the shaped policy used the BESS conservatively when tariff spreads did not
-  justify aggressive cycling,
-- against the RBS-safe baseline on a representative 48 h window, the shaped
-  policy reduced cost while using substantially less BESS energy.
-
-These ablation artifacts are generated under `paper/ablation/`, which is ignored
-by git. They should be regenerated locally when needed.
+An ablation campaign lives under `sac/ablation/`; it was used during development to
+study training behavior before the final grid. Its artifacts are written under
+`paper/ablation/`, which is ignored by git, and can be regenerated locally when
+needed.
 
 ## Baselines
 
@@ -459,9 +453,9 @@ Rule-based baselines live under:
 - `baselines/RBS/`
 
 `RBS` is the safer rule-based reference used as the practical baseline for the
-money-plot comparison. It is useful for interpreting whether learned policies are
-economically better because they control better, not because they violate
-constraints that a deployable controller would respect.
+cost comparison. It helps interpret whether a controller is cheaper because it
+controls better, rather than because it violates constraints that a deployable
+controller would respect.
 
 ## Legacy Code
 
