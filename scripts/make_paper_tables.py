@@ -45,11 +45,12 @@ def mean_over(method, arch, key, mode, tariffs):
     return st.mean(vals) if len(vals) == len(tariffs) else float("nan")
 
 
-def _rb_reward():
-    """Rule-based floor: 5-tariff mean reward (encoder-independent). None if absent."""
+def _rbs_reward():
+    """Safer rule-based reference (RBS): 5-tariff mean reward (encoder-independent).
+    RBS is the practical, grid-respecting baseline reported in the paper (not the naive RB)."""
     vals = []
     for t in BASE:
-        p = ROOT / "paper" / "ablation" / "test" / "baselines" / "RB" / t / "summary_overall.json"
+        p = ROOT / "paper" / "ablation" / "test" / "baselines" / "RBS" / t / "summary_overall.json"
         if not p.exists():
             return None
         vals.append(json.load(open(p, encoding="utf-8"))[0]["mean_reward"])
@@ -101,16 +102,16 @@ def table_results():
         body.append(cells)
         csv.append(",".join(row_csv))
     # --- reference rows (encoder-independent) ---
-    # Operative comparison is RB floor vs the MILP open-loop replay (both realized in the
-    # env, same ruler as the learned policies): the perfect-foresight plan executed
-    # open-loop is WORSE than the naive rule-based controller -> closed-loop learning
+    # Operative comparison is the RBS floor vs the MILP open-loop replay (both realized in
+    # the env, same ruler as the learned policies): the perfect-foresight plan executed
+    # open-loop is WORSE than the practical rule-based controller -> closed-loop learning
     # matters. The idealized MILP objective is reported only as a loose optimistic bound
     # (perfect foresight + idealized physics: no SoC-derating, EV at normal tariff).
     ref = []
-    rb = _rb_reward()
-    if rb is not None:
-        ref.append([r"\midrule RB (rule-based, floor)"] + [f"{rb:.1f}", "--"] * 3)
-        csv.append(",".join(["RB_floor"] + [f"{rb:.2f}", "", "--"] * 3))
+    rbs = _rbs_reward()
+    if rbs is not None:
+        ref.append([r"\midrule RBS (rule-based, floor)"] + [f"{rbs:.1f}", "--"] * 3)
+        csv.append(",".join(["RBS_floor"] + [f"{rbs:.2f}", "", "--"] * 3))
     milp_ol = _milp_field("openloop_replay_mean")
     if milp_ol is not None:
         ref.append([r"MILP plan, open-loop"] + [f"{milp_ol:.1f}", "--"] * 3)
@@ -132,9 +133,9 @@ def table_results():
         r"Native violation is the safety axis: demonstration-free methods learn "
         r"intrinsically feasible policies ($\approx 0$) while CMDP+FT relies on the "
         r"projection. Reward differences within a column are within seed noise "
-        r"(Table~\ref{tab:seed}). Reference rows are encoder-independent: RB is the "
-        r"rule-based floor; \emph{MILP plan, open-loop} executes the perfect-foresight "
-        r"plan without feedback (realized in the simulator---worse than RB, so closed-loop "
+        r"(Table~\ref{tab:seed}). Reference rows are encoder-independent: RBS is the "
+        r"practical (grid-respecting) rule-based reference; \emph{MILP plan, open-loop} executes the perfect-foresight "
+        r"plan without feedback (realized in the simulator---worse than RBS, so closed-loop "
         r"control matters); \emph{MILP optimum} is the idealized objective, a loose "
         r"optimistic bound (perfect foresight, no state-dependent power derating, \gls{EV} "
         r"charged at the normal tariff), reported over the $20/24$ windows where the MILP "

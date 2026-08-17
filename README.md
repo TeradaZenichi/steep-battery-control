@@ -44,7 +44,7 @@ Important tracked paths:
 - `supervised/`: behavior-cloning training used only for the FT comparator.
 - `sac/`: current unified SAC experiment harness.
 - `baselines/`: rule-based baselines.
-- `reinforcement/`: legacy SAC implementations kept for reference.
+- `reinforcement/`: shared SAC components (`sac_cmdp`, `sac_penalty`) reused by the `sac/` harness for evaluation and the safety projection.
 - `scripts/`: auxiliary experiment and analysis scripts.
 
 Generated experiment artifacts are intentionally ignored by git. In particular,
@@ -438,13 +438,6 @@ A previous unstable setting used `target_entropy = -1.0`; the patched active
 final-grid configs use `target_entropy = -2.0` to avoid entropy-temperature
 explosion caused by the narrow feasible BESS action interval.
 
-## Ablation Campaign
-
-An ablation campaign lives under `sac/ablation/`; it was used during development to
-study training behavior before the final grid. Its artifacts are written under
-`paper/ablation/`, which is ignored by git, and can be regenerated locally when
-needed.
-
 ## Baselines
 
 Rule-based baselines live under:
@@ -457,12 +450,12 @@ cost comparison. It helps interpret whether a controller is cheaper because it
 controls better, rather than because it violates constraints that a deployable
 controller would respect.
 
-## Legacy Code
+## Code Layout
 
-The older `models/` and `reinforcement/` training paths are kept because they
-document the project history and still contain reusable components. The current
-paper grid, however, is the unified path under `sac/` plus the supervised BC
-comparators under `supervised/`.
+The current paper grid is the unified path under `sac/` plus the supervised BC
+comparators under `supervised/`. The `sac/` harness reuses shared evaluation and
+safety-projection components from `reinforcement/{sac_cmdp,sac_penalty}`, and the
+temporal encoders live under `models/{GRU,MHA,TCN}`.
 
-For new final-paper runs, prefer `sac/run_final_grid.py` or the architecture
-runners in `sac/run_final_*.py`.
+For final-paper runs, use `sac/run_final_grid.py` or the architecture runners in
+`sac/run_final_*.py`.

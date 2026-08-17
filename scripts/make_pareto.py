@@ -29,6 +29,7 @@ font_manager.fontManager.addfont(_font_path)
 _prop = font_manager.FontProperties(fname=_font_path)
 plt.rcParams["font.family"] = "Gulliver"
 plt.rcParams["font.sans-serif"] = _prop.get_name()
+plt.rcParams["svg.fonttype"] = "none"
 
 ARCHS = ["GRU", "MHA", "TCN"]
 ARCH_LABEL = {"GRU": "GRU", "MHA": "Multi-Head Attention", "TCN": "TCN"}
@@ -105,7 +106,61 @@ def pareto_seed():
     plt.close(fig)
 
 
+def pareto_ga():
+    """Single-panel graphical-abstract Pareto. One marker per method = mean over the
+    3 encoders x 5 tariffs, with error bars = std across them (the robustness spread).
+    Demonstration-free methods sit in the feasible band (native violation ~ 0); CMDP+FT
+    sits high. Editable-text SVG."""
+    fig, ax = plt.subplots(figsize=(5.2, 4.0))
+    ax.axhspan(-0.03, 0.05, color="#2ca02c", alpha=0.12, zorder=0)
+    means = {}
+    for m, lbl, c, mk in METHODS:
+        xs, ys = [], []
+        for arch in ARCHS:
+            for t in BASE:
+                rs, rr = rec(m, arch, t, "safe"), rec(m, arch, t, "raw")
+                if rs is None or rr is None:
+                    continue
+                xs.append(-rs["mean_reward"])
+                ys.append(rr["mean_grid_violation_kwh"])
+        if not xs:
+            continue
+        mx, my = st.mean(xs), st.mean(ys)
+        means[m] = (mx, my)
+        ax.errorbar(mx, my, xerr=st.pstdev(xs), yerr=st.pstdev(ys), fmt=mk, color=c,
+                    markersize=17 if mk == "*" else 11, markeredgecolor="k",
+                    markeredgewidth=0.8, ecolor=c, elinewidth=1.2, capsize=3,
+                    alpha=0.95, zorder=4, label=lbl)
+
+    # callouts placed in empty regions, arrows to the clusters
+    dq = means.get("u_cmdp_droq")
+    ft = means.get("u_cmdp_ft")
+    if dq:
+        ax.annotate("demonstration-free:\nnative violation $\\approx$ 0",
+                    xy=(dq[0], dq[1]), xytext=(0.50, 0.30), textcoords="axes fraction",
+                    fontsize=9.5, color="#2ca02c", ha="left", va="center",
+                    arrowprops=dict(arrowstyle="->", color="#2ca02c", lw=1.3))
+    if ft:
+        ax.annotate("behavior cloning:\nrelies on the projection",
+                    xy=(ft[0], ft[1]), xytext=(0.04, 0.96), textcoords="axes fraction",
+                    fontsize=9.5, color="#d62728", ha="left", va="top",
+                    arrowprops=dict(arrowstyle="->", color="#d62728", lw=1.3))
+    ax.text(0.015, 0.085, "feasible band", transform=ax.transAxes, fontsize=8,
+            color="#2ca02c", style="italic")
+    ax.set_xlabel("operating cost  (lower better)")
+    ax.set_ylabel("native grid violation [kWh]  (lower = feasible by itself)")
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="upper right", ncol=1, frameon=False, fontsize=7.5)
+    fig.text(0.5, -0.03, "each marker: mean $\\pm$ std over 3 encoders (GRU / MHA / TCN) "
+             "$\\times$ 5 tariffs", ha="center", fontsize=8, color="0.45", style="italic")
+    fig.tight_layout()
+    for ext in ("svg", "png"):
+        fig.savefig(OUT / f"ga_pareto.{ext}", bbox_inches="tight", dpi=200)
+    plt.close(fig)
+
+
 if __name__ == "__main__":
     pareto_mean()
     pareto_seed()
-    print("wrote pareto_cost_violation{,_seed}.{pdf,png} to", OUT)
+    pareto_ga()
+    print("wrote pareto_cost_violation{,_seed}.{pdf,png} and ga_pareto.{svg,png} to", OUT)

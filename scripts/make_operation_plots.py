@@ -1,12 +1,11 @@
-"""Four operation figures into paper/paper/ (Gulliver font, GRU traces).
+"""Three operation figures for the paper (Gulliver font, GRU traces).
 
   op1_projection_reliance - native grid power vs grid limits, FT vs DroQ: the
       demonstration-based policy's raw actions breach the export limit (clamped by
-      the projection); the demonstration-free policy stays feasible by itself.
-  op2_dispatch            - representative 48 h dispatch (PV/Load/Grid + BESS/EV) and
-      SoC for the demonstration-free method (DroQ).
-  op3_bess_conservative   - BESS power + SoC, DroQ vs FT: less cycling (degradation).
-  op4_tariff_adaptive     - DroQ operation across flat / ToU / sol+wind tariffs.
+      the projection); the demonstration-free policy stays feasible by itself. (fig10)
+  op3_bess_cycling        - BESS throughput per method with degradation cost. (fig16)
+  op5_structural_export   - PV surplus vs usable BESS capacity: most surplus must be
+      exported (a structural property of the system sizing). (fig17)
 """
 from __future__ import annotations
 import json
@@ -67,7 +66,8 @@ def op1():
         ax.axhline(PMAX_IMP, color="r", ls="--", lw=1)
         ax.fill_between(w.index, w["PGrid"], -PMAX_EXP, where=(w["PGrid"] < -PMAX_EXP),
                         color="r", alpha=0.35, step="mid", label="native violation")
-        v = (np.maximum(-PMAX_EXP - w["PGrid"], 0) + np.maximum(w["PGrid"] - PMAX_IMP, 0)).sum()
+        dt = (w.index[1] - w.index[0]).total_seconds() / 3600.0  # hours per step
+        v = ((np.maximum(-PMAX_EXP - w["PGrid"], 0) + np.maximum(w["PGrid"] - PMAX_IMP, 0)) * dt).sum()
         ax.set_title(f"{name}  -  native violation = {v:.2f} kWh", fontsize=10)
         ax.set_ylabel("Grid power (kW)")
         fmt_x(ax)
@@ -75,47 +75,6 @@ def op1():
     axes[1].set_xlabel("Time")
     fig.tight_layout()
     _save(fig, "op1_projection_reliance")
-
-
-# ---- dispatch helper (power + SoC) -------------------------------------------
-def _dispatch(w, title, name):
-    fig, (a0, a1) = plt.subplots(2, 1, figsize=(8, 5.4), sharex=True,
-                                 gridspec_kw=dict(height_ratios=[1.5, 1]))
-    bw = (w.index[1] - w.index[0]).total_seconds() / 86400.0 * 0.8
-    a0.step(w.index, w["PPV"], color=C["PV"], where="mid", label="PV")
-    a0.step(w.index, w["PLoad"], color=C["Load"], where="mid", label="Load")
-    a0.step(w.index, w["PGrid"], color=C["Grid"], where="mid", label="Grid")
-    a0.bar(w.index, w["PBESS"], width=bw, color=C["BESS"], alpha=0.7, label="BESS")
-    a0.bar(w.index, w["PEV"], width=bw, color=C["EV"], alpha=0.7, label="EV")
-    a0.axhline(0, color="k", lw=0.8, alpha=0.5)
-    a0.set_ylabel("Power (kW)"); a0.set_title(title)
-    a0.legend(loc="upper right", ncol=3, fontsize=8); a0.grid(True, alpha=0.3)
-    a1.step(w.index, w["SoCBESS"], color=C["BESS"], where="mid", label="SoC BESS")
-    a1.step(w.index, w["SoCEV"], color=C["EV"], where="mid", label="SoC EV")
-    a1.axhline(w["SoCBESS"].max(), ls=":", color=C["BESS"], lw=1, alpha=0.7)
-    a1.set_ylim(-0.05, 1.05); a1.set_ylabel("SoC"); a1.set_xlabel("Time")
-    a1b = a1.twinx()  # import price on the secondary axis (arbitrage logic)
-    a1b.step(w.index, w["tariff"], color="0.35", lw=1.3, ls="--", where="mid", label="import price")
-    a1b.set_ylabel("import price (€/kWh)", color="0.35")
-    a1b.tick_params(axis="y", labelcolor="0.35")
-    h1, l1 = a1.get_legend_handles_labels()
-    h2, l2 = a1b.get_legend_handles_labels()
-    a1.legend(h1 + h2, l1 + l2, loc="lower right", fontsize=8, framealpha=0.9)
-    fmt_x(a1)
-    fig.tight_layout()
-    _save(fig, name)
-
-
-def op2():
-    _dispatch(win(load("u_cmdp_droq", "tar_sw", "test_cy_03"), 48),
-              "CMDP+DroQ - 48 h dispatch (tar_sw, high-PV window)", "op2_dispatch")
-
-
-def op6():
-    df = load("u_cmdp_droq", "tar_sw", "test_wy_03")
-    w = win(df, 48, around=df["SoCBESS"].idxmax())
-    _dispatch(w, f"CMDP+DroQ - BESS charged to maximum (SoC -> {df['SoCBESS'].max():.2f}, tar_sw)",
-              "op6_bess_full_charge")
 
 
 # ---- op3: BESS cycling per method (aggregate, the year-long effect) ----------
@@ -151,24 +110,6 @@ def op3():
     ax2.set_ylabel("degradation cost (◆)")
     fig.tight_layout()
     _save(fig, "op3_bess_cycling")
-
-
-# ---- op4: tariff-adaptive -----------------------------------------------------
-def op4():
-    tariffs = [("tar_flat", "flat"), ("tar_tou", "ToU"), ("tar_sw", "sol+wind")]
-    fig, axes = plt.subplots(3, 1, figsize=(8, 6.2), sharex=True)
-    for ax, (t, lbl) in zip(axes, tariffs):
-        w = win(load("u_cmdp_droq", t, "test_cy_07"), 48)
-        bw = (w.index[1] - w.index[0]).total_seconds() / 86400.0 * 0.8
-        ax.bar(w.index, w["PBESS"], width=bw, color=C["BESS"], alpha=0.8, label="BESS")
-        ax.step(w.index, w["PGrid"], color=C["Grid"], where="mid", lw=1, label="Grid")
-        ax.axhline(0, color="k", lw=0.8, alpha=0.5)
-        ax.set_ylabel(f"{lbl}\n(kW)"); ax.grid(True, alpha=0.3)
-    axes[0].set_title("CMDP+DroQ operation across tariffs (48 h, July)")
-    axes[0].legend(loc="upper right", ncol=2, fontsize=8)
-    axes[-1].set_xlabel("Time"); fmt_x(axes[-1])
-    fig.tight_layout()
-    _save(fig, "op4_tariff_adaptive")
 
 
 # ---- op5: structural export, PV surplus vastly exceeds BESS capacity ---------
@@ -209,4 +150,4 @@ def _save(fig, name):
 
 
 if __name__ == "__main__":
-    op1(); op2(); op3(); op4(); op5(); op6()
+    op1(); op3(); op5()
